@@ -1,9 +1,10 @@
+using CompetitivePuckTweaks.src;
+using DashFallMod.Net;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using DashFallMod.Net;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -139,6 +140,18 @@ namespace DashFallMod
 
             if (_arenaInstance != null)
                 HideOriginalArenaRenderers(arenaRoot, _arenaInstance.transform);
+
+            Dictionary<string, object> message = new Dictionary<string, object> {
+                { "ArenaScaleX", scaleX * barrierScaleX },
+                { "ArenaScaleY", scaleY * barrierScaleY },
+                { "ArenaScaleZ", scaleZ * barrierScaleZ },
+                { "ArenaOffsetX", offsetX },
+                { "ArenaOffsetY", offsetY },
+                { "ArenaOffsetZ", offsetZ },
+            };
+            EventManager.TriggerEvent("Event_CompetitiveAdjustments_OnArenaSync", message);
+
+            //BoardColliderPatch.Postfix();
         }
 
         // ── Unified prefab: one instance has visuals + Colliders child ───────
