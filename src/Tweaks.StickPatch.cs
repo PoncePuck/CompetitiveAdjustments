@@ -4,6 +4,7 @@ using UnityEngine;
 namespace CompetitivePuckTweaks.src
 {
     [HarmonyPatch(typeof(Stick), "OnNetworkPostSpawn")]
+    [HarmonyPriority(Priority.High)]
     public class StickPatch
     {
         [HarmonyPostfix]
