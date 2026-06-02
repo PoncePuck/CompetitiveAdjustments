@@ -76,7 +76,7 @@ namespace CompetitiveAdjustments
         public float ArenaScaleY = 1f;
         public float ArenaScaleZ = 1f;
         public float ArenaOffsetX = 0f;
-        public float ArenaOffsetY = 0.0104f;
+        public float ArenaOffsetY = 0.0108f;
         public float ArenaOffsetZ = 0f;
         public float ArenaRotX = 90f;
         public float ArenaRotY = 180f;
