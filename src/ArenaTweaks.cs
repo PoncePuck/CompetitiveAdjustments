@@ -470,6 +470,9 @@ namespace DashFallMod
         {
             if (source == null || arenaRoot == null || cloneRoot == null) return false;
 
+            // Fix for any translation done in y to the colliders.
+            source.transform.position = new Vector3(source.transform.position.x, 0, source.transform.position.z);
+
             var cloneTransform = GetOrCreateCloneTransform(source.transform, arenaRoot, cloneRoot);
             if (cloneTransform == null) return false;
 
