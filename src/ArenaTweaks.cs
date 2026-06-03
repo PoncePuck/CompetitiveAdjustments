@@ -41,10 +41,12 @@ namespace DashFallMod
             float offsetZ,
             float rotX,
             float rotY,
-            float rotZ)
+            float rotZ,
+            float barrierScaleX,
+            float barrierScaleY,
+            float barrierScaleZ)
         {
             const float barrierRotX = 0f, barrierRotY = 0f, barrierRotZ = 0f;
-            const float barrierScaleX = 0.8f, barrierScaleY = 1f, barrierScaleZ = 0.8f;
             RefreshFrameBundleIfChanged();
             TryLoadFrameBundle();
 
@@ -140,16 +142,6 @@ namespace DashFallMod
 
             if (_arenaInstance != null)
                 HideOriginalArenaRenderers(arenaRoot, _arenaInstance.transform);
-
-            Dictionary<string, object> message = new Dictionary<string, object> {
-                { "ArenaScaleX", scaleX * barrierScaleX },
-                { "ArenaScaleY", scaleY * barrierScaleY },
-                { "ArenaScaleZ", scaleZ * barrierScaleZ },
-                { "ArenaOffsetX", offsetX },
-                { "ArenaOffsetY", offsetY },
-                { "ArenaOffsetZ", offsetZ },
-            };
-            EventManager.TriggerEvent("Event_CompetitiveAdjustments_OnArenaSync", message);
 
             //BoardColliderPatch.Postfix();
         }
