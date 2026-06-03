@@ -288,7 +288,7 @@ namespace DashFallMod
             catch { _runnerSpawned = false; }
         }
 
-        public static void RefreshAll()
+        public static void RefreshAll(bool sendOnArenaSyncEvent = false)
         {
             // Lazy-load config the first time we run as server.
             if (!_serverConfigLoaded
@@ -349,6 +349,21 @@ namespace DashFallMod
             LiveSyncArenaSourceTextures();
 
             // Skip expensive FindObjectsByType / collider work when nothing has changed.
+            if (!configChanged && !sendOnArenaSyncEvent) return;
+
+            const float barrierScaleX = 0.8f, barrierScaleY = 1f, barrierScaleZ = 0.8f;
+
+            Dictionary<string, object> message = new Dictionary<string, object> {
+                { "ArenaScaleX", arenaScaleX * barrierScaleX },
+                { "ArenaScaleY", arenaScaleY * barrierScaleZ },
+                { "ArenaScaleZ", arenaScaleZ * barrierScaleY },
+                { "ArenaOffsetX", arenaOffsetX },
+                { "ArenaOffsetY", arenaOffsetY },
+                { "ArenaOffsetZ", arenaOffsetZ },
+            };
+            EventManager.TriggerEvent("Event_CompetitiveAdjustments_OnArenaSync", message);
+
+            // Skip expensive FindObjectsByType / collider work when nothing has changed.
             if (!configChanged) return;
 
             SyncArenaVisuals(
@@ -361,7 +376,10 @@ namespace DashFallMod
                 arenaOffsetZ,
                 arenaRotX,
                 arenaRotY,
-                arenaRotZ);
+                arenaRotZ,
+                barrierScaleX,
+                barrierScaleY,
+                barrierScaleZ);
 
             foreach (var goal in UnityEngine.Object.FindObjectsByType<Goal>(FindObjectsSortMode.None))
             {
@@ -945,6 +963,15 @@ namespace DashFallMod
             string value = rendererNameOrPath;
             if (value.IndexOf("glass", StringComparison.OrdinalIgnoreCase) >= 0) return "glass";
 
+            // Window panes are glass: route them to the reflective glass treatment.
+            // Exclude framing tokens so metal window bars/frames are not treated as
+            // transparent glass (they fall through to the structure/no-match path).
+            if (value.IndexOf("window", StringComparison.OrdinalIgnoreCase) >= 0
+                && value.IndexOf("bar", StringComparison.OrdinalIgnoreCase) < 0
+                && value.IndexOf("frame", StringComparison.OrdinalIgnoreCase) < 0
+                && value.IndexOf("mullion", StringComparison.OrdinalIgnoreCase) < 0)
+                return "glass";
+
             bool hasBarrier = value.IndexOf("barrier", StringComparison.OrdinalIgnoreCase) >= 0
                 || value.IndexOf("board", StringComparison.OrdinalIgnoreCase) >= 0
                 || value.IndexOf("rail", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -1147,5 +1174,24 @@ namespace DashFallMod
         }
 
 
+    }
+
+    [HarmonyPatch(typeof(BaseGameMode<BaseGameModeConfig>), "OnGameStateChanged")]
+    public static class RefreshOnPregame {
+        [HarmonyPrefix]
+        public static bool Prefix(GameState oldGameState, GameState newGameState) {
+            try {
+                if (oldGameState.Phase == newGameState.Phase)
+                    return true;
+
+                if (newGameState.Phase == GamePhase.PreGame)
+                    GoalNetTweaks.RefreshAll(true);
+            }
+            catch (Exception ex) {
+                Debug.LogError($"[COMPADJUST] GoalNetTweaks RefreshOnPregame error: {ex.Message}");
+            }
+
+            return true;
+        }
     }
 }

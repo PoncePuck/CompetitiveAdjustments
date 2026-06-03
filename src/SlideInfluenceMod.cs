@@ -36,11 +36,16 @@ namespace DashFallMod
                 try { DashFallMod.ConfigManager.ReloadConfig(); } catch { }
             }
             
-            // Client-side: update leg visuals from received data
+            // Client-side: update leg visuals from received data.
+            // Stances runs FIRST so it can claim and clear the half-butterfly idle leg
+            // (via ClearLegForStance) before GoalieDashExtend looks at it. This mirrors
+            // the server, where stance control is established in the HandleInputs prefix
+            // before UpdateVelocityExtend runs. With the old order GoalieDashExtend could
+            // briefly apply a stale extension to the idle leg before stances claimed it.
             if (!isServer)
             {
-                GoalieDashExtend.ClientUpdateLegs(__instance);
                 Stances.ClientUpdateLegs(__instance);
+                GoalieDashExtend.ClientUpdateLegs(__instance);
                 return;
             }
             

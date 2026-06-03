@@ -83,6 +83,10 @@ namespace DashFallMod.Net
 
             ChunkSyncServer.Enable();
             ChunkSyncClient.Enable();
+            // ToasterPerformance compat: claims Server_GatherSynchronizedObjectData
+            // / Client_SynchronizeObjects at Priority.First so chunked encode/decode
+            // survives even when Toaster's full-replacement prefixes are installed.
+            SyncObjectChunkPatches.Enable();
 
             CompetitiveAdjustments.ConfigManager.Log($"Chunked network sync ACTIVE -- precision {VANILLA_PRECISION} (1.5 mm grid), chunk size {ChunkRegistry.ChunkSizeMeters} m.");
         }
@@ -90,6 +94,7 @@ namespace DashFallMod.Net
         /// <summary>Returns to vanilla precision with no chunking.</summary>
         public static void RestoreVanillaPrecision()
         {
+            SyncObjectChunkPatches.Disable();
             ChunkSyncServer.Disable();
             ChunkSyncClient.Disable();
             ChunkRegistry.ChunksActive = false;
@@ -103,6 +108,7 @@ namespace DashFallMod.Net
         {
             if (!_patched) return;
 
+            SyncObjectChunkPatches.Disable();
             ChunkSyncServer.Disable();
             ChunkSyncClient.Disable();
             ChunkRegistry.ChunksActive = false;

@@ -162,6 +162,12 @@ namespace DashFallMod
             DashMod.LastStandingDashAt.Remove(id);
             DashMod.LastJumpAt.Remove(id);
             DashMod.LastDashAt.Remove(id);
+
+            // Goalie stance + velocity-extend per-body and broadcast bookkeeping.
+            // These are keyed by the body's InstanceID / the body's NetworkObjectId,
+            // not the player's, so they are not covered by the player-id removals above.
+            try { Stances.OnBodyDespawned(__instance); } catch { }
+            try { GoalieDashExtend.OnBodyDespawned(__instance); } catch { }
         }
     }
 }

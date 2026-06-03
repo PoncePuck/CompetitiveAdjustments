@@ -276,11 +276,18 @@ namespace CompetitivePuckTweaks.src
         [HarmonyPostfix]
         public static void Postfix(PuckManager __instance, GamePhase phase) {
             try {
-                if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer || !PluginCore.config.RandomPuckDrop)
+                if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer)
                     return;
 
-                // Only override Play phase puck spawn; keep all other phases vanilla.
-                if (phase == GamePhase.Play) {
+                // Re-assert tuned puck physics for every phase. Pucks recycled
+                // across a phase transition (warmup -> play) otherwise keep vanilla
+                // mass/drag and fall out of PuckIDs, which is why the feel is right
+                // in a fresh warmup but "breaks" once a game is played.
+                foreach (Puck puck in __instance.GetPucks())
+                    PuckPatch.ApplyPuckPhysics(puck);
+
+                // Random drop only overrides the Play phase; keep other phases vanilla.
+                if (PluginCore.config.RandomPuckDrop && phase == GamePhase.Play) {
                     foreach (Puck puck in __instance.GetPucks())
                         puck.Rigidbody.AddForce(Vector3.down * UnityEngine.Random.Range(5.5f, 9f), ForceMode.VelocityChange);
                 }
