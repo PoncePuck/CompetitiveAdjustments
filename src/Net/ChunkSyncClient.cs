@@ -26,7 +26,19 @@ namespace DashFallMod.Net
     public static class ChunkSyncClient
     {
         private const float RejectThresholdMeters = 16f;
-        private const int MaxConsecutiveDrops = 5;
+
+        // Stop dropping after this many in a row so a real teleport (or a
+        // dropped announce that never recovers) doesn't freeze an object
+        // forever.  Was 5 (~50 ms @ 100 Hz) but that wasn't enough headroom
+        // on dedicated-server connections with ~100-200 ms RTT plus jitter:
+        // the cross-channel race window between an unreliable position packet
+        // beating its reliable chunk announce regularly exceeded 50 ms, the
+        // filter accepted the wrong-chunk decode, and the visual snapped by
+        // 32 m until the next correct packet.  20 ticks (~200 ms) covers
+        // typical dedicated-server RTT plus a couple retransmits while still
+        // being well under the human-noticeable freeze window on a legitimate
+        // teleport.
+        private const int MaxConsecutiveDrops = 20;
 
         private const string HarmonyId = "compadjust.chunksync.client";
 
@@ -172,7 +184,17 @@ namespace DashFallMod.Net
         private static void OnDespawnedEvent(Dictionary<string, object> msg)
         {
             if (!(msg["synchronizedObject"] is SynchronizedObject obj)) return;
-            _filter.Remove((ushort)obj.NetworkObjectId);
+            ushort id = (ushort)obj.NetworkObjectId;
+            _filter.Remove(id);
+            // Mirror ChunkSyncServer's despawn cleanup so a recycled ushort id
+            // (NetworkObjectId is ulong but we narrow it for the slot key)
+            // doesn't inherit a stale chunk offset from the previous occupant.
+            // On a pure client ChunkSyncServer never runs, so without this the
+            // registry slot lingers: the first packet for the new object
+            // decodes against the old chunk and the reject-filter "no slot"
+            // branch never engages (slot lookup succeeds with stale data
+            // instead of missing).
+            ChunkRegistry.Remove(id);
         }
 
         public static void OnChunkMessage(ulong senderId, FastBufferReader reader)

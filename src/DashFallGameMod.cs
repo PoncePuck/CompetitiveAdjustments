@@ -118,7 +118,20 @@ public sealed class DashFallGameMod
     private void OnRoleChanged(Dictionary<string, object> msg)
     {
         var player = msg?["player"] as Player;
-        if (player?.PlayerBody != null) DashMod.EnableDash(player.PlayerBody);
+        if (player?.PlayerBody == null) return;
+        DashMod.EnableDash(player.PlayerBody);
+
+        // A goalie that switches to a skater stops being ticked by the goalie leg
+        // systems (UpdateStances / UpdateVelocityExtend both bail on non-goalies)
+        // before they can broadcast their cleared state, which can strand a stale
+        // stance or extended pose on remote clients. Release explicitly on the
+        // transition away from goalie. Fires on server (notifies clients) and on
+        // clients (clears local state); a body still goalie is left untouched.
+        if (player.Role != PlayerRole.Goalie)
+        {
+            try { Stances.ReleaseStance(player.PlayerBody); } catch { }
+            try { GoalieDashExtend.ReleaseBody(player.PlayerBody); } catch { }
+        }
     }
     
     // ===== Bridge actions =====

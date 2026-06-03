@@ -31,6 +31,13 @@ namespace DashFallMod
         private static float   _originalReverbMaxDistance = -1f;
         private static bool    _loggedVanillaServerSkip;
 
+        // Vanilla board PhysicsMaterial, captured lazily from the original arena
+        // colliders so rebuilt custom boards can fall back to stock bounce when
+        // soft boards are disabled. Resolved-flag distinguishes "not looked yet"
+        // from "looked, none found".
+        private static PhysicsMaterial _vanillaBoardPhysicMaterial;
+        private static bool _vanillaBoardPhysicMaterialResolved;
+
         private static void SyncArenaVisuals(
             bool enabled,
             float scaleX,
@@ -110,6 +117,9 @@ namespace DashFallMod
                 _arenaRootInstanceId = arenaRootId;
                 _arenaAppearanceSynced = false;
                 _loggedArenaRendererMatches = false;
+                // A different arena has different board materials; drop the cache.
+                _vanillaBoardPhysicMaterial = null;
+                _vanillaBoardPhysicMaterialResolved = false;
             }
 
             // ── Unified prefab path (ArenaAndColliders) ──────────────────────
@@ -811,8 +821,13 @@ namespace DashFallMod
                 }
                 else
                 {
-                    // No source match — still clean the bundle material's shadow/reflection
-                    // keywords so the surface isn't silently rendered flat/dark.
+                    // No source match: clean the bundle material's shadow/reflection
+                    // keywords AND apply the per-part dynamic smoothness so the
+                    // surface isn't silently rendered flat/dark. Resized-rink glass
+                    // and windows rely on this to pick up environment reflections
+                    // when the vanilla arena has no equivalently-named renderer to
+                    // mirror from (otherwise they keep the bundle's flat default).
+                    float overrideSmooth = GetDynamicSmoothnessByPart(dstPart);
                     foreach (var mat in dst.materials)
                     {
                         if (mat == null) continue;
@@ -820,6 +835,8 @@ namespace DashFallMod
                         mat.DisableKeyword("_SPECULARHIGHLIGHTS_OFF");
                         mat.DisableKeyword("_ENVIRONMENTREFLECTIONS_OFF");
                         mat.DisableKeyword("_GLOSSYREFLECTIONS_OFF");
+                        if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", overrideSmooth);
+                        if (mat.HasProperty("_Glossiness")) mat.SetFloat("_Glossiness", overrideSmooth);
                     }
                 }
 
@@ -1235,6 +1252,33 @@ namespace DashFallMod
                 target.enabled = true;
                 mappedLayerCount++;
 
+                // Give the rebuilt board colliders a bouncy physic material. The
+                // name-scan BoardColliderPatch never matches these custom collider
+                // names, and the unified-prefab path creates them with no
+                // PhysicsMaterial at all, so the resized rink's boards otherwise
+                // deaden the puck instead of rebounding. When soft boards are on we
+                // apply the tuned values (server-authoritative, same as the
+                // name-scan patch); otherwise fall back to the vanilla board
+                // material so the resized rink at least matches stock bounce. Ice
+                // (bottom) colliders stay untouched.
+                if (assignedLayer == boardsLayer)
+                {
+                    bool softBoardsServer = CompetitivePuckTweaks.src.PluginCore.config.EnableSoftBoards
+                        && Unity.Netcode.NetworkManager.Singleton != null
+                        && Unity.Netcode.NetworkManager.Singleton.IsServer;
+
+                    if (softBoardsServer)
+                    {
+                        CompetitivePuckTweaks.src.BoardColliderPatch.ApplySoftBoardPhysics(target);
+                    }
+                    else if (target.sharedMaterial == null)
+                    {
+                        var vanillaBoardMat = GetVanillaBoardPhysicMaterial(arenaRoot);
+                        if (vanillaBoardMat != null)
+                            target.sharedMaterial = vanillaBoardMat;
+                    }
+                }
+
                 // Propagate the layer to all parent GameObjects up to (but not
                 // including) the colliders root so that any game code walking
                 // the hierarchy sees a consistent layer.
@@ -1259,6 +1303,37 @@ namespace DashFallMod
                     Debug.Log($"[COMPADJUST] Assigned {heuristicBottomCount} untagged collider(s) to Ice using geometry fallback.");
                 _colliderLayersSynced = true;
             }
+        }
+
+        // Find a representative vanilla board PhysicsMaterial from the original
+        // (now-disabled but still present) arena colliders. Cached after the first
+        // resolve. Returns null if the stock boards carry no explicit material, in
+        // which case bare custom colliders already match vanilla and no copy is
+        // needed. Board-side colliders resolve to part "barrier" via
+        // DetermineColliderPartKey (the board/barrier check runs before the side
+        // checks), so "barrier" covers the common case.
+        private static PhysicsMaterial GetVanillaBoardPhysicMaterial(Transform arenaRoot)
+        {
+            if (_vanillaBoardPhysicMaterialResolved) return _vanillaBoardPhysicMaterial;
+            if (arenaRoot == null) return null;
+
+            foreach (var col in arenaRoot.GetComponentsInChildren<Collider>(true))
+            {
+                if (col == null || col.sharedMaterial == null) continue;
+                if (_arenaInstance != null && (col.transform == _arenaInstance.transform || col.transform.IsChildOf(_arenaInstance.transform))) continue;
+                if (_collidersInstance != null && (col.transform == _collidersInstance.transform || col.transform.IsChildOf(_collidersInstance.transform))) continue;
+
+                string path = GetRelativeTransformPath(arenaRoot, col.transform);
+                string part = DetermineColliderPartKey((col.name ?? string.Empty) + "/" + path);
+                if (part == "left" || part == "right" || part == "front" || part == "back" || part == "top" || part == "barrier")
+                {
+                    _vanillaBoardPhysicMaterial = col.sharedMaterial;
+                    break;
+                }
+            }
+
+            _vanillaBoardPhysicMaterialResolved = true;
+            return _vanillaBoardPhysicMaterial;
         }
 
         private static void SyncArenaColliderDebugBrushes(Transform collidersRoot)

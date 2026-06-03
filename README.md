@@ -1,6 +1,6 @@
 # CompetitiveAdjustments
 
-Server-side and client-side gameplay, physics, visual, and network adjustments for **Puck (B323)**.
+Server-side and client-side gameplay, physics, visual, and network adjustments for **Puck (B897)**.
 
 Built as a BepInEx-style plugin DLL loaded from `Puck/Plugins/CompetitiveAdjustments/`. Server config is a single nested JSON; client preferences are stored per-user. Clients joining a server without this mod stay fully inert. No Harmony patches install and no visuals change.
 
@@ -36,6 +36,22 @@ Built as a BepInEx-style plugin DLL loaded from `Puck/Plugins/CompetitiveAdjustm
 - Drag tuning: speed-dependent drag, height-dependent drag.
 - Ball mode, banana mode.
 - Random puck drop, puck through bodies, puck through groin.
+
+### Puck and stick physics calibration (Puck B897)
+
+These notes record how the spawn-time overrides line up against vanilla B897, verified against the decompiled `Puck`, `Stick`, and `StickPositioner` sources. They matter because several overrides currently match vanilla exactly and so do nothing, while one deviates sharply.
+
+Overrides that match vanilla and are effectively no-ops. `PuckMaxSpeed` (30), `PuckStickTensor` (0.006, 0.002, 0.006), and `ShaftHandleProportionalGain` (500) are identical to the game's serialized defaults, so re-applying them at spawn changes nothing.
+
+`StickOnPuckInverseMass` defaults to 1.0, which is the neutral contact value. At 1.0 the puck-on-blade contact resolves with the real masses and the mod adds no grip. Lowering it below 1.0 makes the stick behave heavier in the contact, which is the lever for the "puck keeps disengaging" complaint.
+
+The puck inertia tensor is re-applied by the game every `FixedUpdate`, using the larger `stickTensor` while the puck touches a stick and the smaller `defaultTensor` (0.002 on every axis) otherwise. Tuning grip through `PuckStickTensor` is therefore live, but only takes effect while the override differs from the vanilla value.
+
+`AlterStickPositionerOutput` forces `StickPositioner.outputMin` and `outputMax` to plus or minus `StickPositionerOutputMax`. This is the PID clamp on `raycastOriginAngle`, the per second rate at which the stick aim sweeps, in other words the maximum stick swing speed. The decompiled field initializer is plus or minus 15, but the live prefab may serialize a higher value, so treat 15 as a floor reference rather than the exact vanilla number. Setting it well above the vanilla clamp removes the swing rate damping and makes the stick snappier, which can read as a looser blade and can drag the blade target through tie-ups. Tune against the actual in-game vanilla swing feel.
+
+Tie-ups are a vanilla B897 mechanic. `Stick.Server_OnCollisionStay` reduces the blade PID gain when your blade (tag "Stick Blade") contacts another stick's shaft (tag "Stick Shaft"). `DisableShaftCollision` and the stick-on-stick contact-mass branch in `Utils.cs` both interact with this, so they are the first places to look when tie-ups feel wrong.
+
+There is no friction coefficient anywhere in the B897 C#. Blade and puck friction lives on the prefab colliders in the asset bundle, so it is not a value the game or this mod sets in code.
 
 ### Physics and tuning (CompTweaks)
 - Turn acceleration, brake, and max speed for skaters and goalies.

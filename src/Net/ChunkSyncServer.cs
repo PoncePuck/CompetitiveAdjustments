@@ -32,6 +32,16 @@ namespace DashFallMod.Net
         // the wire range (+/-50 m) easily contains the further drift.
         private const int DeferTicks = 50;
 
+        // Distance from the slot's active chunk centre at which we abandon
+        // the deferred-switch path and snap with an instant-apply announce.
+        // Wire range at vanilla precision is 32767/655 ~= 50 m, so anything
+        // past ~48 m on either axis is one tick away from short overflow.
+        // Below this threshold the normal hysteresis + defer path handles
+        // the transition with no encode wrap (sprint drift during a 500 ms
+        // defer is ~7-15 m, well inside the buffer between the 20 m
+        // hysteresis trip and this 48 m teleport snap).
+        private const float TeleportSnapMeters = 48f;
+
         private const string HarmonyId = "compadjust.chunksync.server";
 
         private static Harmony _harmony;
@@ -130,8 +140,18 @@ namespace DashFallMod.Net
             ChunkRegistry.Remove((ushort)obj.NetworkObjectId);
         }
 
-        private static void InitializeSlotFor(SynchronizedObject obj)
+        // internal so SyncObjectChunkPatches can defensively initialize a
+        // missing slot during the encode loop (covers a one-frame window
+        // where vanilla's synchronizedObjects list contains a SO but our
+        // _tracked list hasn't picked it up via the spawn event yet).
+        internal static void InitializeSlotFor(SynchronizedObject obj)
         {
+            // Guard on _enabled too: SyncObjectChunkPatches.ServerGatherPrefix
+            // calls this directly during its encode loop, and that caller does
+            // not re-check the server side is live.  Without this, a slot could
+            // be created and an announce broadcast while ChunkSyncServer is
+            // meant to be off.
+            if (!_enabled || obj == null) return;
             ushort id = (ushort)obj.NetworkObjectId;
             ChunkCoord chunk = WorldToChunk(obj.transform.position);
             ChunkRegistry.ApplyAnnounce(id, chunk, ChunkRegistry.NoSwitchTickId);
@@ -168,6 +188,40 @@ namespace DashFallMod.Net
                 }
 
                 ChunkCoord active = slot.ResolveAt(tick);
+
+                // Teleport detector -- hysteresis only steps +/-1 chunk per
+                // announce, so a hard position write (TeleportPuck for aerial
+                // passes, PlayerBody.Server_Teleport for returns, etc.) that
+                // crosses multiple chunks in one frame would otherwise crawl
+                // forward 1 chunk per DeferTicks (500 ms) while every
+                // intervening encode overflows the short wire range.  The
+                // wrapped shorts decode to garbage near origin, which the
+                // client filter accepts (small delta from the previous garbage
+                // value), and the visual snaps by ~32 m every 500 ms until the
+                // slot catches up.
+                //
+                // When the object is past TeleportSnapMeters from the resolved
+                // chunk centre on either axis, the very next encode is one tick
+                // away from short overflow -- snap directly with an
+                // instant-apply announce so encoding is back inside the safe
+                // +/-50 m wire range immediately.  Normal hysteresis territory
+                // (20-48 m past centre) stays on the deferred-switch path
+                // below; we only divert when the deferred path can no longer
+                // absorb the drift.
+                float teleDx = worldPos.x - active.X * ChunkRegistry.ChunkSizeMeters;
+                float teleDz = worldPos.z - active.Z * ChunkRegistry.ChunkSizeMeters;
+                if (Mathf.Abs(teleDx) > TeleportSnapMeters
+                 || Mathf.Abs(teleDz) > TeleportSnapMeters)
+                {
+                    ChunkCoord nearest = WorldToChunk(worldPos);
+                    if (nearest != active)
+                    {
+                        ChunkRegistry.ApplyAnnounce(id, nearest, ChunkRegistry.NoSwitchTickId);
+                        BroadcastInstant(id, nearest);
+                        continue;
+                    }
+                }
+
                 ChunkCoord target = HysteresisCheck(worldPos, active);
 
                 if (target == active) continue;
