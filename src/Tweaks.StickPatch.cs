@@ -4,6 +4,7 @@ using UnityEngine;
 namespace CompetitivePuckTweaks.src
 {
     [HarmonyPatch(typeof(Stick), "OnNetworkPostSpawn")]
+    [HarmonyPriority(Priority.High)]
     public class StickPatch
     {
         [HarmonyPostfix]
@@ -36,19 +37,7 @@ namespace CompetitivePuckTweaks.src
 
             __instance.Rigidbody.mass = PluginCore.config.StickMass;
 
-            // Own-body ignore: runs regardless of DisableShaftCollision.
-            // Layer 6-8 is enabled globally when StickBodyCollision is on; this prevents self-hit.
-            if (CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true) {
-                var stickCols = __instance.GetComponentsInChildren<Collider>();
-                var bodyCols  = __instance.PlayerBody.GetComponentsInChildren<Collider>();
-
-                foreach (var sc in stickCols) {
-                    foreach (var bc in bodyCols) {
-                        if (sc != null && bc != null)
-                            Physics.IgnoreCollision(sc, bc, true);
-                    }
-                }
-            }
+            UnapplySelfStickOnBodyCollisions(__instance);
 
             if (!PluginCore.config.DisableShaftCollision)
                 return;
@@ -112,6 +101,36 @@ namespace CompetitivePuckTweaks.src
 
                 PluginCore.Dbg($"Collision ignorance updated.");
             }
+        }
+
+        public static void UnapplySelfStickOnBodyCollisions(Stick stick) {
+            // Own-body ignore: runs regardless of DisableShaftCollision.
+            // Layer 6-8 is enabled globally when StickBodyCollision is on; this prevents self-hit.
+            if (CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true) {
+                var stickCols = stick.GetComponentsInChildren<Collider>();
+                var bodyCols = stick.PlayerBody.GetComponentsInChildren<Collider>();
+
+                foreach (var sc in stickCols) {
+                    foreach (var bc in bodyCols) {
+                        if (sc != null && bc != null)
+                            Physics.IgnoreCollision(sc, bc, true);
+                    }
+                }
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(Stick), nameof(Stick.Server_Teleport))]
+    [HarmonyPriority(Priority.High)]
+    public class StickTeleportPatch {
+        [HarmonyPostfix]
+        public static void Postfix(Stick __instance, Vector3 position, Quaternion rotation) {
+            if (__instance == null) {
+                PluginCore.LogError($"Stick null on Server_Teleport");
+                return;
+            }
+
+            StickPatch.UnapplySelfStickOnBodyCollisions(__instance);
         }
     }
 

@@ -1,9 +1,10 @@
+using CompetitivePuckTweaks.src;
+using DashFallMod.Net;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using DashFallMod.Net;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -40,10 +41,12 @@ namespace DashFallMod
             float offsetZ,
             float rotX,
             float rotY,
-            float rotZ)
+            float rotZ,
+            float barrierScaleX,
+            float barrierScaleY,
+            float barrierScaleZ)
         {
             const float barrierRotX = 0f, barrierRotY = 0f, barrierRotZ = 0f;
-            const float barrierScaleX = 0.8f, barrierScaleY = 1f, barrierScaleZ = 0.8f;
             RefreshFrameBundleIfChanged();
             TryLoadFrameBundle();
 
@@ -139,6 +142,8 @@ namespace DashFallMod
 
             if (_arenaInstance != null)
                 HideOriginalArenaRenderers(arenaRoot, _arenaInstance.transform);
+
+            //BoardColliderPatch.Postfix();
         }
 
         // ── Unified prefab: one instance has visuals + Colliders child ───────
@@ -469,6 +474,9 @@ namespace DashFallMod
         private static bool TryCloneCollider(Collider source, Transform arenaRoot, Transform cloneRoot)
         {
             if (source == null || arenaRoot == null || cloneRoot == null) return false;
+
+            // Fix for any translation done in y to the colliders.
+            source.transform.position = new Vector3(source.transform.position.x, 0, source.transform.position.z);
 
             var cloneTransform = GetOrCreateCloneTransform(source.transform, arenaRoot, cloneRoot);
             if (cloneTransform == null) return false;
