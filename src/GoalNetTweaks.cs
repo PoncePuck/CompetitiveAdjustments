@@ -353,15 +353,17 @@ namespace DashFallMod
 
             const float barrierScaleX = 0.8f, barrierScaleY = 1f, barrierScaleZ = 0.8f;
 
-            Dictionary<string, object> message = new Dictionary<string, object> {
-                { "ArenaScaleX", arenaScaleX * barrierScaleX },
-                { "ArenaScaleY", arenaScaleY * barrierScaleZ },
-                { "ArenaScaleZ", arenaScaleZ * barrierScaleY },
-                { "ArenaOffsetX", arenaOffsetX },
-                { "ArenaOffsetY", arenaOffsetY },
-                { "ArenaOffsetZ", arenaOffsetZ },
-            };
-            EventManager.TriggerEvent("Event_CompetitiveAdjustments_OnArenaSync", message);
+            if (arenaEnabled) {
+                Dictionary<string, object> message = new Dictionary<string, object> {
+                    { "ArenaScaleX", arenaScaleX * barrierScaleX },
+                    { "ArenaScaleY", arenaScaleY * barrierScaleZ },
+                    { "ArenaScaleZ", arenaScaleZ * barrierScaleY },
+                    { "ArenaOffsetX", arenaOffsetX },
+                    { "ArenaOffsetY", arenaOffsetY },
+                    { "ArenaOffsetZ", arenaOffsetZ },
+                };
+                EventManager.TriggerEvent("Event_CompetitiveAdjustments_OnArenaSync", message);
+            }
 
             // Skip expensive FindObjectsByType / collider work when nothing has changed.
             if (!configChanged) return;
