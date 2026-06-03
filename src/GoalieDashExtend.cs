@@ -221,6 +221,16 @@ namespace DashFallMod
                 || Mathf.Abs(s.lastRight - rightExtension) >= SendDeltaThreshold;
             bool dueByTime = now - s.lastTime >= SendIntervalSeconds;
 
+            // Reliable delivery already latched the previous identical values on every
+            // connected client, so the time-based heartbeat only benefits late joiners.
+            // A resting (0,0) goalie needs no resend at all (clients default to no
+            // extend), so suppress the heartbeat while the value is unchanged AND at
+            // rest. Without this guard a standing goalie re-broadcast (0,0) reliably at
+            // SendIntervalSeconds (20 Hz) forever, once per non-sliding goalie.
+            bool unchanged = leftExtension == s.lastLeft && rightExtension == s.lastRight;
+            bool atRest = leftExtension == 0f && rightExtension == 0f;
+            if (unchanged && atRest) return;
+
             if (!crossedSnap && !bigDelta && !dueByTime) return;
 
             try
@@ -395,6 +405,12 @@ namespace DashFallMod
                     {
                         if (pad == null) continue;
                         int padId = pad.GetInstanceID();
+                        // Never broadcast an extension for a leg the stance system owns
+                        // (the half-butterfly idle leg). Its _currentExtension can be a
+                        // stale non-zero value left over from a prior slide, which would
+                        // tell remote clients to flare the idle leg outward even though
+                        // the server holds it idle. Leaving it at 0 sends "no extend".
+                        if (Stances.IsControlledByStance(padId)) continue;
                         if (_currentExtension.TryGetValue(padId, out float ext))
                         {
                             if (isLeft) leftCurrent = ext;
@@ -928,6 +944,37 @@ namespace DashFallMod
             ClearAll();
         }
         
+        /// <summary>
+        /// Force-clear velocity extension for one body and tell clients to drop it.
+        /// Used on role change: a goalie that becomes a skater stops being ticked by
+        /// UpdateVelocityExtend (which bails on non-goalies) before it can broadcast
+        /// the (0,0) clear, which would otherwise strand a stale extended pose on
+        /// remote clients.
+        /// </summary>
+        public static void ReleaseBody(PlayerBodyV2 body)
+        {
+            if (body == null) return;
+            var nm = NetworkManager.Singleton;
+            if (nm != null && nm.IsServer)
+            {
+                var netObj = body.GetComponent<NetworkObject>();
+                if (netObj != null) NotifyClientsExtension(netObj.NetworkObjectId, 0f, 0f);
+            }
+            ReleaseAllLegs(body);
+        }
+
+        /// <summary>
+        /// Drop body- and NetworkObjectId-keyed bookkeeping when a body despawns.
+        /// Leg-pad-keyed state is cleared separately by OnLegPadDestroyed.
+        /// </summary>
+        public static void OnBodyDespawned(PlayerBodyV2 body)
+        {
+            if (body == null) return;
+            _bodyLegPads.Remove(body.GetInstanceID());
+            var netObj = body.GetComponent<NetworkObject>();
+            if (netObj != null) _sendState.Remove(netObj.NetworkObjectId);
+        }
+
         public static void OnLegPadDestroyed(PlayerLegPad legPad)
         {
             if (legPad != null)

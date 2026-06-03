@@ -237,6 +237,15 @@ namespace DashFallMod
                 {
                     if (!isPending && !isControlled)
                     {
+                        // Drop any velocity-extend state for this leg, mirroring the
+                        // client's ClientUpdateLegs entry. Without this the server keeps
+                        // a stale non-zero _currentExtension for the now-idle leg (the
+                        // forced slide means IsSliding never drops, so ReleaseAllLegs
+                        // never zeroes it) and then broadcasts it as a phantom extension,
+                        // flaring the idle leg outward on remote clients while the server
+                        // holds it idle. Only reproduces with both systems + sliding.
+                        GoalieDashExtend.ClearLegForStance(padId);
+
                         // Leg is newly entering stance — start "pending" phase.
                         // We DON'T add to _stanceControlledLegs yet, so Update_Prefix
                         // won't override position and the game tween plays naturally.
@@ -560,36 +569,26 @@ namespace DashFallMod
 
                 if (!isPending && !isControlled)
                 {
-                    // Client visual path: snap immediately to idle control.
-                    // This avoids a brief flare when the leg was previously velocity-extended.
-                    GoalieDashExtend.ClearLegForStance(padId);
+                    // Enter the SAME pending phase the server uses in UpdateStanceLegs
+                    // rather than snapping straight to the idle pose. The pad collider
+                    // the puck reacts to is server-authoritative and the puck position is
+                    // replicated, so the rendered pad must track the server pad. Snapping
+                    // here raised the client-drawn pad to idle up to ~0.3s before the
+                    // server pad tweened there, so on remote clients the puck looked like
+                    // it hit a pad drawn somewhere else. On a host (server and client on
+                    // one machine) there is no gap, which is why it only ever looked right
+                    // there. Letting the game's native 0.15s tween play, exactly like the
+                    // server, keeps the rendered pad tracking the authoritative pad within
+                    // network latency. GoalieDashExtend yields the whole time because
+                    // IsControlledByStance is true for pending legs too.
+                    GoalieDashExtend.ClearLegForStance(padId); // drop stale velocity-extend state
                     CacheLegPositions(pad, padId);
-                    if (_legPositions.TryGetValue(padId, out var pos))
+                    _pendingControlledLegs[padId] = Time.unscaledTime;
+                    if (pad.State != PlayerLegPadState.Idle)
                     {
                         KillGameTween(pad);
-                        try
-                        {
-                            _localPositionField?.SetValue(pad, pos.idle);
-                            _lastSetPosition[padId] = pos.idle;
-                        }
-                        catch { }
+                        pad.State = PlayerLegPadState.Idle; // game plays its 0.15s tween to idle
                     }
-
-                    if (pad.State != PlayerLegPadState.Idle)
-                        pad.State = PlayerLegPadState.Idle;
-
-                    if (_legIdleRotation.TryGetValue(padId, out var entryIdleRot))
-                    {
-                        try
-                        {
-                            _localRotationField?.SetValue(pad, entryIdleRot);
-                            _lastSetRotation[padId] = entryIdleRot;
-                        }
-                        catch { }
-                    }
-
-                    _pendingControlledLegs.Remove(padId);
-                    _stanceControlledLegs.Add(padId);
                     continue;
                 }
 
@@ -881,6 +880,23 @@ namespace DashFallMod
                 _legPositions.Remove(padId);
                 _legIdleRotation.Remove(padId);
             }
+        }
+
+        /// <summary>
+        /// Drop body- and NetworkObjectId-keyed bookkeeping when a body despawns.
+        /// Leg-pad-keyed state is cleared separately by OnLegPadDestroyed; these maps
+        /// would otherwise linger until a full session teardown calls ClearAll.
+        /// </summary>
+        public static void OnBodyDespawned(PlayerBodyV2 body)
+        {
+            if (body == null) return;
+            int bodyId = body.GetInstanceID();
+            _stanceState.Remove(bodyId);
+            _bodyLegPads.Remove(bodyId);
+            _slideStartTime.Remove(bodyId);
+            _forceReleaseUntilClear.Remove(bodyId);
+            var netObj = body.GetComponent<NetworkObject>();
+            if (netObj != null) _lastBroadcast.Remove(netObj.NetworkObjectId);
         }
     }
 
