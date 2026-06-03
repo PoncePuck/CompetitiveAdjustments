@@ -17,33 +17,14 @@ namespace CompetitivePuckTweaks.src
         private const float ServerFanoutCooldown = 1f;
 
         [HarmonyPostfix]
-        public static void Postfix(Puck __instance, ref float ___maxSpeed, ref UnityEngine.Vector3 ___stickTensor)
+        public static void Postfix(Puck __instance)
         {
-            // Use synced client config (PuckScale) if available, else fall back to server config
-            float puckScale = GetSyncedPuckScale();
-            __instance.transform.localScale = new UnityEngine.Vector3(puckScale, puckScale, puckScale);
-            PluginCore.Dbg($"Puck scaled to {puckScale}");
-            ___maxSpeed = PluginCore.config.PuckMaxSpeed;
-            ___stickTensor = new UnityEngine.Vector3(PluginCore.config.PuckStickTensorX,
-                PluginCore.config.PuckStickTensorY, PluginCore.config.PuckStickTensorZ);
-            __instance.Rigidbody.linearDamping = PluginCore.config.PuckDrag;
-            __instance.Rigidbody.mass = PluginCore.config.PuckMass;
-            __instance.StickCollider.hasModifiableContacts = true;
-            __instance.IceCollider.hasModifiableContacts = true;
-            PluginCore.PuckIDs.Add(__instance.StickCollider.GetInstanceID());
-            PluginCore.PuckIDs.Add(__instance.IceCollider.GetInstanceID());
-
-            if (CompetitiveAdjustments.BallModeHelper.IsBallModeEnabled)
-                CompetitiveAdjustments.BallModeHelper.TransformPuckToBall(__instance);
-
-            if (PluginCore.config.EnableMidStickCollider)
-            {
-                foreach (Stick stick in UnityEngine.Object.FindObjectsByType<Stick>(FindObjectsSortMode.None))
-                {
-                    Physics.IgnoreCollision(__instance.StickCollider, stick.GetComponent<BoxCollider>());
-                    Physics.IgnoreCollision(__instance.IceCollider, stick.GetComponent<BoxCollider>());
-                }
-            }
+            // Apply the full tuned puck physics. Extracted into ApplyPuckPhysics
+            // so the PuckManager phase-spawn postfix can re-assert it when a game
+            // starts; recycled pucks otherwise revert to vanilla mass/bounciness
+            // and drop out of PuckIDs (feels right in a fresh warmup, breaks once
+            // a game is played).
+            ApplyPuckPhysics(__instance);
 
             // Timing guard: send latest config sync when a puck spawns on server.
             // This heals missed join-time sync and keeps client puck scale consistent.
@@ -66,6 +47,49 @@ namespace CompetitivePuckTweaks.src
             else if (nm != null && nm.IsClient)
             {
                 CompetitiveCompanion.PluginCore.RequestConfigSyncFromServer("PuckSpawn");
+            }
+        }
+
+        /// <summary>
+        /// Apply every tuned puck property (scale, max speed, stick tensor, drag,
+        /// mass, contact-modification flags and PuckIDs registration). Idempotent,
+        /// so it is safe to call both at spawn (OnNetworkPostSpawn) and again on
+        /// every phase change via PuckManager.Server_SpawnPucksForPhase. The
+        /// private maxSpeed / stickTensor fields are written through Traverse so
+        /// this can run outside the Harmony patch's ref-parameter context.
+        /// </summary>
+        public static void ApplyPuckPhysics(Puck puck)
+        {
+            if (puck == null) return;
+
+            float puckScale = GetSyncedPuckScale();
+            puck.transform.localScale = new UnityEngine.Vector3(puckScale, puckScale, puckScale);
+            PluginCore.Dbg($"Puck scaled to {puckScale}");
+
+            Traverse.Create(puck).Field("maxSpeed").SetValue(PluginCore.config.PuckMaxSpeed);
+            Traverse.Create(puck).Field("stickTensor").SetValue(new UnityEngine.Vector3(
+                PluginCore.config.PuckStickTensorX, PluginCore.config.PuckStickTensorY, PluginCore.config.PuckStickTensorZ));
+
+            puck.Rigidbody.linearDamping = PluginCore.config.PuckDrag;
+            puck.Rigidbody.mass = PluginCore.config.PuckMass;
+            puck.StickCollider.hasModifiableContacts = true;
+            puck.IceCollider.hasModifiableContacts = true;
+
+            int stickColId = puck.StickCollider.GetInstanceID();
+            int iceColId = puck.IceCollider.GetInstanceID();
+            if (!PluginCore.PuckIDs.Contains(stickColId)) PluginCore.PuckIDs.Add(stickColId);
+            if (!PluginCore.PuckIDs.Contains(iceColId)) PluginCore.PuckIDs.Add(iceColId);
+
+            if (CompetitiveAdjustments.BallModeHelper.IsBallModeEnabled)
+                CompetitiveAdjustments.BallModeHelper.TransformPuckToBall(puck);
+
+            if (PluginCore.config.EnableMidStickCollider)
+            {
+                foreach (Stick stick in UnityEngine.Object.FindObjectsByType<Stick>(FindObjectsSortMode.None))
+                {
+                    Physics.IgnoreCollision(puck.StickCollider, stick.GetComponent<BoxCollider>());
+                    Physics.IgnoreCollision(puck.IceCollider, stick.GetComponent<BoxCollider>());
+                }
             }
         }
 

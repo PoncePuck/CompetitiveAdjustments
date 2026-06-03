@@ -963,6 +963,15 @@ namespace DashFallMod
             string value = rendererNameOrPath;
             if (value.IndexOf("glass", StringComparison.OrdinalIgnoreCase) >= 0) return "glass";
 
+            // Window panes are glass: route them to the reflective glass treatment.
+            // Exclude framing tokens so metal window bars/frames are not treated as
+            // transparent glass (they fall through to the structure/no-match path).
+            if (value.IndexOf("window", StringComparison.OrdinalIgnoreCase) >= 0
+                && value.IndexOf("bar", StringComparison.OrdinalIgnoreCase) < 0
+                && value.IndexOf("frame", StringComparison.OrdinalIgnoreCase) < 0
+                && value.IndexOf("mullion", StringComparison.OrdinalIgnoreCase) < 0)
+                return "glass";
+
             bool hasBarrier = value.IndexOf("barrier", StringComparison.OrdinalIgnoreCase) >= 0
                 || value.IndexOf("board", StringComparison.OrdinalIgnoreCase) >= 0
                 || value.IndexOf("rail", StringComparison.OrdinalIgnoreCase) >= 0;

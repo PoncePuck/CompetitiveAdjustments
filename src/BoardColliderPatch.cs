@@ -76,7 +76,7 @@ namespace CompetitivePuckTweaks.src
             PluginCore.Log($"Found {foundBoardColliders.Count} board colliders to modify");
         }
 
-        private static void ApplySoftBoardPhysics(Collider collider)
+        public static void ApplySoftBoardPhysics(Collider collider)
         {
             PhysicsMaterial mat = collider.material;
             if (mat == null)
