@@ -554,7 +554,6 @@ namespace PoncePuck.Keybinds
         {
             if (_cmm == null) return;
             if (!CompetitiveAdjustments.AdminAuth.AssertNoCredentials(wireJson)) return;
-            CompetitiveAdjustments.ConfigManager.Log($"Sending config edit to server ({(wireJson != null ? wireJson.Length : 0)} chars).");
             SendStringInParts("PPKB/AdminConfigSet", NetworkManager.ServerClientId, wireJson);
         }
 
@@ -592,7 +591,6 @@ namespace PoncePuck.Keybinds
 
             string json = cfg.SerializeForWire();
             if (!CompetitiveAdjustments.AdminAuth.AssertNoCredentials(json)) return; // never leak creds (already logged)
-            CompetitiveAdjustments.ConfigManager.Log($"Sending full config to client {clientId} ({json.Length} chars).");
             SendStringInParts("PPKB/ConfigFull", clientId, json);
         }
 
@@ -635,7 +633,6 @@ namespace PoncePuck.Keybinds
             if (nm == null || !nm.IsServer) return;
             try
             {
-                CompetitiveAdjustments.ConfigManager.Log($"ConfigReq received from client {senderId}.");
                 SendConfigFullToClient(senderId);
             }
             catch (Exception e) { Debug.LogError($"[COMPADJUST] OnConfigReqMsg exception: {e}"); }
@@ -720,11 +717,9 @@ namespace PoncePuck.Keybinds
                 reader.ReadValueSafe(out total);
                 reader.ReadValueSafe(out index);
                 reader.ReadValueSafe(out chunk);
-                CompetitiveAdjustments.ConfigManager.Log($"AdminConfigSet chunk {index + 1}/{total} from client {senderId}.");
 
                 string json = _configSetRx.Feed(senderId, total, index, chunk);
                 if (json == null) return; // awaiting more parts
-                CompetitiveAdjustments.ConfigManager.Log($"AdminConfigSet reassembled ({json.Length} chars) from client {senderId}; authed={_authedClients.Contains(senderId)}.");
 
                 // Defense in depth: re-validate authority, never trust the client UI lock.
                 if (!_authedClients.Contains(senderId))
@@ -783,7 +778,6 @@ namespace PoncePuck.Keybinds
                 // apply hooks unless this process is the server.
                 CompetitiveAdjustments.ConfigManager.LoadFromJson(json);
                 HasReceivedFullConfig = true;
-                CompetitiveAdjustments.ConfigManager.Log($"Received full server config ({json.Length} chars).");
                 OnFullConfigReceived?.Invoke();
             }
             catch (Exception e) { Debug.LogError($"[COMPADJUST] OnConfigFullMsg exception: {e}"); }

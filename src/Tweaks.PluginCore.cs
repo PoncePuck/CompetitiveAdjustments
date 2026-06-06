@@ -800,11 +800,16 @@ namespace CompetitivePuckTweaks.src
                 // The collider toggles above (mc.enabled false then true) drop
                 // Unity's Physics.IgnoreCollision pairs, including the
                 // stick-vs-own-body ignore that StickPatch sets at stick spawn.
-                // Re-arm it for every live stick so a torso refresh (any config
-                // apply or /reload) never lets a player's own stick start hitting
-                // their own body while StickBodyCollision is on.
-                foreach (var stick in UnityEngine.Object.FindObjectsByType<Stick>(FindObjectsSortMode.None))
-                    StickPatch.UnapplySelfStickOnBodyCollisions(stick);
+                // Re-arm it for every live stick so a torso refresh never lets a
+                // player's own stick start hitting their own body.  Gated on the
+                // feature so the scene scan is skipped entirely when stick-on-body
+                // is off: this method also runs on clients on every config sync
+                // (RefreshTorsoVisualsForClient), so it must stay cheap when idle.
+                if (CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true)
+                {
+                    foreach (var stick in UnityEngine.Object.FindObjectsByType<Stick>(FindObjectsSortMode.None))
+                        StickPatch.UnapplySelfStickOnBodyCollisions(stick);
+                }
             }
             catch (Exception e)
             {
