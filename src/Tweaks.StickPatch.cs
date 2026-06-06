@@ -106,6 +106,9 @@ namespace CompetitivePuckTweaks.src
         public static void UnapplySelfStickOnBodyCollisions(Stick stick) {
             // Own-body ignore: runs regardless of DisableShaftCollision.
             // Layer 6-8 is enabled globally when StickBodyCollision is on; this prevents self-hit.
+            // Safe to call for any stick (e.g. the re-arm in RefreshPlayerTorsoStates):
+            // a stick without an assigned body has nothing to ignore yet.
+            if (stick == null || stick.PlayerBody == null) return;
             if (CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true) {
                 var stickCols = stick.GetComponentsInChildren<Collider>();
                 var bodyCols = stick.PlayerBody.GetComponentsInChildren<Collider>();
