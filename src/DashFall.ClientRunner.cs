@@ -68,6 +68,10 @@ namespace DashFallMod.Client
 
             // Subscribe to server features received event to refresh UI and apply settings
             PoncePuck.Keybinds.ServerBridge.OnFeaturesReceived += OnServerFeaturesReceived;
+            // Admin config editor: refresh the SERVER tab when the full config
+            // mirror or the auth/apply status changes.
+            PoncePuck.Keybinds.ServerBridge.OnFullConfigReceived += OnFullConfigReceived;
+            PoncePuck.Keybinds.ServerBridge.OnAdminAuthResult += OnAdminAuthResult;
 
             EventManager.AddEventListener("Event_Everyone_OnLevelSpawned", OnLevelSpawnedForMinimap);
             if (Unity.Netcode.NetworkManager.Singleton != null)
@@ -254,6 +258,8 @@ namespace DashFallMod.Client
             try
             {
                 PoncePuck.Keybinds.ServerBridge.OnFeaturesReceived -= OnServerFeaturesReceived;
+                PoncePuck.Keybinds.ServerBridge.OnFullConfigReceived -= OnFullConfigReceived;
+                PoncePuck.Keybinds.ServerBridge.OnAdminAuthResult -= OnAdminAuthResult;
                 EventManager.RemoveEventListener("Event_Everyone_OnLevelSpawned", OnLevelSpawnedForMinimap);
                 if (Unity.Netcode.NetworkManager.Singleton != null)
                     Unity.Netcode.NetworkManager.Singleton.OnClientStopped -= OnClientStopped;
@@ -301,6 +307,19 @@ namespace DashFallMod.Client
                         RefreshRole();
                         EnsurePositionSelectHook();
                     }
+                }
+
+                // Only while the player is actually viewing the SERVER tab,
+                // re-request the full config until it arrives (the one-shot Hello
+                // push can be missed). Gated to the open tab so idle clients never
+                // poll for a config they are not looking at.
+                if (nm != null && nm.IsConnectedClient && !nm.IsServer && _cmm != null
+                    && IsServerTabOpen()
+                    && !PoncePuck.Keybinds.ServerBridge.HasReceivedFullConfig
+                    && Time.unscaledTime >= _nextConfigReqRetry)
+                {
+                    _nextConfigReqRetry = Time.unscaledTime + 2f;
+                    PoncePuck.Keybinds.ServerBridge.RequestConfigFull();
                 }
                 
                 // Periodically refresh role detection

@@ -1301,6 +1301,8 @@ namespace DashFallMod
                 Debug.Log($"[COMPADJUST] Custom arena colliders ready: {customCount} colliders, {mappedLayerCount} layer-matched by part.");
                 if (heuristicBottomCount > 0)
                     Debug.Log($"[COMPADJUST] Assigned {heuristicBottomCount} untagged collider(s) to Ice using geometry fallback.");
+                if (IsArenaColliderDebugEnabled())
+                    LogArenaColliderHeights(customCollidersRoot);
                 _colliderLayersSynced = true;
             }
         }
@@ -1470,7 +1472,40 @@ namespace DashFallMod
         public static void RefreshArenaColliderBrushes()
         {
             if (_collidersInstance != null)
+            {
                 SyncArenaColliderDebugBrushes(_collidersInstance.transform);
+                if (IsArenaColliderDebugEnabled())
+                    LogArenaColliderHeights(_collidersInstance.transform);
+            }
+        }
+
+        // Dev diagnostic: dump every arena collider's world-space Y extents so the
+        // real (post scale + offset) board/barrier heights can be read directly
+        // instead of guessing from vanilla rink numbers. Barriers are the clones
+        // under __originalBarrierOverrides; everything else is a board/ice piece
+        // (the custom SubMesh_N mesh colliders from Colliders.fbx). Gated behind the
+        // ShowArenaClipBrushes debug toggle by its callers, so it is silent in
+        // normal play and re-emits when the toggle is flipped on or the arena rebuilds.
+        internal static void LogArenaColliderHeights(Transform collidersRoot)
+        {
+            if (collidersRoot == null) return;
+
+            Transform barrierOverrides = collidersRoot.Find("__originalBarrierOverrides");
+            var cols = collidersRoot.GetComponentsInChildren<Collider>(true);
+            Debug.Log($"[COMPADJUST] Arena collider height dump: {cols.Length} colliders under '{collidersRoot.name}' (world-space Y).");
+            foreach (var col in cols)
+            {
+                if (col == null) continue;
+                if (string.Equals(col.gameObject.name, "__clipBrush", StringComparison.Ordinal)) continue;
+
+                bool isBarrier = barrierOverrides != null
+                    && (col.transform == barrierOverrides || col.transform.IsChildOf(barrierOverrides));
+                Bounds b = col.bounds;
+                string layer = LayerMask.LayerToName(col.gameObject.layer);
+                Debug.Log($"[COMPADJUST]   {(isBarrier ? "BARRIER" : "board  ")} '{col.name}' layer={layer} " +
+                          $"y[min={b.min.y:F3} max={b.max.y:F3} center={b.center.y:F3} height={b.size.y:F3}] " +
+                          $"x[{b.min.x:F2}..{b.max.x:F2}] z[{b.min.z:F2}..{b.max.z:F2}]");
+            }
         }
 
         private static Material GetArenaColliderDebugMaterial()

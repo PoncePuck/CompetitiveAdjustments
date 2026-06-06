@@ -5,6 +5,9 @@ namespace CompetitivePuckTweaks.src
     public struct ConfigSyncPackage : INetworkSerializable
     {
         public float PuckScale;
+        public float PuckScaleX;
+        public float PuckScaleY;
+        public float PuckScaleZ;
         public float LegPadOffset;
         public uint BoolFlags;
         public float TorsoScaleX;
@@ -16,6 +19,9 @@ namespace CompetitivePuckTweaks.src
         public ConfigSyncPackage(CompetitiveAdjustments.CompTweaksConfig c, CompetitiveAdjustments.CompAdjustConfig df = null)
         {
             PuckScale = c.PuckScale;
+            PuckScaleX = c.PuckScaleX;
+            PuckScaleY = c.PuckScaleY;
+            PuckScaleZ = c.PuckScaleZ;
             LegPadOffset = c.ButterflyPadOffset;
             BoolFlags = PackBools(c, df);
             TorsoScaleX = df?.CustomTorsoScaleX ?? 1f;
@@ -28,6 +34,9 @@ namespace CompetitivePuckTweaks.src
         public void NetworkSerialize<T>(BufferSerializer<T> serializer) where T : IReaderWriter
         {
             serializer.SerializeValue(ref PuckScale);
+            serializer.SerializeValue(ref PuckScaleX);
+            serializer.SerializeValue(ref PuckScaleY);
+            serializer.SerializeValue(ref PuckScaleZ);
             serializer.SerializeValue(ref LegPadOffset);
             serializer.SerializeValue(ref BoolFlags);
             serializer.SerializeValue(ref TorsoScaleX);

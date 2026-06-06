@@ -20,6 +20,11 @@ namespace DashFallMod.Client
         private UITK.Label _captureLabel;
         private UITK.ScrollView _scrollView;
         private UITK.VisualElement _actionsSection;
+
+        // Search/filter: a persistent box above the scroll view that hides rows on
+        // the active tab whose label does not contain the query.
+        private UITK.TextField _searchField;
+        private string _searchQuery = "";
         
         // Tab system
         private UITK.Button _skaterTabBtn;
@@ -28,6 +33,14 @@ namespace DashFallMod.Client
         private UITK.Button _settingsTabBtn;
         private enum ActiveTab { Skater, Goalie, Server, Settings }
         private ActiveTab _activeTab = ActiveTab.Skater;
+
+        // Admin config editor (SERVER tab) state
+        private bool _serverAutoAuthSent;   // empty-password auto-unlock attempted this panel session
+        private bool _serverUserLocked;     // user pressed LOCK to drop back to read-only locally
+        private string _serverStatusText = ""; // transient status under the lock bar
+        private bool _serverPasswordRevealed; // host pressed SHOW to reveal the editor password
+        private bool _serverResetArmed;       // RESET pressed once; waiting for the confirm press
+        private CompetitiveAdjustments.ServerConfig _serverEditCfg; // isolated editor copy; null = re-clone from live
         
         private Action<string> _onChordCaptured;
         private bool _panelHiddenForCapture;
@@ -73,6 +86,59 @@ namespace DashFallMod.Client
             ForceUIFont(b);
         }
 
+        // PoncePlayerInput / PlayerQOL toggle look: recolor the checkbox frame to
+        // a dark fill with a medium-gray border so it reads clearly against the
+        // dark rows.  The default Unity USS draws a light box that disappears
+        // against this panel, which is why the SERVER toggles looked blank.
+        // Applied on AttachToPanel because the inner ".unity-toggle__input"
+        // element only exists once the toggle is parented.
+        private static void StyleConfigCheckbox(UITK.Toggle toggle)
+        {
+            if (toggle == null) return;
+            toggle.RegisterCallback<UITK.AttachToPanelEvent>(_ =>
+            {
+                var input = toggle.Q(className: "unity-toggle__input");
+                if (input == null) return;
+                input.style.backgroundColor   = new UITK.StyleColor(new Color(0.15f, 0.15f, 0.15f));
+                input.style.borderTopColor    = new UITK.StyleColor(new Color(0.4f, 0.4f, 0.4f));
+                input.style.borderBottomColor = new UITK.StyleColor(new Color(0.4f, 0.4f, 0.4f));
+                input.style.borderLeftColor   = new UITK.StyleColor(new Color(0.4f, 0.4f, 0.4f));
+                input.style.borderRightColor  = new UITK.StyleColor(new Color(0.4f, 0.4f, 0.4f));
+            });
+        }
+
+        // Tags a row so the SEARCH box can show/hide it by its label text.  The
+        // searchable text is stored in userData; the "cfg-row" class lets
+        // ApplySearchFilter collect every row regardless of which tab or container
+        // built it.
+        private static void MarkSearchable(UITK.VisualElement row, string title)
+        {
+            if (row == null) return;
+            row.userData = title ?? "";
+            row.AddToClassList("cfg-row");
+        }
+
+        // Filters the active tab's rows by the SEARCH query.  An empty query shows
+        // everything; a non-empty query hides non-matching rows and the section
+        // headers, so the results read as one flat list.  Re-run after every
+        // BuildActionsUI so a rebuilt tab keeps the current filter.
+        private void ApplySearchFilter()
+        {
+            if (_actionsSection == null) return;
+            string q = (_searchQuery ?? "").Trim().ToLowerInvariant();
+            bool searching = q.Length > 0;
+
+            foreach (var row in _actionsSection.Query(className: "cfg-row").ToList())
+            {
+                string title = (row.userData as string ?? "").ToLowerInvariant();
+                bool match = !searching || title.Contains(q);
+                row.style.display = match ? UITK.DisplayStyle.Flex : UITK.DisplayStyle.None;
+            }
+
+            foreach (var header in _actionsSection.Query(className: "cfg-header").ToList())
+                header.style.display = searching ? UITK.DisplayStyle.None : UITK.DisplayStyle.Flex;
+        }
+
         // ========== PANEL BUILD ==========
         private void BuildDashFallPanel()
         {
@@ -114,7 +180,7 @@ namespace DashFallMod.Client
             _dfPanel.style.flexDirection = UITK.FlexDirection.Column;
             _dfPanel.style.backgroundColor = new UITK.StyleColor(PanelBg);
             _dfPanel.style.paddingLeft = 8; _dfPanel.style.paddingRight = 8;
-            _dfPanel.style.paddingTop = 8; _dfPanel.style.paddingBottom = 12;
+            _dfPanel.style.paddingTop = 8; _dfPanel.style.paddingBottom = 8;
             _dfPanel.style.display = UITK.DisplayStyle.None;
             _dfPanel.pickingMode = UITK.PickingMode.Position;
             _dfPanel.RegisterCallback<UITK.PointerUpEvent>(e => e.StopPropagation());
@@ -129,19 +195,62 @@ namespace DashFallMod.Client
             // Tab bar
             var tabBar = new UITK.VisualElement();
             tabBar.style.flexDirection = UITK.FlexDirection.Row;
-            tabBar.style.marginBottom = 26;
+            tabBar.style.marginBottom = 8;
             tabBar.style.height = 50;
 
             _skaterTabBtn = MakeTabButton("SKATER", true, () => SwitchToTab(ActiveTab.Skater));
             _goalieTabBtn = MakeTabButton("GOALIE", false, () => SwitchToTab(ActiveTab.Goalie));
             _serverTabBtn = MakeTabButton("SERVER", false, () => SwitchToTab(ActiveTab.Server));
             _settingsTabBtn = MakeTabButton("SETTINGS", false, () => SwitchToTab(ActiveTab.Settings));
-            
+            // MakeTabButton gives every tab an 8px right margin for spacing; the
+            // last tab must not, or SETTINGS sits 8px off the right edge while
+            // SKATER hugs the left.  Zero it so both ends are flush.
+            _settingsTabBtn.style.marginRight = 0;
+
             tabBar.Add(_skaterTabBtn);
             tabBar.Add(_goalieTabBtn);
             tabBar.Add(_serverTabBtn);
             tabBar.Add(_settingsTabBtn);
             _dfPanel.Add(tabBar);
+
+            // Search box: filters the rows on the active tab by label text.  It
+            // sits above the scroll view so it stays put while the list scrolls.
+            // Styled as a row (RowBg + 12px inset) so SEARCH lines up with the
+            // row labels below it instead of sitting flush against the panel edge.
+            var searchRow = new UITK.VisualElement();
+            searchRow.style.flexDirection = UITK.FlexDirection.Row;
+            searchRow.style.alignItems = UITK.Align.Center;
+            searchRow.style.flexShrink = 0;
+            searchRow.style.height = 50;
+            searchRow.style.marginBottom = 8;
+            searchRow.style.paddingLeft = 12;
+            searchRow.style.paddingRight = 12;
+            searchRow.style.backgroundColor = new UITK.StyleColor(RowBg);
+            searchRow.style.borderTopLeftRadius = 4;
+            searchRow.style.borderTopRightRadius = 4;
+            searchRow.style.borderBottomLeftRadius = 4;
+            searchRow.style.borderBottomRightRadius = 4;
+
+            var searchLabel = new UITK.Label("SEARCH");
+            searchLabel.style.fontSize = 18;
+            searchLabel.style.marginRight = 8;
+            MakeReadable(searchLabel);
+            searchRow.Add(searchLabel);
+
+            _searchField = new TextField();
+            _searchField.value = _searchQuery;
+            _searchField.style.flexGrow = 1;
+            _searchField.style.height = 34;
+            _searchField.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
+            _searchField.style.color = Color.white;
+            ForceUIFont(_searchField);
+            _searchField.RegisterValueChangedCallback(e =>
+            {
+                _searchQuery = e.newValue ?? "";
+                ApplySearchFilter();
+            });
+            searchRow.Add(_searchField);
+            _dfPanel.Add(searchRow);
 
             // Scroll view for content
             _scrollView = new UITK.ScrollView
@@ -150,6 +259,12 @@ namespace DashFallMod.Client
                 horizontalScrollerVisibility = UITK.ScrollerVisibility.Hidden
             };
             _scrollView.style.flexGrow = 1;
+            // A flex item's default min-height is its content size, so a long list
+            // keeps the scroll view tall and pushes the footer past the panel's
+            // clipped bottom (the buttons then overlap the window edge).  Pin
+            // min-height to 0 so the scroll view shrinks and the footer stays in.
+            _scrollView.style.flexShrink = 1;
+            _scrollView.style.minHeight = 0;
             _dfPanel.Add(_scrollView);
 
             _actionsSection = new UITK.VisualElement();
@@ -164,7 +279,7 @@ namespace DashFallMod.Client
                     b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
                     b.style.height = 50;
                     b.style.marginTop = 8;
-                    b.style.marginBottom = 8;
+                    b.style.marginBottom = 0;
                     b.style.paddingLeft = 18; b.style.paddingRight = 18;
                     b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
                     MakeReadable(b);
@@ -177,9 +292,9 @@ namespace DashFallMod.Client
                     b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
                     b.style.height = 50;
                     b.style.marginTop = 8;
-                    b.style.marginBottom = 22;
+                    b.style.marginBottom = 0;
                     b.style.paddingLeft = 18; b.style.paddingRight = 18;
-                    b.style.marginLeft = 238;
+                    b.style.marginRight = 8;
                     b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
                     MakeReadable(b);
                     AddButtonFlash(b);
@@ -191,9 +306,8 @@ namespace DashFallMod.Client
                     b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
                     b.style.height = 50;
                     b.style.marginTop = 8;
-                    b.style.marginBottom = 22;
-                    b.style.paddingLeft = 18; b.style.paddingRight = 182;
-                    b.style.marginLeft = 8;
+                    b.style.marginBottom = 0;
+                    b.style.paddingLeft = 18; b.style.paddingRight = 18;
                     b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
                     MakeReadable(b);
                     AddButtonFlash(b);
@@ -221,10 +335,17 @@ namespace DashFallMod.Client
                 CloseDashFallPanel();
             });
 
-            // Button row at bottom
+            // Button row at bottom: COFFEE hugs the left, RESET + CLOSE hug the
+            // right.  A flex spacer (rather than fixed margins) keeps CLOSE flush
+            // to the panel's right inner edge at any panel width.
             var buttonRow = new UITK.VisualElement();
             buttonRow.style.flexDirection = UITK.FlexDirection.Row;
+            buttonRow.style.alignItems = UITK.Align.Center;
+            buttonRow.style.flexShrink = 0;   // footer keeps its size; the list shrinks instead
             buttonRow.Add(donate);
+            var footerSpacer = new UITK.VisualElement();
+            footerSpacer.style.flexGrow = 1;
+            buttonRow.Add(footerSpacer);
             buttonRow.Add(resetBtn);
             buttonRow.Add(closeBtn);
             _dfPanel.Add(buttonRow);
@@ -242,7 +363,10 @@ namespace DashFallMod.Client
             btn.style.paddingLeft = 8;
             btn.style.paddingRight = 8;
             btn.style.marginRight = 8;
-            btn.style.marginBottom = 26;
+            // Spacing below the tab strip is owned by tabBar.marginBottom; the
+            // button keeps no bottom margin of its own (it used to stack a second
+            // gap and bleed past the strip into the search row).
+            btn.style.marginBottom = 0;
             btn.style.fontSize = 24;
             btn.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
             btn.style.borderTopLeftRadius = 6;
@@ -280,6 +404,7 @@ namespace DashFallMod.Client
 
         private void SwitchToTab(ActiveTab tab)
         {
+            _serverResetArmed = false; // leaving the tab cancels a pending reset confirm
             _activeTab = tab;
             UpdateTabStyles();
             RefreshActionsUI();
@@ -397,14 +522,22 @@ namespace DashFallMod.Client
                 // Settings tab
                 BuildSettingsUI();
             }
+
+            // Re-apply the active search filter to the freshly built rows.
+            ApplySearchFilter();
         }
 
+        // Reflection-driven, admin-gated live editor for the whole server config.
+        // Edits mutate the local ConfigManager.Config mirror only; nothing leaves
+        // this client until SAVE & APPLY.  Non-admins see the same editor greyed
+        // out behind a lock bar.
         private void BuildServerConfigUI()
         {
-            var features = PoncePuck.Keybinds.ServerBridge.ReceivedFeatures;
             bool hasFeatures = PoncePuck.Keybinds.ServerBridge.HasReceivedFeatures;
+            var nm = Unity.Netcode.NetworkManager.Singleton;
+            bool isServer = nm != null && nm.IsServer;
 
-            if (!hasFeatures)
+            if (!hasFeatures && !isServer)
             {
                 var noDataLabel = new UITK.Label("Not connected to a server with CompetitiveAdjustments.");
                 noDataLabel.style.fontSize = 24;
@@ -416,89 +549,431 @@ namespace DashFallMod.Client
                 return;
             }
 
-            // --- DashFall Feature Flags ---
-            AddSectionHeader("DASHFALL FLAGS");
+            // The host is server-authoritative; a remote client is unlocked once
+            // the server granted it.  A local LOCK press forces read-only.
+            bool authed = isServer || PoncePuck.Keybinds.ServerBridge.AdminUnlocked;
+            bool unlocked = authed && !_serverUserLocked;
 
-            AddSubHeader("SKATER");
-            // _actionsSection.Add(MakeServerConfigRow("Dash", features.SkaterDashEnabled));
-            _actionsSection.Add(MakeServerConfigRow("Dive", features.SkaterDiveEnabled));
-            _actionsSection.Add(MakeServerConfigRow("Twist While Sliding", features.SkaterTwistEnabled));
-            _actionsSection.Add(MakeServerConfigRow("Slide Influence", features.SkaterSlideInfluenceEnabled));
-
-            AddSubHeader("GOALIE");
-            _actionsSection.Add(MakeServerConfigRow("Dive", features.GoalieDiveEnabled));
-            _actionsSection.Add(MakeServerConfigRow("Standing Dash", features.GoalieStandingDashEnabled));
-            _actionsSection.Add(MakeServerConfigRow("Twist While Sliding", features.GoalieTwistEnabled));
-            _actionsSection.Add(MakeServerConfigRow("Slide Influence", features.GoalieSlideInfluenceEnabled));
-            _actionsSection.Add(MakeServerConfigRow("Dash Extend", features.GoalieDashExtendEnabled));
-            _actionsSection.Add(MakeServerConfigRow("Stances", features.GoalieStancesEnabled));
-
-            AddSectionHeader("COMPADJUST FLAGS");
-            _actionsSection.Add(MakeServerConfigRow("Sprint Shoulder Trail", features.SprintShoulderTrailEnabled));
-            _actionsSection.Add(MakeServerConfigRow("Skater Torso Adjustments", CompetitiveAdjustments.ConfigManager.Config.CompAdjust.EnableCustomSkaterTorsoModel));
-            _actionsSection.Add(MakeServerConfigRow("Disable Torso Model", CompetitiveAdjustments.ConfigManager.Config.CompAdjust.DisableCustomTorsoVisual));
-            _actionsSection.Add(MakeServerConfigRow("Goal Net Tweaks", CompetitiveAdjustments.ConfigManager.Config.CompAdjust.EnableGoalNetTweaks));
-            _actionsSection.Add(MakeServerConfigRow("Arena Tweaks", CompetitiveAdjustments.ConfigManager.Config.CompAdjust.EnableArenaTweaks));
-            _actionsSection.Add(MakeServerConfigRow("Ball Mode", CompetitiveAdjustments.ConfigManager.Config.CompAdjust.BallMode));
-
-            AddSubHeader("STICK MODIFIERS");
-            _actionsSection.Add(MakeServerConfigRow("Free Blade", CompetitiveAdjustments.ConfigManager.Config.CompAdjust.FreeBladeEnabled));
-            _actionsSection.Add(MakeServerConfigRow("Higher Stick", CompetitiveAdjustments.ConfigManager.Config.CompAdjust.HighStickingEnabled));
-            _actionsSection.Add(MakeServerConfigRow("Stick Body Collision", CompetitiveAdjustments.ConfigManager.Config.CompAdjust.StickBodyCollision));
-
-            // --- CompTweaks Flags ---
-            // These are read from the synced config (CompetitivePuckTweaks values)
-            var tweaksCfg = CompetitivePuckTweaks.src.PluginCore.config;
-            if (tweaksCfg != null)
+            // Auto-unlock attempt (covers Steam allowlist and OpenConfigChanges):
+            // on first build of this tab, ask the server with an empty password.
+            if (!authed && !isServer && hasFeatures && !_serverUserLocked && !_serverAutoAuthSent)
             {
-                AddSectionHeader("COMPTWEAKS FLAGS");
-
-                AddSubHeader("Player");
-                _actionsSection.Add(MakeServerConfigRow("Thin Skater Bodies", tweaksCfg.ThinSkaterBodies));
-                _actionsSection.Add(MakeServerConfigRow("Smaller Models", tweaksCfg.EnableSmallerModels));
-                _actionsSection.Add(MakeServerConfigRow("Goalie Microdash", tweaksCfg.EnableGoalieMicrodash));
-
-                AddSubHeader("Puck");
-                _actionsSection.Add(MakeServerConfigRow("Random Puck Drop", tweaksCfg.RandomPuckDrop));
-                _actionsSection.Add(MakeServerConfigRow("Puck Through Bodies", tweaksCfg.EnablePuckThroughBodies));
-                _actionsSection.Add(MakeServerConfigRow("Puck Through Groin", tweaksCfg.EnablePuckThroughGroin));
-                _actionsSection.Add(MakeServerConfigRow("Puck Drag Speed Dependence", tweaksCfg.PuckDragSpeedDependence));
-                _actionsSection.Add(MakeServerConfigRow("Puck Height Dependent Drag", tweaksCfg.PuckHeightDependentDrag));
-
-                AddSubHeader("Stick");
-                _actionsSection.Add(MakeServerConfigRow("Disable Stick Collision", tweaksCfg.DisableStickCollision));
-                _actionsSection.Add(MakeServerConfigRow("Disable Shaft Collision", tweaksCfg.DisableShaftCollision));
-                _actionsSection.Add(MakeServerConfigRow("Mid Stick Collider", tweaksCfg.EnableMidStickCollider));
-                _actionsSection.Add(MakeServerConfigRow("Alter Stick Positioner", tweaksCfg.AlterStickPositionerOutput));
-                _actionsSection.Add(MakeServerConfigRow("Stick Speed Decay", tweaksCfg.EnableStickSpeedDecay));
-
-                AddSubHeader("Arena");
-                _actionsSection.Add(MakeServerConfigRow("Soft Boards", tweaksCfg.EnableSoftBoards));
-                _actionsSection.Add(MakeServerConfigRow("Board Bounce Tweak", tweaksCfg.EnableJohnBoardBounceTweak));
-
-                AddSubHeader("Physics");
-                _actionsSection.Add(MakeServerConfigRow("Physics Mod Events", tweaksCfg.UsePhysicsModificationEvents));
-
-                AddSubHeader("Misc");
-                _actionsSection.Add(MakeServerConfigRow("Banana Mode", tweaksCfg.BananaMode));
+                _serverAutoAuthSent = true;
+                PoncePuck.Keybinds.ServerBridge.SendAdminAuth("");
             }
 
-            AddSectionHeader("ALL DASHFALL BOOLS");
-            foreach (var pair in EnumerateBoolFields(CompetitiveAdjustments.ConfigManager.Config.Dashfall))
+            BuildServerLockBar(unlocked, authed, isServer);
+
+            // The host always has the live config; a client needs the broadcast.
+            bool hasFullConfig = isServer || PoncePuck.Keybinds.ServerBridge.HasReceivedFullConfig;
+            if (!hasFullConfig)
             {
-                _actionsSection.Add(MakeServerConfigRow(pair.Key, pair.Value));
+                // Nudge the server now (the Update loop also retries every 2s) so
+                // opening the tab pulls the config promptly instead of waiting.
+                PoncePuck.Keybinds.ServerBridge.RequestConfigFull();
+
+                var waitLabel = new UITK.Label("Waiting for server config...");
+                waitLabel.style.fontSize = 20;
+                waitLabel.style.marginTop = 16;
+                waitLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
+                MakeReadable(waitLabel);
+                _actionsSection.Add(waitLabel);
+                return;
             }
 
-            AddSectionHeader("ALL COMPADJUST BOOLS");
-            foreach (var pair in EnumerateBoolFields(CompetitiveAdjustments.ConfigManager.Config.CompAdjust))
+            // Edit an isolated clone, not the live mirror, so in-progress edits
+            // never leak into the client's Effective config reads (e.g. toggling
+            // a master enable would otherwise change local behavior before SAVE)
+            // and RESET survives a rebuild.  Committed to the live config only on
+            // SAVE.  Persists across tab switches; re-cloned on panel open and
+            // whenever a fresh full config arrives.
+            if (_serverEditCfg == null)
+                _serverEditCfg = CloneServerCfgForEdit();
+            var cfg = _serverEditCfg;
+            if (cfg == null) return;
+
+            // Editor body: greyed out and disabled when locked.
+            var body = new UITK.VisualElement();
+            body.SetEnabled(unlocked);
+            body.style.opacity = unlocked ? 1f : 0.45f;
+
+            // SAVE & APPLY / RESET pinned at the top of the editor, directly under
+            // the lock bar, so they are reachable without scrolling past every
+            // section to the bottom of a long list.
+            var btnRow = new UITK.VisualElement();
+            btnRow.style.flexDirection = UITK.FlexDirection.Row;
+            btnRow.style.marginTop = 4;
+            btnRow.style.marginBottom = 8;
+            btnRow.Add(MakeServerEditorButton("SAVE & APPLY", OnServerSaveApply));
+            btnRow.Add(MakeServerEditorButton("EXPORT", OnServerExport));
+            var resetBtn = MakeServerEditorButton(_serverResetArmed ? "CONFIRM RESET" : "RESET TO DEFAULTS", OnServerResetDefaults);
+            if (_serverResetArmed) // tint red on the armed/confirm press
+                resetBtn.style.backgroundColor = new UITK.StyleColor(new Color(0.6f, 0.25f, 0.25f));
+            btnRow.Add(resetBtn);
+            body.Add(btnRow);
+
+            AddSectionHeaderTo(body, "MASTER ENABLES");
+            body.Add(MakeEditorToggleRow("Enable Dashfall", cfg.EnableDashfall, v => cfg.EnableDashfall = v));
+            body.Add(MakeEditorToggleRow("Enable CompAdjust", cfg.EnableCompAdjust, v => cfg.EnableCompAdjust = v));
+            body.Add(MakeEditorToggleRow("Enable CompTweaks", cfg.EnableCompTweaks, v => cfg.EnableCompTweaks = v));
+
+            AddSectionHeaderTo(body, "DASHFALL");
+            BuildEditableSection(body, cfg.Dashfall);
+            AddSectionHeaderTo(body, "COMPADJUST");
+            BuildEditableSection(body, cfg.CompAdjust);
+            AddSectionHeaderTo(body, "COMPTWEAKS");
+            BuildEditableSection(body, cfg.CompTweaks);
+
+            _actionsSection.Add(body);
+        }
+
+        // Lock/status bar at the top of the SERVER tab.
+        private void BuildServerLockBar(bool unlocked, bool authed, bool isServer)
+        {
+            var bar = new UITK.VisualElement();
+            bar.style.flexDirection = UITK.FlexDirection.Column;
+            bar.style.marginTop = 4;
+            bar.style.marginBottom = 8;
+            bar.style.paddingLeft = 12; bar.style.paddingRight = 12;
+            bar.style.paddingTop = 8; bar.style.paddingBottom = 8;
+            bar.style.backgroundColor = new UITK.StyleColor(RowBg);
+            bar.style.borderTopLeftRadius = 4; bar.style.borderTopRightRadius = 4;
+            bar.style.borderBottomLeftRadius = 4; bar.style.borderBottomRightRadius = 4;
+
+            var topRow = new UITK.VisualElement();
+            topRow.style.flexDirection = UITK.FlexDirection.Row;
+            topRow.style.alignItems = UITK.Align.Center;
+
+            var title = new UITK.Label(unlocked ? "ADMIN EDITOR - UNLOCKED" : "ADMIN EDITOR - LOCKED");
+            title.style.fontSize = 22;
+            title.style.flexGrow = 1;
+            MakeReadable(title);
+            // Set the lock-state color AFTER MakeReadable, which forces white;
+            // otherwise the green/orange coding here is silently overwritten.
+            title.style.color = unlocked ? new Color(0.5f, 0.9f, 0.5f) : new Color(0.95f, 0.75f, 0.4f);
+            topRow.Add(title);
+
+            if (unlocked)
             {
-                _actionsSection.Add(MakeServerConfigRow(pair.Key, pair.Value));
+                // Drop back to read-only locally without disconnecting.
+                topRow.Add(MakeCompactButton("LOCK", () =>
+                {
+                    _serverUserLocked = true;
+                    RefreshActionsUI();
+                }));
+            }
+            else if (authed)
+            {
+                // Locked only because the user pressed LOCK; no password needed.
+                topRow.Add(MakeCompactButton("UNLOCK", () =>
+                {
+                    _serverUserLocked = false;
+                    RefreshActionsUI();
+                }));
+            }
+            bar.Add(topRow);
+
+            // The host owns the live config, so show the shareable editor
+            // password here; handing it to a non-admin lets them unlock the
+            // editor without being a game admin.
+            if (isServer)
+            {
+                string pwd = CompetitiveAdjustments.ConfigManager.Config?.Admin?.EditorPassword ?? "";
+                if (!string.IsNullOrEmpty(pwd))
+                {
+                    var pwRow = new UITK.VisualElement();
+                    pwRow.style.flexDirection = UITK.FlexDirection.Row;
+                    pwRow.style.alignItems = UITK.Align.Center;
+                    pwRow.style.marginTop = 8;
+
+                    // Masked by default (fixed length, so it does not even leak how
+                    // long the password is) until the host presses SHOW.
+                    string shown = _serverPasswordRevealed ? pwd : "••••••••";
+                    var pwLabel = new UITK.Label("Editor password: " + shown);
+                    pwLabel.style.fontSize = 16;
+                    pwLabel.style.flexGrow = 1;
+                    MakeReadable(pwLabel);
+                    pwRow.Add(pwLabel);
+
+                    pwRow.Add(MakeCompactButton(_serverPasswordRevealed ? "HIDE" : "SHOW", () =>
+                    {
+                        _serverPasswordRevealed = !_serverPasswordRevealed;
+                        RefreshActionsUI();
+                    }));
+
+                    bar.Add(pwRow);
+                }
             }
 
-            AddSectionHeader("ALL COMPTWEAKS BOOLS");
-            foreach (var pair in EnumerateBoolFields(CompetitiveAdjustments.ConfigManager.Config.CompTweaks))
+            // Genuinely un-authed: offer a password prompt.
+            if (!authed && !isServer)
             {
-                _actionsSection.Add(MakeServerConfigRow(pair.Key, pair.Value));
+                var entry = new UITK.VisualElement();
+                entry.style.flexDirection = UITK.FlexDirection.Row;
+                entry.style.alignItems = UITK.Align.Center;
+                entry.style.marginTop = 8;
+
+                var pw = new TextField { isPasswordField = true };
+                pw.style.flexGrow = 1;
+                pw.style.height = 34;
+                pw.style.marginRight = 8;
+                pw.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
+                pw.style.color = Color.white;
+                ForceUIFont(pw);
+                entry.Add(pw);
+
+                entry.Add(MakeCompactButton("UNLOCK", () =>
+                {
+                    _serverUserLocked = false;
+                    _serverStatusText = "Checking...";
+                    PoncePuck.Keybinds.ServerBridge.SendAdminAuth(pw.value ?? "");
+                }));
+                bar.Add(entry);
+            }
+
+            string status = !string.IsNullOrEmpty(_serverStatusText)
+                ? _serverStatusText
+                : PoncePuck.Keybinds.ServerBridge.AdminAuthReason;
+            if (!string.IsNullOrEmpty(status))
+            {
+                var st = new UITK.Label(status);
+                st.style.fontSize = 16;
+                st.style.marginTop = 8;
+                st.style.whiteSpace = UITK.WhiteSpace.Normal;
+                st.style.color = new Color(0.8f, 0.8f, 0.8f);
+                MakeReadable(st);
+                bar.Add(st);
+            }
+
+            _actionsSection.Add(bar);
+        }
+
+        // Emits an editable row per public bool/float/int field on a config
+        // section, in declaration order, so new fields appear automatically.
+        private void BuildEditableSection(UITK.VisualElement parent, object sectionObj)
+        {
+            if (sectionObj == null) return;
+
+            var fields = sectionObj.GetType()
+                .GetFields(BindingFlags.Instance | BindingFlags.Public)
+                .OrderBy(f => f.MetadataToken);
+
+            foreach (var field in fields)
+            {
+                string label = HumanizeBoolFieldName(field.Name);
+                var captured = field; // avoid the modified-closure pitfall
+
+                if (field.FieldType == typeof(bool))
+                {
+                    bool cur = false;
+                    try { cur = (bool)captured.GetValue(sectionObj); } catch { continue; }
+                    parent.Add(MakeEditorToggleRow(label, cur, v => captured.SetValue(sectionObj, v)));
+                }
+                else if (field.FieldType == typeof(float))
+                {
+                    float cur = 0f;
+                    try { cur = (float)captured.GetValue(sectionObj); } catch { continue; }
+                    // Wide bounds make MakeFloatRow's focus-out clamp a no-op, so
+                    // this behaves as a free-entry numeric field.
+                    parent.Add(MakeFloatRow(label, "", cur, float.NegativeInfinity, float.PositiveInfinity,
+                        v => captured.SetValue(sectionObj, v)));
+                }
+                else if (field.FieldType == typeof(int))
+                {
+                    int cur = 0;
+                    try { cur = (int)captured.GetValue(sectionObj); } catch { continue; }
+                    parent.Add(MakeFloatRow(label, "", cur, float.NegativeInfinity, float.PositiveInfinity,
+                        v => captured.SetValue(sectionObj, Mathf.RoundToInt(v))));
+                }
+                // string / string[] fields (none in the three sections) are skipped.
+            }
+        }
+
+        // Editor toggle row: like MakeToggleRow but mutates only and does NOT
+        // rebuild the whole tab on change (the editor is batched until SAVE).
+        private UITK.VisualElement MakeEditorToggleRow(string title, bool currentValue, Action<bool> onChanged)
+        {
+            var row = new UITK.VisualElement();
+            MarkSearchable(row, title);
+            row.style.flexDirection = UITK.FlexDirection.Row;
+            row.style.alignItems = UITK.Align.Center;
+            // Match MakeFloatRow (50 / 24) so toggle and value rows in the editor
+            // are the same height and the list reads consistently.
+            row.style.height = 50;
+            row.style.marginBottom = 8;
+            row.style.backgroundColor = new UITK.StyleColor(RowBg);
+            row.style.paddingLeft = 12;
+            row.style.paddingRight = 12;
+            row.style.borderTopLeftRadius = 4;
+            row.style.borderTopRightRadius = 4;
+            row.style.borderBottomLeftRadius = 4;
+            row.style.borderBottomRightRadius = 4;
+
+            var label = new UITK.Label(title);
+            label.style.flexGrow = 1;
+            label.style.fontSize = 24;
+            MakeReadable(label);
+            row.Add(label);
+
+            var toggle = new Toggle { value = currentValue };
+            StyleConfigCheckbox(toggle);
+            toggle.RegisterValueChangedCallback(evt => onChanged?.Invoke(evt.newValue));
+            row.Add(toggle);
+
+            return row;
+        }
+
+        private UITK.Button MakeServerEditorButton(string text, Action onClick)
+        {
+            var b = new UITK.Button(onClick) { text = text };
+            b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
+            b.style.height = 50;
+            b.style.flexGrow = 1;
+            b.style.marginLeft = 4; b.style.marginRight = 4;
+            b.style.paddingLeft = 18; b.style.paddingRight = 18;
+            b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
+            MakeReadable(b);
+            AddButtonFlash(b);
+            return b;
+        }
+
+        // Compact, non-stretching button for the lock bar (next to the title /
+        // password field), so it does not expand to half the row width.
+        private UITK.Button MakeCompactButton(string text, Action onClick)
+        {
+            var b = new UITK.Button(onClick) { text = text };
+            b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
+            b.style.height = 34;
+            b.style.flexGrow = 0;
+            b.style.flexShrink = 0;
+            b.style.minWidth = 110;
+            b.style.paddingLeft = 14; b.style.paddingRight = 14;
+            b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
+            MakeReadable(b);
+            AddButtonFlash(b);
+            return b;
+        }
+
+        // Deep clone of the live config's three sections plus the three enables,
+        // for isolated editing.  The Admin block is intentionally not copied (it
+        // is never edited here and never serialized to the wire).
+        private CompetitiveAdjustments.ServerConfig CloneServerCfgForEdit()
+        {
+            var src = CompetitiveAdjustments.ConfigManager.Config;
+            var c = new CompetitiveAdjustments.ServerConfig();
+            if (src == null) return c;
+
+            c.EnableDashfall = src.EnableDashfall;
+            c.EnableCompAdjust = src.EnableCompAdjust;
+            c.EnableCompTweaks = src.EnableCompTweaks;
+            if (src.Dashfall != null)
+                c.Dashfall = JsonUtility.FromJson<CompetitiveAdjustments.DashfallConfig>(JsonUtility.ToJson(src.Dashfall));
+            if (src.CompAdjust != null)
+                c.CompAdjust = JsonUtility.FromJson<CompetitiveAdjustments.CompAdjustConfig>(JsonUtility.ToJson(src.CompAdjust));
+            if (src.CompTweaks != null)
+                c.CompTweaks = JsonUtility.FromJson<CompetitiveAdjustments.CompTweaksConfig>(JsonUtility.ToJson(src.CompTweaks));
+            return c;
+        }
+
+        private void OnServerSaveApply()
+        {
+            _serverResetArmed = false; // another action cancels a pending reset confirm
+            var cfg = _serverEditCfg;
+            if (cfg == null) return;
+
+            string json = cfg.SerializeForWire(); // never contains the Admin block
+            var nm = Unity.Netcode.NetworkManager.Singleton;
+            if (nm != null && nm.IsServer)
+            {
+                // Host shortcut: apply in-process (SendNamedMessageToAll does not
+                // self-deliver, so a host must not round-trip its own edits).
+                CompetitiveAdjustments.ConfigApplyService.ApplyServerConfigEdit(json);
+                _serverStatusText = "Applied.";
+            }
+            else
+            {
+                PoncePuck.Keybinds.ServerBridge.SendAdminConfigSet(json);
+                _serverStatusText = "Saving...";
+            }
+            RefreshActionsUI();
+        }
+
+        // Export the config currently shown in the editor (the working copy) as
+        // readable JSON with the password redacted: copied to the clipboard for
+        // an immediate paste and written next to the live config for a backup.
+        private void OnServerExport()
+        {
+            _serverResetArmed = false; // another action cancels a pending reset confirm
+            try
+            {
+                string json = CompetitiveAdjustments.ConfigManager.ExportConfigJson(_serverEditCfg);
+                GUIUtility.systemCopyBuffer = json;
+                string path = CompetitiveAdjustments.ConfigManager.ExportConfigToFile(_serverEditCfg);
+                _serverStatusText = string.IsNullOrEmpty(path)
+                    ? "Config copied to clipboard (password redacted)."
+                    : "Config copied to clipboard and saved to " + path + " (password redacted).";
+            }
+            catch (Exception e)
+            {
+                _serverStatusText = "Export failed: " + e.Message;
+            }
+            RefreshActionsUI();
+        }
+
+        private void OnServerResetDefaults()
+        {
+            // First press only arms the button; the second press actually resets,
+            // so a stray click can't wipe the values.
+            if (!_serverResetArmed)
+            {
+                _serverResetArmed = true;
+                _serverStatusText = "Press CONFIRM RESET again to discard all values and load defaults.";
+                RefreshActionsUI();
+                return;
+            }
+
+            _serverResetArmed = false;
+            // Load fresh defaults into the editor copy; not applied until SAVE.
+            var fresh = new CompetitiveAdjustments.ServerConfig();
+            _serverEditCfg = fresh;
+            _serverStatusText = "Reset to defaults. Press SAVE & APPLY to apply.";
+            RefreshActionsUI();
+        }
+
+        // Network-event callbacks: refresh the SERVER tab when the full config
+        // mirror updates or the auth/apply status changes.
+        private void OnFullConfigReceived()
+        {
+            // New authoritative values arrived; re-clone the editor copy so it
+            // shows live values (discards any unsaved local edits: last write
+            // wins, per spec).
+            _serverEditCfg = null;
+            RefreshServerTabIfOpen();
+        }
+
+        private void OnAdminAuthResult(bool granted, string reason)
+        {
+            _serverStatusText = reason;
+            RefreshServerTabIfOpen();
+        }
+
+        // True only while the SERVER tab is the visible tab.  Gates the client's
+        // config-request retry so a player who never opens the editor never polls
+        // the server for the full config.
+        private bool IsServerTabOpen()
+        {
+            return _activeTab == ActiveTab.Server
+                && _dfPanel != null
+                && _dfPanel.style.display == UITK.DisplayStyle.Flex;
+        }
+
+        private void RefreshServerTabIfOpen()
+        {
+            if (_activeTab == ActiveTab.Server
+                && _dfPanel != null
+                && _dfPanel.style.display == UITK.DisplayStyle.Flex)
+            {
+                RefreshActionsUI();
             }
         }
 
@@ -528,11 +1003,36 @@ namespace DashFallMod.Client
                 DashFallClientRunner.RefreshMinimap();
             }));
 
-            _actionsSection.Add(MakeFloatRow("PUCK SCALE", "Companion visual puck scale (server-synced)", clientConfig.PuckScale, 0.5f, 2f, (val) =>
+            _actionsSection.Add(MakeFloatRow("PUCK SCALE", "Companion visual puck scale, uniform master multiplier (server-synced)", clientConfig.PuckScale, 0.5f, 2f, (val) =>
             {
                 clientConfig.PuckScale = val;
+                MirrorPuckScaleToCompanion(clientConfig);
                 DashFallConfigLoader.SaveClientConfig(clientConfig);
-                ApplyLocalPuckScale(val);
+                ApplyLocalPuckScale();
+            }));
+
+            _actionsSection.Add(MakeFloatRow("PUCK SCALE X", "Per-axis puck width (left/right of the disc face), multiplies PUCK SCALE", clientConfig.PuckScaleX, 0.25f, 3f, (val) =>
+            {
+                clientConfig.PuckScaleX = val;
+                MirrorPuckScaleToCompanion(clientConfig);
+                DashFallConfigLoader.SaveClientConfig(clientConfig);
+                ApplyLocalPuckScale();
+            }));
+
+            _actionsSection.Add(MakeFloatRow("PUCK SCALE Y", "Per-axis puck thickness (height), multiplies PUCK SCALE", clientConfig.PuckScaleY, 0.25f, 3f, (val) =>
+            {
+                clientConfig.PuckScaleY = val;
+                MirrorPuckScaleToCompanion(clientConfig);
+                DashFallConfigLoader.SaveClientConfig(clientConfig);
+                ApplyLocalPuckScale();
+            }));
+
+            _actionsSection.Add(MakeFloatRow("PUCK SCALE Z", "Per-axis puck depth (forward/back of the disc face), multiplies PUCK SCALE", clientConfig.PuckScaleZ, 0.25f, 3f, (val) =>
+            {
+                clientConfig.PuckScaleZ = val;
+                MirrorPuckScaleToCompanion(clientConfig);
+                DashFallConfigLoader.SaveClientConfig(clientConfig);
+                ApplyLocalPuckScale();
             }));
 
             _actionsSection.Add(MakeFloatRow("BUTTERFLY PAD OFFSET", "Companion leg pad offset (server-synced)", clientConfig.ButterflyPadOffset, 0f, 0.25f, (val) =>
@@ -651,10 +1151,11 @@ namespace DashFallMod.Client
         private UITK.VisualElement MakeToggleRow(string title, string description, bool currentValue, Action<bool> onChanged)
         {
             var row = new UITK.VisualElement();
+            MarkSearchable(row, title);
             row.style.flexDirection = UITK.FlexDirection.Row;
             row.style.alignItems = UITK.Align.Center;
             row.style.height = 50;
-            row.style.marginBottom = 4;
+            row.style.marginBottom = 8;
             row.style.backgroundColor = new UITK.StyleColor(RowBg);
             row.style.paddingLeft = 12;
             row.style.paddingRight = 12;
@@ -686,7 +1187,7 @@ namespace DashFallMod.Client
 
             var toggle = new Toggle();
             toggle.value = currentValue;
-            toggle.style.width = 40;
+            StyleConfigCheckbox(toggle);
             toggle.RegisterValueChangedCallback(evt => {
                 onChanged?.Invoke(evt.newValue);
                 RefreshActionsUI(); // Refresh to show/hide keybind section
@@ -699,10 +1200,11 @@ namespace DashFallMod.Client
         private UITK.VisualElement MakeFloatRow(string title, string description, float currentValue, float min, float max, Action<float> onChanged)
         {
             var row = new UITK.VisualElement();
+            MarkSearchable(row, title);
             row.style.flexDirection = UITK.FlexDirection.Row;
             row.style.alignItems = UITK.Align.Center;
             row.style.height = 50;
-            row.style.marginBottom = 4;
+            row.style.marginBottom = 8;
             row.style.backgroundColor = new UITK.StyleColor(RowBg);
             row.style.paddingLeft = 12;
             row.style.paddingRight = 12;
@@ -768,10 +1270,11 @@ namespace DashFallMod.Client
         private UITK.VisualElement MakeSliderRow(string title, string description, float currentValue, float min, float max, Action<float> onChanged)
         {
             var row = new UITK.VisualElement();
+            MarkSearchable(row, title);
             row.style.flexDirection = UITK.FlexDirection.Row;
             row.style.alignItems = UITK.Align.Center;
-            row.style.height = 58;
-            row.style.marginBottom = 4;
+            row.style.height = 50;
+            row.style.marginBottom = 8;
             row.style.backgroundColor = new UITK.StyleColor(RowBg);
             row.style.paddingLeft = 12;
             row.style.paddingRight = 12;
@@ -805,26 +1308,31 @@ namespace DashFallMod.Client
 
             row.Add(textContainer);
 
+            // Slider fills the slack between the label and the value box; the
+            // value box is fixed-width and right-aligned so it lines up with the
+            // value column of the float rows.
+            var slider = new UITK.Slider(min, max);
+            slider.style.flexGrow = 1;
+            slider.style.flexBasis = 0;
+            slider.style.flexShrink = 1;
+            slider.style.minWidth = 120;
+            slider.style.height = 24;
+            slider.style.marginLeft = 12;
+            slider.style.marginRight = 12;
+            slider.value = Mathf.Clamp(currentValue, min, max);
+            StyleSliderControl(slider);
+
             var input = new TextField();
             input.value = currentValue.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
             input.style.width = 72;
             input.style.minWidth = 72;
             input.style.flexShrink = 0;
             input.style.height = 34;
-            input.style.marginRight = 8;
             input.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
             input.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
             input.style.color = Color.white;
             ForceUIFont(input);
-            row.Add(input);
 
-            var slider = new UITK.Slider(min, max);
-            slider.style.width = 170;
-            slider.style.minWidth = 170;
-            slider.style.flexShrink = 0;
-            slider.style.height = 24;
-            slider.value = Mathf.Clamp(currentValue, min, max);
-            StyleSliderControl(slider);
             bool syncing = false;
             slider.RegisterValueChangedCallback(evt =>
             {
@@ -850,7 +1358,9 @@ namespace DashFallMod.Client
                 syncing = false;
                 onChanged?.Invoke(v);
             });
+
             row.Add(slider);
+            row.Add(input);
 
             return row;
         }
@@ -884,10 +1394,11 @@ namespace DashFallMod.Client
         private UITK.VisualElement MakeHexColorRow(string title, string description, string currentHex, Action<string> onChanged)
         {
             var row = new UITK.VisualElement();
+            MarkSearchable(row, title);
             row.style.flexDirection = UITK.FlexDirection.Row;
             row.style.alignItems = UITK.Align.Center;
             row.style.height = 50;
-            row.style.marginBottom = 4;
+            row.style.marginBottom = 8;
             row.style.backgroundColor = new UITK.StyleColor(RowBg);
             row.style.paddingLeft = 12;
             row.style.paddingRight = 12;
@@ -949,22 +1460,40 @@ namespace DashFallMod.Client
             return row;
         }
 
-        private static void ApplyLocalPuckScale(float scale)
+        // Copy the four puck-scale fields from the UI's client config onto the
+        // companion config that the spawn/sync paths read. They are usually the
+        // same instance, but mirror defensively so a freshly-loaded companion
+        // config can never lag the UI.
+        private static void MirrorPuckScaleToCompanion(DashFallClientConfig src)
         {
-            if (CompetitiveCompanion.PluginCore.config != null)
-            {
-                CompetitiveCompanion.PluginCore.config.PuckScale = scale;
-            }
+            var companion = CompetitiveCompanion.PluginCore.config;
+            if (companion == null || src == null || ReferenceEquals(companion, src)) return;
+            companion.PuckScale = src.PuckScale;
+            companion.PuckScaleX = src.PuckScaleX;
+            companion.PuckScaleY = src.PuckScaleY;
+            companion.PuckScaleZ = src.PuckScaleZ;
+        }
 
+        // Push the current client puck-scale config (uniform + per-axis) onto
+        // every live puck for instant local feedback while dragging sliders.
+        // The composed vector comes from the shared PuckPatch helper so this
+        // matches exactly what spawn/sync paths apply.
+        private static void ApplyLocalPuckScale()
+        {
             if (PuckManager.Instance == null) return;
 
             var pucks = PuckManager.Instance.GetPucks();
             if (pucks == null) return;
 
+            Vector3 scale = CompetitivePuckTweaks.src.PuckPatch.GetSyncedPuckScaleVector();
             foreach (var puck in pucks)
             {
                 if (puck == null) continue;
-                puck.transform.localScale = Vector3.one * scale;
+                puck.transform.localScale = scale;
+                // On a host the ball-mode sphere collider is the real physics, so
+                // keep it in step with the live-previewed shape (no-op on a pure
+                // client, which has no server collider).
+                CompetitiveAdjustments.BallModeHelper.UpdateBallColliderRadius(puck);
             }
         }
 
@@ -977,18 +1506,23 @@ namespace DashFallMod.Client
             return "#" + ColorUtility.ToHtmlStringRGB(parsed);
         }
 
-        private void AddSectionHeader(string text)
+        private void AddSectionHeader(string text) => AddSectionHeaderTo(_actionsSection, text);
+
+        private void AddSectionHeaderTo(UITK.VisualElement parent, string text)
         {
             var header = new UITK.Label(text);
+            header.AddToClassList("cfg-header");
             header.style.fontSize = 24;
             header.style.marginTop = 16;
             header.style.marginBottom = 8;
             header.style.color = new Color(0.9f, 0.9f, 0.5f);
             ForceUIFont(header);
-            _actionsSection.Add(header);
+            parent.Add(header);
         }
 
-        private void AddSubHeader(string text)
+        private void AddSubHeader(string text) => AddSubHeaderTo(_actionsSection, text);
+
+        private void AddSubHeaderTo(UITK.VisualElement parent, string text)
         {
             var header = new UITK.Label(text);
             header.style.fontSize = 24;
@@ -997,60 +1531,11 @@ namespace DashFallMod.Client
             header.style.marginLeft = 8;
             header.style.color = new Color(0.7f, 0.7f, 0.9f);
             ForceUIFont(header);
-            _actionsSection.Add(header);
+            parent.Add(header);
         }
 
-        private UITK.VisualElement MakeServerConfigRow(string featureName, bool enabled)
-        {
-            var row = new UITK.VisualElement();
-            row.style.flexDirection = UITK.FlexDirection.Row;
-            row.style.alignItems = UITK.Align.Center;
-            row.style.height = 40;
-            row.style.marginBottom = 4;
-            row.style.backgroundColor = new UITK.StyleColor(RowBg);
-            row.style.paddingLeft = 12;
-            row.style.paddingRight = 12;
-
-            var label = new UITK.Label(featureName);
-            label.style.flexGrow = 1;
-            label.style.fontSize = 24;
-            MakeReadable(label);
-            row.Add(label);
-
-            var statusLabel = new UITK.Label(enabled ? "ENABLED" : "DISABLED");
-            statusLabel.style.fontSize = 24;
-            statusLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
-            statusLabel.style.color = enabled ? new Color(0.4f, 0.9f, 0.4f) : new Color(0.9f, 0.4f, 0.4f);
-            ForceUIFont(statusLabel);
-            row.Add(statusLabel);
-
-            return row;
-        }
-
-        private IEnumerable<KeyValuePair<string, bool>> EnumerateBoolFields(object configObject)
-        {
-            if (configObject == null) yield break;
-
-            var fields = configObject.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public)
-                .Where(field => field.FieldType == typeof(bool))
-                .OrderBy(field => field.Name, StringComparer.Ordinal);
-
-            foreach (var field in fields)
-            {
-                bool value = false;
-                try
-                {
-                    value = (bool)field.GetValue(configObject);
-                }
-                catch
-                {
-                    continue;
-                }
-
-                yield return new KeyValuePair<string, bool>(HumanizeBoolFieldName(field.Name), value);
-            }
-        }
-
+        // Turns a config field name into a readable label (also used for float /
+        // int rows, despite the historical "Bool" in the name).
         private static string HumanizeBoolFieldName(string fieldName)
         {
             if (string.IsNullOrWhiteSpace(fieldName)) return "Unknown";
@@ -1082,19 +1567,28 @@ namespace DashFallMod.Client
             Func<string> typeGetter, Action<string> typeSetter, BindRowType rowType, bool enabled = true)
         {
             var row = new UITK.VisualElement();
+            MarkSearchable(row, action);
             row.style.flexDirection = UITK.FlexDirection.Row;
             row.style.alignItems = UITK.Align.Center;
             row.style.height = 50;
             row.style.marginBottom = 8;
             row.style.backgroundColor = new UITK.StyleColor(enabled ? RowBg : DisabledRowBg);
-            row.style.paddingLeft = 12; row.style.paddingRight = 10;
+            row.style.paddingLeft = 12; row.style.paddingRight = 12;
             row.style.paddingTop = 8; row.style.paddingBottom = 8;
+            row.style.borderTopLeftRadius = 4;
+            row.style.borderTopRightRadius = 4;
+            row.style.borderBottomLeftRadius = 4;
+            row.style.borderBottomRightRadius = 4;
             row.style.opacity = enabled ? 1f : 0.5f;
 
             // Label
             var lab = new UITK.Label(action + (enabled ? "" : " <size=12><color=red><b>DISABLED BY SERVER</b></color></size>"));
+            lab.style.fontSize = 24;
+            // 220 min keeps the chip column aligned for short names; let long
+            // names ("STANDING DASH RIGHT") grow rather than ellipsis-truncate at
+            // 24px, so no maxWidth and no shrink.
             lab.style.minWidth = 220;
-            lab.style.maxWidth = 220;
+            lab.style.flexShrink = 0;
             lab.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleLeft);
             lab.style.color = enabled ? Color.white : new Color(0.6f, 0.6f, 0.6f);
             lab.style.whiteSpace = UITK.WhiteSpace.NoWrap;
@@ -1335,6 +1829,13 @@ namespace DashFallMod.Client
 
             _dfBackdrop.style.display = UITK.DisplayStyle.Flex;
             _dfPanel.style.display = UITK.DisplayStyle.Flex;
+
+            // Fresh panel session: re-attempt auto-unlock and clear any prior
+            // local LOCK / status so the SERVER tab reflects current auth.
+            _serverAutoAuthSent = false;
+            _serverUserLocked = false;
+            _serverStatusText = "";
+            _serverEditCfg = null; // re-clone editor copy from live on next build
 
             // Refresh chips to show current bindings
             RefreshActionsUI();

@@ -61,7 +61,7 @@ namespace CompetitiveCompanion
         [HarmonyPostfix]
         public static void Postfix(PuckManager __instance, Puck puck)
         {
-            puck.transform.localScale = Vector3.one * PluginCore.config.PuckScale;
+            puck.transform.localScale = CompetitivePuckTweaks.src.PuckPatch.GetSyncedPuckScaleVector();
             if (CompetitiveAdjustments.BallModeHelper.IsBallModeEnabled)
                 CompetitiveAdjustments.BallModeHelper.TransformPuckToBall(puck);
         }
@@ -75,11 +75,7 @@ namespace CompetitiveCompanion
         {
             if (__instance == null) return;
 
-            float scale = 1f;
-            if (PluginCore.config != null)
-                scale = PluginCore.config.PuckScale;
-
-            __instance.transform.localScale = Vector3.one * scale;
+            __instance.transform.localScale = CompetitivePuckTweaks.src.PuckPatch.GetSyncedPuckScaleVector();
 
             if (CompetitiveAdjustments.BallModeHelper.IsBallModeEnabled)
                 CompetitiveAdjustments.BallModeHelper.TransformPuckToBall(__instance);
@@ -389,21 +385,9 @@ namespace CompetitivePuckTweaks.src
             return true;
         }
 
-        private static bool IsAdmin(ulong clientId)
-        {
-            if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsHost && clientId == NetworkManager.ServerClientId)
-            {
-                return true;
-            }
-
-            var pm = PlayerManager.Instance;
-            if (pm == null) return false;
-            Player player = pm.GetPlayerByClientId(clientId);
-            if (player == null) return false;
-
-            var adminMgr = ServerManager.Instance?.AdminManager;
-            return adminMgr != null && adminMgr.IsSteamIdAdmin(player.SteamId.Value.ToString());
-        }
+        // Shared with the admin config editor's auth path.
+        private static bool IsAdmin(ulong clientId) =>
+            CompetitiveAdjustments.AdminAuth.IsAdmin(clientId);
 
         private static void SendSystemMessage(ulong clientId, string message)
         {
@@ -421,24 +405,9 @@ namespace CompetitivePuckTweaks.src
                 CompetitiveAdjustments.ConfigManager.EnsureConfig();
                 CompetitiveAdjustments.ConfigManager.ReloadConfig();
 
-                PluginCore.ApplyLiveConfigFull();
-                DashFallMod.GoalNetTweaks.RefreshAll();
-                PoncePuck.Keybinds.ServerBridge.BroadcastFeaturesToAllClients();
-                PoncePuck.Keybinds.ServerBridge.BroadcastGoalTweaksToAllClients();
-
-                try
-                {
-                    var players = PlayerManager.Instance?.GetPlayers();
-                    if (players != null)
-                    {
-                        foreach (Player player in players)
-                            PluginCore.ManualSync(player.OwnerClientId);
-                    }
-                }
-                catch (Exception e)
-                {
-                    CompetitiveAdjustments.ConfigManager.LogWarning("ReloadServerConfig per-player manual sync failed: " + e.Message);
-                }
+                // Shared tail: apply live, re-broadcast every sync channel, and
+                // push the full credential-free config to all clients.
+                CompetitiveAdjustments.ConfigApplyService.ApplyAndBroadcast();
 
                 SendSystemMessage(clientId, "<color=#00ff00>Config reloaded successfully.</color>");
                 CompetitiveAdjustments.ConfigManager.Log("Config reloaded via /reload command.");

@@ -811,12 +811,12 @@ namespace CompetitivePuckTweaks.src
                 List<Puck> pucks = PuckManager.Instance.GetPucks();
                 if (pucks == null || pucks.Count == 0) return;
 
-                float targetScale = config.PuckScale;
+                Vector3 targetScale = CompetitivePuckTweaks.src.PuckPatch.GetSyncedPuckScaleVector();
                 for (int i = 0; i < pucks.Count; i++)
                 {
                     var puck = pucks[i];
                     if (puck == null) continue;
-                    puck.transform.localScale = Vector3.one * targetScale;
+                    puck.transform.localScale = targetScale;
                 }
 
                 Log($"Applied puck scale {targetScale} to {pucks.Count} existing puck(s).");

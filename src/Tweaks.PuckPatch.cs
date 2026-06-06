@@ -62,8 +62,8 @@ namespace CompetitivePuckTweaks.src
         {
             if (puck == null) return;
 
-            float puckScale = GetSyncedPuckScale();
-            puck.transform.localScale = new UnityEngine.Vector3(puckScale, puckScale, puckScale);
+            UnityEngine.Vector3 puckScale = GetSyncedPuckScaleVector();
+            puck.transform.localScale = puckScale;
             PluginCore.Dbg($"Puck scaled to {puckScale}");
 
             Traverse.Create(puck).Field("maxSpeed").SetValue(PluginCore.config.PuckMaxSpeed);
@@ -94,23 +94,51 @@ namespace CompetitivePuckTweaks.src
         }
 
         /// <summary>
-        /// Get puck scale from synced client config (CompetitiveCompanion.PluginCore),
-        /// or fall back to server config if client config is not available.
-        /// This ensures clients display the correct puck size synced from the server.
+        /// Get the final per-axis puck scale Vector3 from synced client config
+        /// (CompetitiveCompanion.PluginCore), or fall back to server config if the
+        /// client config is not available. The uniform PuckScale is kept as a
+        /// master multiplier on top of the per-axis PuckScaleX/Y/Z values, so
+        /// final scale = PuckScale * (PuckScaleX, PuckScaleY, PuckScaleZ).
+        /// This is the single source of truth for puck scale; every other
+        /// application site reads through it so server and clients agree.
         /// </summary>
-        private static float GetSyncedPuckScale()
+        public static UnityEngine.Vector3 GetSyncedPuckScaleVector()
         {
             try
             {
                 // Try to get from synced client config, which receives updates from server via CMM
                 var companionConfig = CompetitiveCompanion.PluginCore.config;
                 if (companionConfig != null && companionConfig.PuckScale > 0.01f)
-                    return companionConfig.PuckScale;
+                    return ComposeScale(
+                        companionConfig.PuckScale,
+                        companionConfig.PuckScaleX,
+                        companionConfig.PuckScaleY,
+                        companionConfig.PuckScaleZ);
             }
             catch { }
-            
+
             // Fall back to server config if client config is not available
-            return PluginCore.config.PuckScale;
+            return ComposeScale(
+                PluginCore.config.PuckScale,
+                PluginCore.config.PuckScaleX,
+                PluginCore.config.PuckScaleY,
+                PluginCore.config.PuckScaleZ);
+        }
+
+        /// <summary>
+        /// Combine the uniform master scale with the per-axis multipliers. A
+        /// per-axis value at or below zero is treated as 1 so a half-populated
+        /// or legacy config can never collapse the puck to a zero-size sliver.
+        /// Per-axis scale applies in ball mode too, so the ball can be stretched
+        /// into an ellipsoid; BallModeHelper resizes the sphere collider to track
+        /// the squashed shape (see UpdateBallColliderRadius).
+        /// </summary>
+        private static UnityEngine.Vector3 ComposeScale(float uniform, float x, float y, float z)
+        {
+            if (x <= 0f) x = 1f;
+            if (y <= 0f) y = 1f;
+            if (z <= 0f) z = 1f;
+            return new UnityEngine.Vector3(uniform * x, uniform * y, uniform * z);
         }
     }
 
