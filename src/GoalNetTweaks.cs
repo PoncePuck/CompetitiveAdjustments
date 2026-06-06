@@ -341,53 +341,41 @@ namespace DashFallMod
                 arenaEnabled, arenaScaleX, arenaScaleY, arenaScaleZ,
                 arenaOffsetX, arenaOffsetY, arenaOffsetZ, arenaRotX, arenaRotY, arenaRotZ);
 
-            bool hashChanged = currentHash != _lastRefreshHash;
-            bool configChanged = _forceNextRefresh || hashChanged;
+            bool configChanged = _forceNextRefresh || currentHash != _lastRefreshHash;
             _forceNextRefresh = false;
             _lastRefreshHash = currentHash;
 
             // Always propagate live texture/color changes from hidden source renderers.
             LiveSyncArenaSourceTextures();
 
-            // The public arena-sync event must fire only on a genuine arena change
-            // (hash changed) or an explicit request (sendOnArenaSyncEvent). It must
-            // NOT fire on the forced refresh that runs on every player-body spawn:
-            // B897 respawns every in-play player at each faceoff via
-            // Server_SpawnCharacter, so _forceNextRefresh alone would otherwise spam
-            // consumers once per player per faceoff even though the arena is unchanged.
-            bool fireArenaSyncEvent = hashChanged || sendOnArenaSyncEvent;
-
-            // Nothing to re-apply and no event to send.
-            if (!configChanged && !fireArenaSyncEvent) return;
+            // Skip expensive FindObjectsByType / collider work when nothing has changed.
+            if (!configChanged && !sendOnArenaSyncEvent) return;
 
             const float barrierScaleX = 0.8f, barrierScaleY = 1f, barrierScaleZ = 0.8f;
 
-            if (fireArenaSyncEvent)
-            {
-                Dictionary<string, object> message;
-                if (arenaEnabled) {
-                    message = new Dictionary<string, object> {
-                        { "ArenaScaleX", arenaScaleX * barrierScaleX },
-                        { "ArenaScaleY", arenaScaleY * barrierScaleZ },
-                        { "ArenaScaleZ", arenaScaleZ * barrierScaleY },
-                        { "ArenaOffsetX", arenaOffsetX },
-                        { "ArenaOffsetY", arenaOffsetY },
-                        { "ArenaOffsetZ", arenaOffsetZ },
-                    };
-                }
-                else {
-                    message = new Dictionary<string, object> {
-                        { "ArenaScaleX", 1f },
-                        { "ArenaScaleY", 1f },
-                        { "ArenaScaleZ", 1f },
-                        { "ArenaOffsetX", 0 },
-                        { "ArenaOffsetY", 0 },
-                        { "ArenaOffsetZ", 0 },
-                    };
-                }
-
-                EventManager.TriggerEvent("Event_CompetitiveAdjustments_OnArenaSync", message);
+            Dictionary<string, object> message;
+            if (arenaEnabled) {
+                message = new Dictionary<string, object> {
+                    { "ArenaScaleX", arenaScaleX * barrierScaleX },
+                    { "ArenaScaleY", arenaScaleY * barrierScaleZ },
+                    { "ArenaScaleZ", arenaScaleZ * barrierScaleY },
+                    { "ArenaOffsetX", arenaOffsetX },
+                    { "ArenaOffsetY", arenaOffsetY },
+                    { "ArenaOffsetZ", arenaOffsetZ },
+                };
             }
+            else {
+                message = new Dictionary<string, object> {
+                    { "ArenaScaleX", 1f },
+                    { "ArenaScaleY", 1f },
+                    { "ArenaScaleZ", 1f },
+                    { "ArenaOffsetX", 0 },
+                    { "ArenaOffsetY", 0 },
+                    { "ArenaOffsetZ", 0 },
+                };
+            }
+
+            EventManager.TriggerEvent("Event_CompetitiveAdjustments_OnArenaSync", message);
 
             // Skip expensive FindObjectsByType / collider work when nothing has changed.
             if (!configChanged) return;
