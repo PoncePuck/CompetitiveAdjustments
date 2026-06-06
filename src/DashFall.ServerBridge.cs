@@ -86,6 +86,29 @@ namespace PoncePuck.Keybinds
         public static bool HasReceivedFeatures { get; private set; } = false;
         public static event Action OnFeaturesReceived;
 
+        // Client-side: full server config mirror state (admin config editor).
+        // HasReceivedFullConfig flips true once the PPKB/ConfigFull broadcast has
+        // been reassembled into ConfigManager.Config so the editor renders true
+        // live values.  Mirrors HasReceivedFeatures / OnFeaturesReceived.
+        public static bool HasReceivedFullConfig { get; private set; } = false;
+        public static event Action OnFullConfigReceived;
+
+        // Client-side: admin editor unlock state, set from PPKB/AdminAuthResult.
+        public static bool AdminUnlocked { get; private set; } = false;
+        public static string AdminAuthReason { get; private set; } = "";
+        public static event Action<bool, string> OnAdminAuthResult;
+
+        // Server-side: client ids that passed an editor auth check this session.
+        // Cleared on disconnect; an inbound PPKB/AdminConfigSet from a client not
+        // in this set is rejected (server is the only authority).
+        private static readonly HashSet<ulong> _authedClients = new HashSet<ulong>();
+
+        // Reassemblers for the chunked string transport (config JSON exceeds the
+        // single-message transport cap).  One per receive direction, keyed by
+        // sender id so concurrent transfers from different peers stay separate.
+        private static readonly StringReassembler _configFullRx = new StringReassembler(); // client side
+        private static readonly StringReassembler _configSetRx = new StringReassembler();   // server side
+
         // event if a mod wants real-time notification
         public static event Action<ulong, string, bool> OnAction; // clientId, action, isDown
 
@@ -110,6 +133,11 @@ namespace PoncePuck.Keybinds
                     _cmm.UnregisterNamedMessageHandler("PPKB/Action");
                     _cmm.UnregisterNamedMessageHandler("PPKB/Features");
                     _cmm.UnregisterNamedMessageHandler("PPKB/GoalTweaks");
+                    _cmm.UnregisterNamedMessageHandler("PPKB/AdminAuth");
+                    _cmm.UnregisterNamedMessageHandler("PPKB/AdminAuthResult");
+                    _cmm.UnregisterNamedMessageHandler("PPKB/AdminConfigSet");
+                    _cmm.UnregisterNamedMessageHandler("PPKB/ConfigFull");
+                    _cmm.UnregisterNamedMessageHandler("PPKB/ConfigReq");
                     _cmm = null;
                 }
             }
@@ -118,9 +146,17 @@ namespace PoncePuck.Keybinds
             _host = null;
             _declared.Clear();
             _held.Clear();
+            _authedClients.Clear();
+            _configFullRx.ClearAll();
+            _configSetRx.ClearAll();
             OnAction = null;
             HasReceivedFeatures = false;
             ReceivedFeatures = new ServerFeatures();
+            HasReceivedFullConfig = false;
+            AdminUnlocked = false;
+            AdminAuthReason = "";
+            OnFullConfigReceived = null;
+            OnAdminAuthResult = null;
             DashFallMod.GoalNetTweaks.ClearSyncedTweaks();
             OnFeaturesReceived = null;
         }
@@ -132,6 +168,10 @@ namespace PoncePuck.Keybinds
         {
             HasReceivedFeatures = false;
             ReceivedFeatures = new ServerFeatures();
+            HasReceivedFullConfig = false;
+            AdminUnlocked = false;
+            AdminAuthReason = "";
+            _configFullRx.ClearAll();
         }
 
         public static bool IsKnown(ulong clientId)
@@ -197,6 +237,11 @@ namespace PoncePuck.Keybinds
                         _cmm.RegisterNamedMessageHandler("PPKB/Action", OnActionMsg);
                         _cmm.RegisterNamedMessageHandler("PPKB/Features", OnFeaturesMsg);
                         _cmm.RegisterNamedMessageHandler("PPKB/GoalTweaks", OnGoalTweaksMsg);
+                        _cmm.RegisterNamedMessageHandler("PPKB/AdminAuth", OnAdminAuthMsg);
+                        _cmm.RegisterNamedMessageHandler("PPKB/AdminAuthResult", OnAdminAuthResultMsg);
+                        _cmm.RegisterNamedMessageHandler("PPKB/AdminConfigSet", OnAdminConfigSetMsg);
+                        _cmm.RegisterNamedMessageHandler("PPKB/ConfigFull", OnConfigFullMsg);
+                        _cmm.RegisterNamedMessageHandler("PPKB/ConfigReq", OnConfigReqMsg);
                         nm.OnClientDisconnectCallback += OnClientLeft;
                         if (DashFallMod.ConfigManager.Config.EnableDebugLogs)
                             DashFallMod.ConfigManager.Dbg($"Registered CMM handlers. IsServer={nm.IsServer} IsHost={nm.IsHost} IsClient={nm.IsClient}");
@@ -217,6 +262,11 @@ namespace PoncePuck.Keybinds
                         _cmm.UnregisterNamedMessageHandler("PPKB/Action");
                         _cmm.UnregisterNamedMessageHandler("PPKB/Features");
                         _cmm.UnregisterNamedMessageHandler("PPKB/GoalTweaks");
+                        _cmm.UnregisterNamedMessageHandler("PPKB/AdminAuth");
+                        _cmm.UnregisterNamedMessageHandler("PPKB/AdminAuthResult");
+                        _cmm.UnregisterNamedMessageHandler("PPKB/AdminConfigSet");
+                        _cmm.UnregisterNamedMessageHandler("PPKB/ConfigFull");
+                        _cmm.UnregisterNamedMessageHandler("PPKB/ConfigReq");
                     }
                     if (nm != null) nm.OnClientDisconnectCallback -= OnClientLeft;
                 }
@@ -228,6 +278,8 @@ namespace PoncePuck.Keybinds
             {
                 _declared.Remove(clientId);
                 _held.Remove(clientId);
+                _authedClients.Remove(clientId);
+                _configSetRx.Clear(clientId);
             }
         }
         
@@ -397,6 +449,7 @@ namespace PoncePuck.Keybinds
             if (features != null) SendFeaturesToClient(clientId, features);
 
             SendGoalTweaksToClient(clientId);
+            SendConfigFullToClient(clientId);
         }
 
         public static void SendGoalTweaksToClient(ulong clientId)
@@ -451,6 +504,327 @@ namespace PoncePuck.Keybinds
 
             foreach (var player in players)
                 SendGoalTweaksToClient(player.OwnerClientId);
+        }
+
+        // ========================================================================
+        // Admin config editor channels
+        //   PPKB/AdminAuth        client -> server : string password
+        //   PPKB/AdminAuthResult  server -> client : bool granted, string reason
+        //   PPKB/AdminConfigSet   client -> server : chunked full-config JSON
+        //   PPKB/ConfigFull       server -> client : chunked full-config JSON
+        // The two config channels carry the SerializeForWire() shape, which never
+        // contains the Admin credential block.
+        // ========================================================================
+
+        // Max characters per chunk for the chunked string transport.  Each chunk
+        // is one named message of [byte total][byte index][string], which
+        // serializes to chunkChars*2 + 6 bytes.  NGO's non-fragmented reliable
+        // named messages are capped near the MTU (~1280 bytes), so 500 chars
+        // (~1006 bytes) stays safely under it.  1500 did NOT: it produced a 3006
+        // byte message and threw "Writing past the end of the buffer, size is
+        // 3006 bytes but remaining capacity is 1280 bytes", so the full config
+        // never reached clients.  Splitting on a char boundary is safe because
+        // the payload is ASCII JSON (no surrogate pairs).
+        private const int ConfigChunkChars = 500;
+
+        // Byte size to allocate a FastBufferWriter for a string of the given
+        // char count: 2 bytes/char + 4-byte length prefix + slack.
+        private static int StringWireCap(int charCount) => charCount * 2 + 16;
+
+        // ---- Client -> server senders --------------------------------------
+
+        public static void SendAdminAuth(string password)
+        {
+            var nm = NetworkManager.Singleton;
+            if (nm == null || _cmm == null) return;
+            try
+            {
+                string pw = password ?? "";
+                int cap = StringWireCap(pw.Length);
+                using (var w = new FastBufferWriter(cap, Unity.Collections.Allocator.Temp, cap))
+                {
+                    w.WriteValueSafe(pw);
+                    _cmm.SendNamedMessage("PPKB/AdminAuth", NetworkManager.ServerClientId, w, NetworkDelivery.Reliable);
+                }
+            }
+            catch (Exception e) { Debug.LogError($"[COMPADJUST] SendAdminAuth exception: {e}"); }
+        }
+
+        public static void SendAdminConfigSet(string wireJson)
+        {
+            if (_cmm == null) return;
+            if (!CompetitiveAdjustments.AdminAuth.AssertNoCredentials(wireJson)) return;
+            SendStringInParts("PPKB/AdminConfigSet", NetworkManager.ServerClientId, wireJson);
+        }
+
+        // ---- Server -> client senders --------------------------------------
+
+        private static void SendAdminAuthResult(ulong clientId, bool granted, string reason)
+        {
+            var nm = NetworkManager.Singleton;
+            if (nm == null || !nm.IsServer || _cmm == null) return;
+            try
+            {
+                string r = reason ?? "";
+                int cap = StringWireCap(r.Length) + 1; // +1 for the bool
+                using (var w = new FastBufferWriter(cap, Unity.Collections.Allocator.Temp, cap))
+                {
+                    w.WriteValueSafe(granted);
+                    w.WriteValueSafe(r);
+                    _cmm.SendNamedMessage("PPKB/AdminAuthResult", clientId, w, NetworkDelivery.Reliable);
+                }
+            }
+            catch (Exception e) { Debug.LogError($"[COMPADJUST] SendAdminAuthResult exception: {e}"); }
+        }
+
+        public static void SendConfigFullToClient(ulong clientId)
+        {
+            var nm = NetworkManager.Singleton;
+            if (nm == null || !nm.IsServer || _cmm == null) return;
+
+            var cfg = CompetitiveAdjustments.ConfigManager.Config;
+            if (cfg == null)
+            {
+                CompetitiveAdjustments.ConfigManager.LogWarning($"ConfigFull to client {clientId} skipped: live config is null.");
+                return;
+            }
+
+            string json = cfg.SerializeForWire();
+            if (!CompetitiveAdjustments.AdminAuth.AssertNoCredentials(json)) return; // never leak creds (already logged)
+            CompetitiveAdjustments.ConfigManager.Log($"Sending full config to client {clientId} ({json.Length} chars).");
+            SendStringInParts("PPKB/ConfigFull", clientId, json);
+        }
+
+        public static void BroadcastConfigFullToAllClients()
+        {
+            var nm = NetworkManager.Singleton;
+            if (nm == null || !nm.IsServer || _cmm == null) return;
+
+            var pm = PlayerManager.Instance;
+            var players = pm != null ? pm.GetPlayers() : null;
+            if (players == null) return;
+
+            foreach (var player in players)
+                SendConfigFullToClient(player.OwnerClientId);
+        }
+
+        // Client -> server: ask the server to (re)send the full config.  The
+        // initial Hello-time push can be missed during connection setup, so the
+        // client retries this until HasReceivedFullConfig (see DashFallClientRunner).
+        public static void RequestConfigFull()
+        {
+            var nm = NetworkManager.Singleton;
+            if (nm == null || _cmm == null || nm.IsServer) return; // host already has it
+            try
+            {
+                using (var w = new FastBufferWriter(8, Unity.Collections.Allocator.Temp))
+                {
+                    w.WriteValueSafe((byte)1);
+                    _cmm.SendNamedMessage("PPKB/ConfigReq", NetworkManager.ServerClientId, w, NetworkDelivery.Reliable);
+                }
+            }
+            catch (Exception e) { Debug.LogError($"[COMPADJUST] RequestConfigFull exception: {e}"); }
+        }
+
+        // Server handler for a client's config request: push the (credential-free)
+        // full config back to just that client.
+        private static void OnConfigReqMsg(ulong senderId, FastBufferReader reader)
+        {
+            var nm = NetworkManager.Singleton;
+            if (nm == null || !nm.IsServer) return;
+            try
+            {
+                CompetitiveAdjustments.ConfigManager.Log($"ConfigReq received from client {senderId}.");
+                SendConfigFullToClient(senderId);
+            }
+            catch (Exception e) { Debug.LogError($"[COMPADJUST] OnConfigReqMsg exception: {e}"); }
+        }
+
+        // Splits an ASCII JSON payload into [byte total][byte index][string chunk]
+        // parts over a single named message.  Reassembled by StringReassembler.
+        private static void SendStringInParts(string msgName, ulong target, string payload)
+        {
+            if (_cmm == null) return;
+            payload = payload ?? "";
+            int total = Mathf.Max(1, Mathf.CeilToInt(payload.Length / (float)ConfigChunkChars));
+            if (total > 255)
+            {
+                Debug.LogError($"[COMPADJUST] SendStringInParts: payload too large ({payload.Length} chars) for {msgName}.");
+                return;
+            }
+
+            for (int i = 0; i < total; i++)
+            {
+                int start = i * ConfigChunkChars;
+                int len = Mathf.Min(ConfigChunkChars, payload.Length - start);
+                string chunk = len > 0 ? payload.Substring(start, len) : "";
+                int cap = StringWireCap(chunk.Length) + 2; // +2 for total/index bytes
+                try
+                {
+                    using (var w = new FastBufferWriter(cap, Unity.Collections.Allocator.Temp, cap))
+                    {
+                        w.WriteValueSafe((byte)total);
+                        w.WriteValueSafe((byte)i);
+                        w.WriteValueSafe(chunk);
+                        _cmm.SendNamedMessage(msgName, target, w, NetworkDelivery.Reliable);
+                    }
+                }
+                catch (Exception e) { Debug.LogError($"[COMPADJUST] SendStringInParts({msgName}) exception: {e}"); }
+            }
+        }
+
+        // ---- Server-side handlers ------------------------------------------
+
+        private static void OnAdminAuthMsg(ulong senderId, FastBufferReader reader)
+        {
+            var nm = NetworkManager.Singleton;
+            if (nm == null || !nm.IsServer) return;
+            try
+            {
+                string password;
+                reader.ReadValueSafe(out password); // never logged
+
+                bool granted = CompetitiveAdjustments.AdminAuth.IsAllowed(senderId, password);
+                if (granted)
+                {
+                    _authedClients.Add(senderId);
+                    SendAdminAuthResult(senderId, true, "Unlocked.");
+                }
+                else
+                {
+                    _authedClients.Remove(senderId);
+                    var admin = CompetitiveAdjustments.ConfigManager.Config?.Admin;
+                    bool pwPathOn = admin != null && !string.IsNullOrEmpty(admin.EditorPassword);
+                    string reason;
+                    if (string.IsNullOrEmpty(password))
+                        // Empty password is the auto-unlock probe (allowlist check),
+                        // not a wrong-password attempt; keep the message neutral.
+                        reason = pwPathOn ? "Enter the admin password to unlock." : "Not authorized (admin only).";
+                    else
+                        reason = "Incorrect password.";
+                    SendAdminAuthResult(senderId, false, reason);
+                }
+            }
+            catch (Exception e) { Debug.LogError($"[COMPADJUST] OnAdminAuthMsg exception: {e}"); }
+        }
+
+        private static void OnAdminConfigSetMsg(ulong senderId, FastBufferReader reader)
+        {
+            var nm = NetworkManager.Singleton;
+            if (nm == null || !nm.IsServer) return;
+            try
+            {
+                byte total, index;
+                string chunk;
+                reader.ReadValueSafe(out total);
+                reader.ReadValueSafe(out index);
+                reader.ReadValueSafe(out chunk);
+
+                string json = _configSetRx.Feed(senderId, total, index, chunk);
+                if (json == null) return; // awaiting more parts
+
+                // Defense in depth: re-validate authority, never trust the client UI lock.
+                if (!_authedClients.Contains(senderId))
+                {
+                    Debug.LogWarning($"[COMPADJUST] Rejected PPKB/AdminConfigSet from un-authed client {senderId}.");
+                    SendAdminAuthResult(senderId, false, "Not authorized.");
+                    return;
+                }
+
+                CompetitiveAdjustments.ConfigApplyService.ApplyServerConfigEdit(json);
+                SendAdminAuthResult(senderId, true, "Applied.");
+                CompetitiveAdjustments.ConfigManager.Log($"Admin config edit applied from client {senderId}.");
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[COMPADJUST] OnAdminConfigSetMsg exception: {e}");
+                SendAdminAuthResult(senderId, false, "Apply failed.");
+            }
+        }
+
+        // ---- Client-side handlers ------------------------------------------
+
+        private static void OnAdminAuthResultMsg(ulong senderId, FastBufferReader reader)
+        {
+            try
+            {
+                bool granted;
+                string reason;
+                reader.ReadValueSafe(out granted);
+                reader.ReadValueSafe(out reason);
+
+                // Sticky-true: an explicit grant unlocks; a later non-grant (e.g.
+                // a failed apply status) carries its reason but does not re-lock
+                // an editor the server already trusts.
+                if (granted) AdminUnlocked = true;
+                AdminAuthReason = reason ?? "";
+                OnAdminAuthResult?.Invoke(granted, AdminAuthReason);
+            }
+            catch (Exception e) { Debug.LogError($"[COMPADJUST] OnAdminAuthResultMsg exception: {e}"); }
+        }
+
+        private static void OnConfigFullMsg(ulong senderId, FastBufferReader reader)
+        {
+            try
+            {
+                byte total, index;
+                string chunk;
+                reader.ReadValueSafe(out total);
+                reader.ReadValueSafe(out index);
+                reader.ReadValueSafe(out chunk);
+
+                string json = _configFullRx.Feed(senderId, total, index, chunk);
+                if (json == null) return; // awaiting more parts
+
+                // Display/edit mirror only: LoadFromJson skips server-authoritative
+                // apply hooks unless this process is the server.
+                CompetitiveAdjustments.ConfigManager.LoadFromJson(json);
+                HasReceivedFullConfig = true;
+                CompetitiveAdjustments.ConfigManager.Log($"Received full server config ({json.Length} chars).");
+                OnFullConfigReceived?.Invoke();
+            }
+            catch (Exception e) { Debug.LogError($"[COMPADJUST] OnConfigFullMsg exception: {e}"); }
+        }
+
+        // Reassembles a [total][index][chunk] part sequence into the full string,
+        // keyed by sender id so concurrent transfers from different peers (and
+        // separate server/client receive directions) never cross-contaminate.
+        private sealed class StringReassembler
+        {
+            private readonly Dictionary<ulong, string[]> _parts = new Dictionary<ulong, string[]>();
+            private readonly Dictionary<ulong, int> _received = new Dictionary<ulong, int>();
+
+            // Returns the full string once all parts have arrived, else null.
+            public string Feed(ulong sender, byte total, byte index, string chunk)
+            {
+                if (total == 0 || index >= total) return null;
+
+                _parts.TryGetValue(sender, out var arr);
+                // A fresh transfer always starts at index 0; on that first chunk
+                // drop any stale partial left over from an earlier interrupted
+                // transfer (e.g. a retry of a send whose first chunks were missed)
+                // so old and new chunks can never be merged.
+                if (index == 0 || arr == null || arr.Length != total)
+                {
+                    arr = new string[total];
+                    _parts[sender] = arr;
+                    _received[sender] = 0;
+                }
+
+                if (arr[index] == null) _received[sender] = _received[sender] + 1;
+                arr[index] = chunk ?? "";
+
+                if (_received[sender] < total) return null;
+
+                var sb = new System.Text.StringBuilder();
+                for (int i = 0; i < total; i++) sb.Append(arr[i] ?? "");
+                _parts.Remove(sender);
+                _received.Remove(sender);
+                return sb.ToString();
+            }
+
+            public void Clear(ulong sender) { _parts.Remove(sender); _received.Remove(sender); }
+            public void ClearAll() { _parts.Clear(); _received.Clear(); }
         }
 
         // ---------- Message handlers ----------

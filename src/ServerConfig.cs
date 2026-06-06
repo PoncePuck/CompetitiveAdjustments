@@ -1,6 +1,6 @@
 // ServerConfig.cs
 // Unified server-side configuration for CompetitiveAdjustments.
-// Nested JSON: { "ConfigVersion": 10, "Dashfall": { ... }, "CompAdjust": { ... }, "CompTweaks": { ... } }
+// Nested JSON: { "ConfigVersion": 12, "Dashfall": { ... }, "CompAdjust": { ... }, "CompTweaks": { ... } }
 // Uses JsonUtility with comment-stripping (DashFall pattern).
 
 using System;
@@ -189,6 +189,13 @@ namespace CompetitiveAdjustments
         public float PuckStickTensorY = 0.002f;
         public float PuckStickTensorZ = 0.006f;
         public float PuckScale = 1f;
+        // Per-axis multipliers applied on top of the uniform PuckScale. Final
+        // localScale = PuckScale * (PuckScaleX, PuckScaleY, PuckScaleZ). The puck
+        // is a flat disc: X/Z are the diameter, Y is the thickness. All default
+        // to 1 so existing configs reproduce the old uniform behaviour.
+        public float PuckScaleX = 1f;
+        public float PuckScaleY = 1f;
+        public float PuckScaleZ = 1f;
         public float PuckDrag = 0.3f;
         public float PuckMass = 0.375f;
         public bool RandomPuckDrop = false;
@@ -239,10 +246,35 @@ namespace CompetitiveAdjustments
         public bool BananaMode = false;
     }
 
+    // Credentials for the in-game admin config editor.  Stored inside
+    // CompetitiveAdjustments.json but DELIBERATELY excluded from every
+    // client-facing serialization (see ServerConfig.SerializeForWire and
+    // ConfigManager.LoadFromJson).  Broadcasting these would hand every
+    // connected client the admin password material, so the wire path must
+    // never carry this block.
+    [Serializable]
+    public class AdminAuthConfig
+    {
+        // A random password generated once when the config file is first written
+        // (see ConfigManager.WriteConfig).  Server-side only: the whole Admin
+        // block is stripped from every wire payload, so this never reaches a
+        // client.  The host reads it from CompetitiveAdjustments.json (or the
+        // SERVER tab) and shares it to grant a non-admin editor access.  Delete
+        // the file, or blank this field, to regenerate it on the next write.
+        //
+        // Admin identity itself (host + the game's own admin list) is resolved
+        // live in AdminAuth.IsAdmin, so there is no Steam-ID allowlist here.
+        public string EditorPassword = "";
+    }
+
     [Serializable]
     public class ServerConfig
     {
-        public int ConfigVersion = 11;
+        // Single source of truth for the config schema version.  Bump this
+        // whenever fields are added or removed so existing files are migrated
+        // (merged onto the current defaults) on the next load.
+        public const int CURRENT_VERSION = 14;
+        public int ConfigVersion = CURRENT_VERSION;
         // Top-level section enables.  Each gates a whole feature category so
         // a user who only wants one category can disable the others without
         // touching every individual flag.  All default to true to preserve
@@ -253,6 +285,30 @@ namespace CompetitiveAdjustments
         public DashfallConfig Dashfall = new DashfallConfig();
         public CompAdjustConfig CompAdjust = new CompAdjustConfig();
         public CompTweaksConfig CompTweaks = new CompTweaksConfig();
+        // Admin editor credentials.  NEVER serialized onto the wire.
+        public AdminAuthConfig Admin = new AdminAuthConfig();
+
+        // Produces the compact (non-indented) JSON sent to clients and accepted
+        // back from the admin editor.  This is the SAME content WriteConfig
+        // stitches MINUS the Admin block, so credentials never leave the
+        // server.  Because WriteConfig already stitches blocks by hand we get a
+        // credential-free serialization for free by simply omitting Admin here.
+        public string SerializeForWire()
+        {
+            string dashfallJson   = JsonUtility.ToJson(Dashfall   ?? new DashfallConfig(),   false);
+            string compAdjustJson = JsonUtility.ToJson(CompAdjust ?? new CompAdjustConfig(), false);
+            string compTweaksJson = JsonUtility.ToJson(CompTweaks ?? new CompTweaksConfig(), false);
+
+            return "{"
+                + "\"ConfigVersion\":"    + ConfigVersion + ","
+                + "\"EnableDashfall\":"   + (EnableDashfall   ? "true" : "false") + ","
+                + "\"EnableCompAdjust\":" + (EnableCompAdjust ? "true" : "false") + ","
+                + "\"EnableCompTweaks\":" + (EnableCompTweaks ? "true" : "false") + ","
+                + "\"Dashfall\":"   + dashfallJson   + ","
+                + "\"CompAdjust\":" + compAdjustJson + ","
+                + "\"CompTweaks\":" + compTweaksJson
+                + "}";
+        }
     }
 
     public static class ConfigManager
@@ -275,7 +331,6 @@ namespace CompetitiveAdjustments
         }
 
         private static string ConfigFile => Path.Combine(ConfigDir, "CompetitiveAdjustments.json");
-        private const int CONFIG_VERSION = 11;
 
         // "All disabled" sentinel configs returned by the Effective accessors
         // when their master section flag is off.  Feature consumers read these
@@ -369,53 +424,48 @@ namespace CompetitiveAdjustments
         public static CompTweaksConfig CompTweaksEffective =>
             Config != null && Config.EnableCompTweaks ? Config.CompTweaks : _disabledCompTweaks;
 
+        // Guarantees a valid, current-schema config file exists on disk.  This
+        // never touches the in-memory Config or fires reconcile hooks -- that
+        // is ReloadConfig's job, and callers invoke ReloadConfig right after.
         public static void EnsureConfig()
         {
             if (!Directory.Exists(ConfigDir)) Directory.CreateDirectory(ConfigDir);
 
-            if (File.Exists(ConfigFile))
-            {
-                try
-                {
-                    string existing = File.ReadAllText(ConfigFile);
-                    // Detect old flat format (doesn't have nested section headers)
-                    bool isNested = existing.Contains("\"Dashfall\"") || existing.Contains("\"CompTweaks\"");
-                    if (!isNested)
-                    {
-                        string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                        File.Copy(ConfigFile, Path.Combine(ConfigDir, $"CompetitiveAdjustments_{ts}_old.json"));
-                        WriteConfig(new ServerConfig());
-                    }
-                    else
-                    {
-                        bool missingGoalieReachFields =
-                            !existing.Contains("\"GoalieSlidingReachReduction\"") ||
-                            !existing.Contains("\"GoalieSlidingReachScale\"");
-                        bool missingTorsoXYZFields =
-                            !existing.Contains("\"CustomTorsoScaleX\"") ||
-                            !existing.Contains("\"DisableCustomTorsoVisual\"");
-                        bool missingCompAdjustSection = !existing.Contains("\"CompAdjust\"");
-                        bool missingSectionEnables =
-                            !existing.Contains("\"EnableDashfall\"") ||
-                            !existing.Contains("\"EnableCompAdjust\"") ||
-                            !existing.Contains("\"EnableCompTweaks\"");
-                        bool outdatedVersion = !Regex.IsMatch(existing, $"\"ConfigVersion\"\\s*:\\s*{CONFIG_VERSION}");
-
-                        if (missingGoalieReachFields || missingTorsoXYZFields || missingCompAdjustSection || missingSectionEnables || outdatedVersion)
-                        {
-                            ReloadConfig();
-                            WriteConfig(Config ?? new ServerConfig());
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    CompetitiveAdjustments.ConfigManager.LogWarning("Error upgrading config: " + ex.Message);
-                }
-            }
-            else
+            if (!File.Exists(ConfigFile))
             {
                 WriteConfig(new ServerConfig());
+                return;
+            }
+
+            try
+            {
+                string raw = File.ReadAllText(ConfigFile);
+
+                // The old flat format (no section objects) cannot be migrated
+                // field-by-field, so preserve the user's file as a timestamped
+                // backup and write fresh defaults.
+                bool isNested = raw.Contains("\"Dashfall\"") || raw.Contains("\"CompTweaks\"");
+                if (!isNested)
+                {
+                    string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                    File.Copy(ConfigFile, Path.Combine(ConfigDir, $"CompetitiveAdjustments_{ts}_old.json"));
+                    WriteConfig(new ServerConfig());
+                    return;
+                }
+
+                // Nested but stale: merge the existing values onto the current
+                // defaults and rewrite, so newly-added fields appear with their
+                // defaults and the version is bumped.  Existing values survive.
+                string clean = StripJson(raw);
+                if (NeedsUpgrade(clean))
+                {
+                    BackupConfigFile("upgrade");
+                    WriteConfig(ParseConfig(clean));
+                }
+            }
+            catch (Exception ex)
+            {
+                CompetitiveAdjustments.ConfigManager.LogWarning("Error upgrading config: " + ex.Message);
             }
         }
 
@@ -423,10 +473,27 @@ namespace CompetitiveAdjustments
         // then stitch into a nested JSON file.
         private static void WriteConfig(ServerConfig cfg)
         {
-            cfg.ConfigVersion = CONFIG_VERSION;
+            cfg.Admin = cfg.Admin ?? new AdminAuthConfig();
+            // Generate the random editor password the first time the file is
+            // written (and after an upgrade that dropped the old credentials).
+            if (string.IsNullOrEmpty(cfg.Admin.EditorPassword))
+                cfg.Admin.EditorPassword = AdminAuth.GeneratePassword();
+            File.WriteAllText(ConfigFile, BuildConfigContent(cfg, redactAdmin: false));
+        }
+
+        // Builds the nested, indented on-disk JSON for a config.  When
+        // redactAdmin is true the editor password is blanked (for a shareable
+        // export); the live config is never mutated by the redaction, a throwaway
+        // Admin copy is serialized instead.
+        private static string BuildConfigContent(ServerConfig cfg, bool redactAdmin)
+        {
+            cfg.ConfigVersion = ServerConfig.CURRENT_VERSION;
             string dashfallJson = JsonUtility.ToJson(cfg.Dashfall, true);
             string compAdjustJson = JsonUtility.ToJson(cfg.CompAdjust, true);
             string compTweaksJson = JsonUtility.ToJson(cfg.CompTweaks, true);
+            var admin = redactAdmin ? new AdminAuthConfig { EditorPassword = "" }
+                                    : (cfg.Admin ?? new AdminAuthConfig());
+            string adminJson = JsonUtility.ToJson(admin, true);
 
             // Indent sub-section lines by 2 spaces
             string IndentBlock(string json)
@@ -437,7 +504,7 @@ namespace CompetitiveAdjustments
                 return string.Join("\n", lines);
             }
 
-            string content =
+            return
                 $"{{\n" +
                 $"  \"ConfigVersion\": {cfg.ConfigVersion},\n" +
                 $"  \"EnableDashfall\":  {(cfg.EnableDashfall  ? "true" : "false")},\n" +
@@ -445,9 +512,34 @@ namespace CompetitiveAdjustments
                 $"  \"EnableCompTweaks\": {(cfg.EnableCompTweaks ? "true" : "false")},\n" +
                 $"  \"Dashfall\": {IndentBlock(dashfallJson)},\n" +
                 $"  \"CompAdjust\": {IndentBlock(compAdjustJson)},\n" +
-                $"  \"CompTweaks\": {IndentBlock(compTweaksJson)}\n" +
+                $"  \"CompTweaks\": {IndentBlock(compTweaksJson)},\n" +
+                $"  \"Admin\": {IndentBlock(adminJson)}\n" +
                 $"}}";
-            File.WriteAllText(ConfigFile, content);
+        }
+
+        // The full config in the readable on-disk format with the editor password
+        // blanked, safe to share or back up.  Pass the editor's working copy to
+        // export exactly what is on screen, or null to export the live config.
+        public static string ExportConfigJson(ServerConfig cfg = null)
+        {
+            return BuildConfigContent(cfg ?? Config ?? new ServerConfig(), redactAdmin: true);
+        }
+
+        // Writes the redacted export next to the live config and returns the full
+        // path (or null on failure).
+        public static string ExportConfigToFile(ServerConfig cfg = null)
+        {
+            try
+            {
+                string path = Path.Combine(ConfigDir, "CompetitiveAdjustments_export.json");
+                File.WriteAllText(path, ExportConfigJson(cfg));
+                return path;
+            }
+            catch (Exception ex)
+            {
+                LogWarning("ExportConfigToFile failed: " + ex.Message);
+                return null;
+            }
         }
 
         public static void SaveConfig()
@@ -455,61 +547,43 @@ namespace CompetitiveAdjustments
             WriteConfig(Config ?? new ServerConfig());
         }
 
+        // Snapshot the current config file before a migration rewrites it, so a
+        // schema bump that drops fields the old file did not contain (they come
+        // back as defaults) can be recovered from disk instead of being lost.
+        private static void BackupConfigFile(string tag)
+        {
+            try
+            {
+                if (!File.Exists(ConfigFile)) return;
+                string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string dest = Path.Combine(ConfigDir, $"CompetitiveAdjustments_{ts}_{tag}.json");
+                File.Copy(ConfigFile, dest, true);
+                Log($"Backed up config to {Path.GetFileName(dest)} before {tag}.");
+            }
+            catch (Exception ex) { LogWarning("Config backup failed: " + ex.Message); }
+        }
+
         public static void ReloadConfig()
         {
-            var cfg = new ServerConfig();
             try
             {
                 if (!File.Exists(ConfigFile))
                 {
-                    Config = cfg;
-                    SyncFeatureStates(cfg);
+                    Config = new ServerConfig();
+                    SyncFeatureStates(Config);
+                    NotifySubModReconcile();
                     return;
                 }
 
-                string raw = File.ReadAllText(ConfigFile);
-                string clean = Regex.Replace(
-                    Regex.Replace(
-                        Regex.Replace(raw, @"//.*?$", "", RegexOptions.Multiline),
-                        @"/\*.*?\*/", "", RegexOptions.Singleline),
-                    @",\s*(\}|\])", "$1");
+                string clean = StripJson(File.ReadAllText(ConfigFile));
+                var cfg = ParseConfig(clean);
 
-                // Top-level section enables.  Old configs without these keep
-                // the default-true behaviour.
-                cfg.EnableDashfall   = ExtractTopLevelBool(clean, "EnableDashfall",   true);
-                cfg.EnableCompAdjust = ExtractTopLevelBool(clean, "EnableCompAdjust", true);
-                cfg.EnableCompTweaks = ExtractTopLevelBool(clean, "EnableCompTweaks", true);
-
-                // Extract each section and deserialize flat into its class
-                string dashfallJson = ExtractSection(clean, "Dashfall");
-                string compAdjustJson = ExtractSection(clean, "CompAdjust");
-                string compTweaksJson = ExtractSection(clean, "CompTweaks");
-
-                if (!string.IsNullOrEmpty(dashfallJson))
-                    JsonUtility.FromJsonOverwrite(dashfallJson, cfg.Dashfall);
-                if (!string.IsNullOrEmpty(compAdjustJson))
-                    JsonUtility.FromJsonOverwrite(compAdjustJson, cfg.CompAdjust);
-                else if (!string.IsNullOrEmpty(dashfallJson))
-                    // Migrate: CompAdjust fields were previously stored in Dashfall section
-                    JsonUtility.FromJsonOverwrite(dashfallJson, cfg.CompAdjust);
-                if (!string.IsNullOrEmpty(compTweaksJson))
-                    JsonUtility.FromJsonOverwrite(compTweaksJson, cfg.CompTweaks);
-
-                bool missingGoalieReachFields =
-                    !clean.Contains("\"GoalieSlidingReachReduction\"") ||
-                    !clean.Contains("\"GoalieSlidingReachScale\"");
-                bool missingTorsoXYZFields =
-                    !clean.Contains("\"CustomTorsoScaleX\"") ||
-                    !clean.Contains("\"DisableCustomTorsoVisual\"");
-                bool missingCompAdjustSection = !clean.Contains("\"CompAdjust\"");
-                bool missingSectionEnables =
-                    !clean.Contains("\"EnableDashfall\"") ||
-                    !clean.Contains("\"EnableCompAdjust\"") ||
-                    !clean.Contains("\"EnableCompTweaks\"");
-                bool outdatedVersion = !Regex.IsMatch(clean, $"\"ConfigVersion\"\\s*:\\s*{CONFIG_VERSION}");
-
-                if (missingGoalieReachFields || missingTorsoXYZFields || missingCompAdjustSection || missingSectionEnables || outdatedVersion)
+                // Self-heal the file if it is missing fields or on an older
+                // version, so a direct ReloadConfig (no prior EnsureConfig)
+                // still brings the on-disk file up to the current schema.
+                if (NeedsUpgrade(clean))
                 {
+                    BackupConfigFile("upgrade");
                     WriteConfig(cfg);
                 }
 
@@ -523,6 +597,138 @@ namespace CompetitiveAdjustments
                 SyncFeatureStates(Config);
                 NotifySubModReconcile();
             }
+        }
+
+        // Strip // and /* */ comments and trailing commas so JsonUtility can
+        // parse a hand-edited config file.
+        private static string StripJson(string raw)
+        {
+            return Regex.Replace(
+                Regex.Replace(
+                    Regex.Replace(raw, @"//.*?$", "", RegexOptions.Multiline),
+                    @"/\*.*?\*/", "", RegexOptions.Singleline),
+                @",\s*(\}|\])", "$1");
+        }
+
+        // Parse a cleaned config string into a ServerConfig.  Anything absent
+        // from the file keeps its type default, so this is a merge of the
+        // file's values onto the current schema.  Pure: no I/O, no mutation of
+        // the live Config, no reconcile hooks.
+        private static ServerConfig ParseConfig(string clean)
+        {
+            var cfg = new ServerConfig();
+
+            // Old configs without these top-level flags keep the default-true
+            // behaviour.
+            cfg.EnableDashfall   = ExtractTopLevelBool(clean, "EnableDashfall",   true);
+            cfg.EnableCompAdjust = ExtractTopLevelBool(clean, "EnableCompAdjust", true);
+            cfg.EnableCompTweaks = ExtractTopLevelBool(clean, "EnableCompTweaks", true);
+
+            // Extract each section and deserialize flat into its class.
+            string dashfallJson   = ExtractSection(clean, "Dashfall");
+            string compAdjustJson = ExtractSection(clean, "CompAdjust");
+            string compTweaksJson = ExtractSection(clean, "CompTweaks");
+
+            if (!string.IsNullOrEmpty(dashfallJson))
+                JsonUtility.FromJsonOverwrite(dashfallJson, cfg.Dashfall);
+            if (!string.IsNullOrEmpty(compAdjustJson))
+                JsonUtility.FromJsonOverwrite(compAdjustJson, cfg.CompAdjust);
+            else if (!string.IsNullOrEmpty(dashfallJson))
+                // Migrate: CompAdjust fields were previously stored in Dashfall.
+                JsonUtility.FromJsonOverwrite(dashfallJson, cfg.CompAdjust);
+            if (!string.IsNullOrEmpty(compTweaksJson))
+                JsonUtility.FromJsonOverwrite(compTweaksJson, cfg.CompTweaks);
+
+            // Admin credentials live in the on-disk file only.  ParseConfig is
+            // the disk path, so it is the one place we DO read the Admin block.
+            // The wire path (LoadFromJson) deliberately never touches it.
+            string adminJson = ExtractSection(clean, "Admin");
+            if (!string.IsNullOrEmpty(adminJson))
+                JsonUtility.FromJsonOverwrite(adminJson, cfg.Admin);
+
+            return cfg;
+        }
+
+        // Overwrite ONLY the three sections and the three section enables from a
+        // wire JSON payload (the SerializeForWire shape).  Used by both the
+        // client full-config mirror and the server's inbound admin-edit handler.
+        //
+        // Two critical guarantees:
+        //  1. It NEVER reads an "Admin" block, even if a malicious client stuffs
+        //     one into the payload.  The live Config.Admin is left untouched, so
+        //     credentials survive an inbound edit on the server and are never
+        //     populated from the wire on a client.
+        //  2. On a client it does NOT run the server-authoritative apply hooks
+        //     (SyncFeatureStates / NotifySubModReconcile).  Those set the static
+        //     client feature gates from the config; on a client those gates are
+        //     driven by the PPKB/Features sync, not by this display mirror, so
+        //     running them here would let the synced config silently repurpose
+        //     the client's feature gating.  They run only when this process is
+        //     the server (host editing in-process, or the inbound edit handler).
+        public static void LoadFromJson(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return;
+            try
+            {
+                string clean = StripJson(json);
+                var cfg = Config ?? new ServerConfig();
+
+                cfg.EnableDashfall   = ExtractTopLevelBool(clean, "EnableDashfall",   cfg.EnableDashfall);
+                cfg.EnableCompAdjust = ExtractTopLevelBool(clean, "EnableCompAdjust", cfg.EnableCompAdjust);
+                cfg.EnableCompTweaks = ExtractTopLevelBool(clean, "EnableCompTweaks", cfg.EnableCompTweaks);
+
+                string dashfallJson   = ExtractSection(clean, "Dashfall");
+                string compAdjustJson = ExtractSection(clean, "CompAdjust");
+                string compTweaksJson = ExtractSection(clean, "CompTweaks");
+
+                if (!string.IsNullOrEmpty(dashfallJson))   JsonUtility.FromJsonOverwrite(dashfallJson,   cfg.Dashfall);
+                if (!string.IsNullOrEmpty(compAdjustJson)) JsonUtility.FromJsonOverwrite(compAdjustJson, cfg.CompAdjust);
+                if (!string.IsNullOrEmpty(compTweaksJson)) JsonUtility.FromJsonOverwrite(compTweaksJson, cfg.CompTweaks);
+                // NOTE: no ExtractSection(clean, "Admin") here, by design.
+
+                Config = cfg;
+
+                var nm = Unity.Netcode.NetworkManager.Singleton;
+                if (nm != null && nm.IsServer)
+                {
+                    SyncFeatureStates(cfg);
+                    NotifySubModReconcile();
+                }
+            }
+            catch (Exception ex)
+            {
+                LogWarning("LoadFromJson failed: " + ex.Message);
+            }
+        }
+
+        // True when the on-disk file should be rewritten to reach the current
+        // schema: either the version differs, or a known field/section is
+        // absent (a safety net for a field added without a version bump).
+        private static bool NeedsUpgrade(string clean)
+        {
+            if (ParseConfigVersion(clean) != ServerConfig.CURRENT_VERSION)
+                return true;
+
+            return !clean.Contains("\"GoalieSlidingReachReduction\"")
+                || !clean.Contains("\"GoalieSlidingReachScale\"")
+                || !clean.Contains("\"CustomTorsoScaleX\"")
+                || !clean.Contains("\"DisableCustomTorsoVisual\"")
+                || !clean.Contains("\"CompAdjust\"")
+                || !clean.Contains("\"EnableDashfall\"")
+                || !clean.Contains("\"EnableCompAdjust\"")
+                || !clean.Contains("\"EnableCompTweaks\"")
+                || !clean.Contains("\"Admin\"")
+                || !clean.Contains("\"EditorPassword\"");
+        }
+
+        // Read the integer ConfigVersion, or -1 if absent/unparseable.  Parsing
+        // the number (rather than substring-matching the literal) avoids "12"
+        // spuriously matching "120", and correctly flags a newer file (e.g. 13)
+        // as a version mismatch.
+        private static int ParseConfigVersion(string json)
+        {
+            var m = Regex.Match(json, "\"ConfigVersion\"\\s*:\\s*(-?\\d+)");
+            return m.Success && int.TryParse(m.Groups[1].Value, out int v) ? v : -1;
         }
 
         // Soft hand-off to CompetitiveAdjustmentsGameMod.ApplySubModEnables.

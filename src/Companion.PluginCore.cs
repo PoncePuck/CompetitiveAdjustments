@@ -183,7 +183,13 @@ namespace CompetitiveCompanion
         public static void ResetPuckScale()
         {
             if (config == null) return;
+            // Reset the uniform master AND every per-axis multiplier, otherwise a
+            // wide/flat puck from the last server would persist (ComposeScale would
+            // still apply PuckScaleX/Y/Z on top of the reset uniform 1).
             PluginCore.config.PuckScale = 1f;
+            PluginCore.config.PuckScaleX = 1f;
+            PluginCore.config.PuckScaleY = 1f;
+            PluginCore.config.PuckScaleZ = 1f;
         }
 
         public static void DefinePlayerMesh()
@@ -423,6 +429,9 @@ namespace CompetitiveCompanion
                 CompetitivePuckTweaks.src.ConfigSyncPackage receivedPackage = new CompetitivePuckTweaks.src.ConfigSyncPackage();
                 messagePayload.ReadValueSafe(out receivedPackage);
                 config.PuckScale = receivedPackage.PuckScale;
+                config.PuckScaleX = receivedPackage.PuckScaleX;
+                config.PuckScaleY = receivedPackage.PuckScaleY;
+                config.PuckScaleZ = receivedPackage.PuckScaleZ;
                 config.ButterflyPadOffset = receivedPackage.LegPadOffset;
                 DashFallConfigLoader.SaveClientConfig(config);
 
@@ -451,11 +460,12 @@ namespace CompetitiveCompanion
                     List<Puck> pucks = PuckManager.Instance.GetPucks();
                     if (pucks != null)
                     {
-                        Debug.Log($"[{CompetitiveAdjustments.SharedConstants.MOD_NAME}] Applying PuckScale {receivedPackage.PuckScale} to {pucks.Count} existing pucks");
+                        UnityEngine.Vector3 puckScale = CompetitivePuckTweaks.src.PuckPatch.GetSyncedPuckScaleVector();
+                        Debug.Log($"[{CompetitiveAdjustments.SharedConstants.MOD_NAME}] Applying puck scale {puckScale} to {pucks.Count} existing pucks");
                         foreach (Puck puck in pucks)
                         {
                             if (puck == null) continue;
-                            puck.transform.localScale = UnityEngine.Vector3.one * config.PuckScale;
+                            puck.transform.localScale = puckScale;
                         }
                     }
                 }

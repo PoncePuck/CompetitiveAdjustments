@@ -16,6 +16,11 @@ namespace DashFallMod.Client
         public bool ShowPlayerClipBrushes = false; // debug: visualise player collider meshes
         public bool EnableMinimapTweaks = false;    // apply arena-scale minimap rescaling
         public float PuckScale = 1f;
+        // Per-axis multipliers applied on top of PuckScale (server-synced).
+        // Final localScale = PuckScale * (PuckScaleX, PuckScaleY, PuckScaleZ).
+        public float PuckScaleX = 1f;
+        public float PuckScaleY = 1f;
+        public float PuckScaleZ = 1f;
         public float ButterflyPadOffset = 0f;
         public bool FreeBladeSpinLockEnabled = true;
         public float FreeBladeSpinMin = -4f;
