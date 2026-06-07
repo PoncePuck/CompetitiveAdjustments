@@ -95,6 +95,9 @@ namespace DashFallMod.Client
             {
                 RefreshActionsUI();
             }
+
+            // Joined a server running COMPADJUST: warn now if this client is out of date.
+            OnJoinedModdedServer();
         }
 
         private void OnLevelSpawnedForMinimap(System.Collections.Generic.Dictionary<string, object> _)
@@ -338,8 +341,10 @@ namespace DashFallMod.Client
                 GoalieDashExtend.EnsureCMMRegistered();
                 Stances.EnsureCMMRegistered();
                 
-                // Handle ESC key to fully close DashFall panel
-                if (_dfPanel != null && _dfPanel.style.display == UITK.DisplayStyle.Flex && !_isCapturing)
+                // Handle ESC key to fully close DashFall panel (suppressed while the
+                // out-of-date popup is showing, so ESC there only dismisses the popup).
+                if (_dfPanel != null && _dfPanel.style.display == UITK.DisplayStyle.Flex && !_isCapturing
+                    && _versionBackdrop == null)
                 {
                     var kb = UnityEngine.InputSystem.Keyboard.current;
                     if (kb != null && kb.escapeKey.wasPressedThisFrame)
@@ -359,6 +364,9 @@ namespace DashFallMod.Client
                     _nextUIProbeAt = Time.unscaledTime + 0.5f;
                     TryWireButtonIfNeeded();
                 }
+
+                // Out-of-date Workshop version popup (one-shot Steam check, then show/keep).
+                TickVersionPopup();
             }
             catch (System.OverflowException) { }
             catch (Exception ex)

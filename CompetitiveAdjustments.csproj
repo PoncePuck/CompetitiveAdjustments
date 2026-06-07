@@ -122,6 +122,12 @@
       <Private>false</Private>
     </Reference>
 
+    <!-- Steamworks.NET (workshop update detection for the version popup) -->
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>$(GameManaged)\com.rlabrecque.steamworks.net.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
     <!-- AssetBundle support -->
     <Reference Include="UnityEngine.AssetBundleModule">
       <HintPath>$(GameManaged)\UnityEngine.AssetBundleModule.dll</HintPath>

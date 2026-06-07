@@ -1123,6 +1123,10 @@ namespace DashFallMod.Client
                 CompetitivePuckTweaks.src.ClientClipBrushes.ApplyPlayer(val);
             }));
 
+            // Debug: preview the out-of-date version popup without a real Workshop update.
+            _actionsSection.Add(MakeButtonRow("TEST VERSION POPUP", "Preview the 'mod out of date' popup", "SHOW",
+                () => ForceShowVersionPopupForTest()));
+
             // Check if connected to server
             var features = PoncePuck.Keybinds.ServerBridge.ReceivedFeatures;
             bool hasFeatures = PoncePuck.Keybinds.ServerBridge.HasReceivedFeatures;
@@ -1193,6 +1197,57 @@ namespace DashFallMod.Client
                 RefreshActionsUI(); // Refresh to show/hide keybind section
             });
             row.Add(toggle);
+
+            return row;
+        }
+
+        // A label/description row with a single action button on the right. Same visual
+        // frame as MakeToggleRow but the control is a Button instead of a checkbox.
+        private UITK.VisualElement MakeButtonRow(string title, string description, string buttonText, Action onClick)
+        {
+            var row = new UITK.VisualElement();
+            MarkSearchable(row, title);
+            row.style.flexDirection = UITK.FlexDirection.Row;
+            row.style.alignItems = UITK.Align.Center;
+            row.style.height = 50;
+            row.style.marginBottom = 8;
+            row.style.backgroundColor = new UITK.StyleColor(RowBg);
+            row.style.paddingLeft = 12;
+            row.style.paddingRight = 12;
+            row.style.borderTopLeftRadius = 4;
+            row.style.borderTopRightRadius = 4;
+            row.style.borderBottomLeftRadius = 4;
+            row.style.borderBottomRightRadius = 4;
+
+            var textContainer = new UITK.VisualElement();
+            textContainer.style.flexGrow = 1;
+            textContainer.style.flexDirection = UITK.FlexDirection.Column;
+            textContainer.style.justifyContent = UITK.Justify.Center;
+
+            var label = new UITK.Label(title);
+            label.style.fontSize = 24;
+            MakeReadable(label);
+            textContainer.Add(label);
+
+            if (!string.IsNullOrEmpty(description))
+            {
+                var descLabel = new UITK.Label(description);
+                descLabel.style.fontSize = 16;
+                descLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
+                ForceUIFont(descLabel);
+                textContainer.Add(descLabel);
+            }
+
+            row.Add(textContainer);
+
+            var btn = new UITK.Button { text = buttonText };
+            btn.style.height = 34;
+            btn.style.minWidth = 90;
+            btn.style.backgroundColor = new UITK.StyleColor(TabInactiveBg);
+            btn.style.color = Color.white;
+            ForceUIFont(btn);
+            btn.clicked += () => onClick?.Invoke();
+            row.Add(btn);
 
             return row;
         }
