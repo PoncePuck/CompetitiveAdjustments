@@ -20,9 +20,9 @@ namespace DashFallMod.Client
     public partial class DashFallClientRunner
     {
         private const uint PUCK_STEAM_APP_ID = 2994020;
-        // Canonical Workshop item for COMPADJUST. Used for the "Open Workshop" link; the
-        // automatic out-of-date check derives the installed id from the DLL path instead,
-        // so a local/dev build (loaded from Plugins) never auto-nags.
+        // Canonical Workshop item for COMPADJUST. Used both for the "Open Workshop" link and
+        // for the out-of-date check (SteamUGC.GetItemState on this id), so detection works
+        // whether the DLL runs from the Workshop folder or a local Plugins build.
         private const ulong WORKSHOP_FILE_ID = 3689734278UL;
 
         private bool _modOutOfDate;            // Workshop has a newer version than installed
@@ -83,6 +83,7 @@ namespace DashFallMod.Client
         /// </summary>
         public void OnJoinedModdedServer()
         {
+            Debug.Log("[COMPADJUST] Joined modded server; running version check.");
             if (CheckOutOfDate()) RequestVersionPopup();
         }
 
@@ -94,23 +95,26 @@ namespace DashFallMod.Client
             _versionShowRequested = true;
         }
 
-        // Ask Steam whether the installed Workshop item needs an update. Sets and returns
-        // _modOutOfDate. Fails silent (returns false) for dev/Plugins builds or if Steam is
-        // unavailable, so it can never block play.
+        // Ask Steam whether the COMPADJUST Workshop item needs an update. Sets and returns
+        // _modOutOfDate. Queries the known published id directly so it works whether the DLL
+        // is loaded from the Workshop folder or a local Plugins build. Fails silent (returns
+        // false) if Steam is unavailable or the player is not subscribed, so it never blocks play.
         private bool CheckOutOfDate()
         {
             if (_modOutOfDate) return true;
             try
             {
-                if (_workshopFileId == 0) _workshopFileId = ResolveWorkshopFileId();
-                if (_workshopFileId == 0) return false;      // local/dev install, never nag
-                if (!SteamAPI.IsSteamRunning()) return false;
+                if (!SteamAPI.IsSteamRunning()) { Debug.Log("[COMPADJUST] Version check: Steam not running; skipping."); return false; }
 
-                uint state = SteamUGC.GetItemState(new PublishedFileId_t(_workshopFileId));
-                if ((state & (uint)EItemState.k_EItemStateNeedsUpdate) != 0)
+                uint state = SteamUGC.GetItemState(new PublishedFileId_t(WORKSHOP_FILE_ID));
+                bool subscribed = (state & (uint)EItemState.k_EItemStateSubscribed) != 0;
+                bool installed  = (state & (uint)EItemState.k_EItemStateInstalled)  != 0;
+                bool needs      = (state & (uint)EItemState.k_EItemStateNeedsUpdate) != 0;
+                Debug.Log($"[COMPADJUST] Version check: id={WORKSHOP_FILE_ID} state=0x{state:X} subscribed={subscribed} installed={installed} needsUpdate={needs}");
+                if (needs)
                 {
                     _modOutOfDate = true;
-                    Debug.LogWarning($"[COMPADJUST] Workshop item {_workshopFileId} reports NeedsUpdate; prompting player to update.");
+                    Debug.LogWarning($"[COMPADJUST] Workshop item {WORKSHOP_FILE_ID} reports NeedsUpdate; prompting player to update.");
                 }
             }
             catch (Exception e)
@@ -145,6 +149,7 @@ namespace DashFallMod.Client
             _versionShowRequested = true;
             _versionBackdrop?.RemoveFromHierarchy();
             _versionBackdrop = null;    // force a fresh build on the next Update tick
+            Debug.Log($"[COMPADJUST] TEST popup requested (workshopId={_workshopFileId}, lastRoot={(_lastRoot != null)}).");
         }
 
         /// <summary>
@@ -271,6 +276,7 @@ namespace DashFallMod.Client
             _versionBackdrop.Add(panel);
             root.Add(_versionBackdrop);
             _versionBackdrop.BringToFront();
+            Debug.Log($"[COMPADJUST] Version popup shown (root children={root.childCount}).");
         }
 
         private static UITK.Button MakeVersionButton(string text, Color32 bg, Color32 hover)
