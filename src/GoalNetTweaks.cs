@@ -220,17 +220,27 @@ namespace DashFallMod
         }
 
         /// <summary>
-        /// Returns the arena scale that should drive client-side visuals (minimap,
-        /// clip brushes, etc.) on the current connection.  On a host/server we use
-        /// the local config; on a client joined to a modded server we use the
-        /// synced values; on a client joined to a vanilla server (no sync ever
-        /// arrived) we return false so callers treat the rink as vanilla rather
-        /// than applying the user's local config to a vanilla rink.
+        /// Returns the arena's WORLD ground-plane scale (world X = rink width,
+        /// world Z = rink length/depth) that should drive client-side floor-plane
+        /// logic (minimap, face-off spawn spread, clip brushes, etc.) on the current
+        /// connection.  World Y (vertical) is deliberately not returned: no caller
+        /// scales a top-down/ground-plane quantity by the vertical axis.
+        ///
+        /// IMPORTANT axis mapping: the arena prefab is laid flat with a 90-degree X
+        /// rotation (ArenaRotX defaults to 90), which rotates the prefab's local Y
+        /// onto world Z and local Z onto world Y.  So the config's ArenaScaleY scales
+        /// the world-Z (length) axis and ArenaScaleZ scales world-Y (vertical).  That
+        /// is why the world-Z scale below is sourced from ArenaScaleY, NOT ArenaScaleZ.
+        ///
+        /// On a host/server we use the local config; on a client joined to a modded
+        /// server we use the synced values; on a client joined to a vanilla server
+        /// (no sync ever arrived) we return false so callers treat the rink as
+        /// vanilla rather than applying the user's local config to a vanilla rink.
         /// </summary>
-        public static bool TryGetEffectiveArenaScale(out float scaleX, out float scaleY)
+        public static bool TryGetEffectiveArenaScale(out float scaleX, out float scaleZ)
         {
             scaleX = 1f;
-            scaleY = 1f;
+            scaleZ = 1f;
             var nm = NetworkManager.Singleton;
             if (nm == null) return false;
 
@@ -240,14 +250,37 @@ namespace DashFallMod
                 var cfg = CompetitiveAdjustments.ConfigManager.CompAdjustEffective;
                 if (cfg == null || !cfg.EnableArenaTweaks) return false;
                 scaleX = cfg.ArenaScaleX > 0f ? cfg.ArenaScaleX : 1f;
-                scaleY = cfg.ArenaScaleY > 0f ? cfg.ArenaScaleY : 1f;
+                // world-Z (length) = config ArenaScaleY due to the 90deg arena rotation.
+                scaleZ = cfg.ArenaScaleY > 0f ? cfg.ArenaScaleY : 1f;
                 return true;
             }
 
             if (!_hasSyncedTweaks || !_syncedEnableArenaTweaks) return false;
             scaleX = _syncedArenaScaleX > 0f ? _syncedArenaScaleX : 1f;
-            scaleY = _syncedArenaScaleY > 0f ? _syncedArenaScaleY : 1f;
+            // world-Z (length) = config ArenaScaleY due to the 90deg arena rotation.
+            scaleZ = _syncedArenaScaleY > 0f ? _syncedArenaScaleY : 1f;
             return true;
+        }
+
+        // Extra inset applied on top of the arena scale so spawned players/pucks sit
+        // comfortably inside the rink. The custom arena prefab is a little larger than
+        // the vanilla rink the spawn/puck markers were authored against, so the raw
+        // proportional spread lands a touch too wide without this.
+        private const float SpawnFitInset = 0.85f;
+
+        /// <summary>
+        /// Maps a vanilla spawn position (player body or puck) to the equivalent spot
+        /// in the arena-scaled rink. Scales world X/Z about the rink centre (world
+        /// origin) by the effective arena scale, with a small inset (see
+        /// <see cref="SpawnFitInset"/>). Y is left unchanged so things stay on the ice.
+        /// Returns the position unchanged when arena tweaks are inactive (vanilla rink
+        /// or a vanilla server), so those cases are untouched.
+        /// </summary>
+        public static Vector3 ScaleSpawnPositionWithArena(Vector3 pos)
+        {
+            if (!TryGetEffectiveArenaScale(out float scaleX, out float scaleZ))
+                return pos;
+            return new Vector3(pos.x * scaleX * SpawnFitInset, pos.y, pos.z * scaleZ * SpawnFitInset);
         }
 
         [HarmonyPostfix]

@@ -1710,8 +1710,11 @@ namespace DashFallMod
             NetworkBoundsPatch.Disable();
         }
 
-        // Vanilla rink half-extent along X / Z used to derive required chunk
-        // counts from ArenaScale[XZ].  Y is not chunked.
+        // Vanilla rink half-extent along world X / Z, used to derive required chunk
+        // counts. World X scales with config ArenaScaleX; world Z (rink length) scales
+        // with config ArenaScaleY, because the arena prefab carries a default 90deg X
+        // rotation (ArenaRotX=90) that maps config Y onto world Z. Config ArenaScaleZ is
+        // the vertical axis and is not chunked.
         private const float VanillaArenaHalfExtentX = 50f;
         private const float VanillaArenaHalfExtentZ = 25f;
 
@@ -1722,7 +1725,9 @@ namespace DashFallMod
             var cfg = CompetitiveAdjustments.ConfigManager.Config?.CompAdjust;
 
             float scaleX = useSynced ? _syncedArenaScaleX : (cfg?.ArenaScaleX ?? 1f);
-            float scaleZ = useSynced ? _syncedArenaScaleZ : (cfg?.ArenaScaleZ ?? 1f);
+            // World Z (rink length) is scaled by config ArenaScaleY due to the 90deg arena
+            // rotation; ArenaScaleZ is the vertical axis and does not affect the chunk grid.
+            float scaleZ = useSynced ? _syncedArenaScaleY : (cfg?.ArenaScaleY ?? 1f);
             if (scaleX <= 0f) scaleX = 1f;
             if (scaleZ <= 0f) scaleZ = 1f;
 

@@ -282,6 +282,27 @@ namespace CompetitivePuckTweaks.src
                 foreach (Puck puck in __instance.GetPucks())
                     PuckPatch.ApplyPuckPhysics(puck);
 
+                // Scale warm-up puck spawns with the arena sizing, matching the player
+                // spawn scaling (same GoalNetTweaks helper). Warm-up pucks are placed
+                // at fixed scene markers (vanilla coordinates) spread across the rink,
+                // so on a shrunk rink they'd otherwise sit outside the boards. Other
+                // phases drop the puck at centre ice (world origin), where scaling is a
+                // no-op, so we gate to Warm-up to leave face-off/replay pucks untouched.
+                if (phase == GamePhase.Warmup) {
+                    foreach (Puck puck in __instance.GetPucks()) {
+                        if (puck == null) continue;
+                        var raw = puck.transform.position;
+                        var scaled = DashFallMod.GoalNetTweaks.ScaleSpawnPositionWithArena(raw);
+                        if (scaled == raw) continue;
+                        puck.transform.position = scaled;
+                        if (puck.Rigidbody != null) {
+                            puck.Rigidbody.position = scaled;
+                            puck.Rigidbody.linearVelocity = Vector3.zero;
+                            puck.Rigidbody.angularVelocity = Vector3.zero;
+                        }
+                    }
+                }
+
                 // Random drop only overrides the Play phase; keep other phases vanilla.
                 if (PluginCore.config.RandomPuckDrop && phase == GamePhase.Play) {
                     foreach (Puck puck in __instance.GetPucks())

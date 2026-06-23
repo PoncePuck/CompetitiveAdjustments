@@ -30,11 +30,27 @@ namespace DashFallMod.Client
         // Capture mode
         private bool _isCapturing = false;
 
+        // Vanilla MinimapScale baked into the last applied/reset minimap scale, so Update
+        // can detect a mid-session change of the vanilla minimap-size slider and re-apply.
+        private float _lastAppliedMinimapBaseScale = float.NaN;
+
+        // The NetworkManager instance we subscribed OnClientStopped to. Bound lazily in
+        // Update because Singleton can be null when the runner is created at mod-enable.
+        private Unity.Netcode.NetworkManager _clientStoppedSubscribedNm;
+
         // Reflection fields for menu buttons
         private static readonly FieldInfo _fiMainSettings =
             typeof(UIMainMenu).GetField("settingsButton", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly FieldInfo _fiPauseSettings =
             typeof(UIPauseMenu).GetField("settingsButton", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        // Vanilla UIMinimap private VisualElements, resolved once at type init (the fields are
+        // type-level, so caching is safe and avoids re-reflecting on every spawn/sync).
+        private static readonly FieldInfo _fiMinimapEl =
+            typeof(UIMinimap).GetField("minimap", BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly FieldInfo _fiMinimapContentEl =
+            typeof(UIMinimap).GetField("content", BindingFlags.NonPublic | BindingFlags.Instance);
+        private static bool _warnedMinimapReflectionFailed;
 
         private static readonly Color32 ButtonBg = new Color32(57, 57, 57, 255);
 
@@ -74,8 +90,9 @@ namespace DashFallMod.Client
             PoncePuck.Keybinds.ServerBridge.OnAdminAuthResult += OnAdminAuthResult;
 
             EventManager.AddEventListener("Event_Everyone_OnLevelSpawned", OnLevelSpawnedForMinimap);
-            if (Unity.Netcode.NetworkManager.Singleton != null)
-                Unity.Netcode.NetworkManager.Singleton.OnClientStopped += OnClientStopped;
+            // OnClientStopped is bound lazily in Update (TryBindClientStopped): the runner is
+            // created at mod-enable, when NetworkManager.Singleton may not exist yet, so a
+            // one-shot null-gated subscribe here would silently skip disconnect cleanup.
             DashFallMod.GoalNetTweaks.OnTweaksSynced += OnTweaksSynced;
 
         }
@@ -140,6 +157,19 @@ namespace DashFallMod.Client
             try { GoalieDashExtend.ClearAll(); } catch (Exception e) { ConfigManager.Dbg("GoalieDashExtend.ClearAll failed: " + e.Message); }
         }
 
+        // Lazily (re)binds OnClientStopped to the current NetworkManager. Safe to call every
+        // frame: it no-ops while already bound to the same instance (or both null). Uses Unity's
+        // fake-null semantics so a destroyed prior instance compares == null and is not touched.
+        private void TryBindClientStopped(Unity.Netcode.NetworkManager nm)
+        {
+            if (nm == _clientStoppedSubscribedNm) return;
+            if (_clientStoppedSubscribedNm != null)
+                _clientStoppedSubscribedNm.OnClientStopped -= OnClientStopped;
+            _clientStoppedSubscribedNm = nm;
+            if (nm != null)
+                nm.OnClientStopped += OnClientStopped;
+        }
+
         /// <summary>Re-applies or resets the minimap scale immediately. Call after toggling EnableMinimapTweaks.</summary>
         public static void RefreshMinimap()
         {
@@ -152,20 +182,44 @@ namespace DashFallMod.Client
             UnityEngine.Object.FindObjectsByType<UIMinimap>(FindObjectsInactive.Include, FindObjectsSortMode.None)
                 .FirstOrDefault();
 
+        // Resolves the vanilla UIMinimap's private "minimap" (frame) and "content" (dots)
+        // VisualElements via the cached FieldInfos. Returns false (and warns once) if a game
+        // update renamed/retyped the fields, so callers fall back to the vanilla minimap.
+        private static bool TryGetMinimapElements(UIMinimap uiMinimap, out UITK.VisualElement minimapEl, out UITK.VisualElement contentEl)
+        {
+            minimapEl = null;
+            contentEl = null;
+            if (_fiMinimapEl == null || _fiMinimapContentEl == null)
+            {
+                WarnMinimapReflectionOnce("UIMinimap.minimap/content field(s) not found");
+                return false;
+            }
+            minimapEl = _fiMinimapEl.GetValue(uiMinimap) as UITK.VisualElement;
+            contentEl = _fiMinimapContentEl.GetValue(uiMinimap) as UITK.VisualElement;
+            if (minimapEl == null || contentEl == null)
+            {
+                WarnMinimapReflectionOnce("UIMinimap.minimap/content VisualElement is null");
+                return false;
+            }
+            return true;
+        }
+
+        private static void WarnMinimapReflectionOnce(string detail)
+        {
+            CompetitiveAdjustments.ConfigManager.Log("Minimap rescaling unavailable: " + detail);
+            if (_warnedMinimapReflectionFailed) return;
+            _warnedMinimapReflectionFailed = true;
+            Debug.LogWarning($"[COMPADJUST] Minimap rescaling disabled ({detail}) -- a game update likely changed UIMinimap. Using the vanilla minimap.");
+        }
+
         private void ResetMinimapScale()
         {
             var uiMinimap = FindUIMinimap();
             if (uiMinimap == null) return;
-
-            var minimapField = typeof(UIMinimap).GetField("minimap", BindingFlags.NonPublic | BindingFlags.Instance);
-            var contentField = typeof(UIMinimap).GetField("content", BindingFlags.NonPublic | BindingFlags.Instance);
-            if (minimapField == null || contentField == null) return;
-
-            var minimapEl = minimapField.GetValue(uiMinimap) as UITK.VisualElement;
-            var contentEl = contentField.GetValue(uiMinimap) as UITK.VisualElement;
-            if (minimapEl == null || contentEl == null) return;
+            if (!TryGetMinimapElements(uiMinimap, out var minimapEl, out var contentEl)) return;
 
             float baseScale = SettingsManager.MinimapScale;
+            _lastAppliedMinimapBaseScale = baseScale;
             minimapEl.style.scale = new UnityEngine.Vector2(baseScale, baseScale);
             contentEl.style.scale = new UnityEngine.Vector2(1f, 1f);
             CompetitiveAdjustments.ConfigManager.Log("Minimap scale reset to default.");
@@ -173,70 +227,70 @@ namespace DashFallMod.Client
 
         // Synchronous: applies or resets minimap scale right now, no yield.
         // Used by RefreshMinimap (settings toggle) so it takes effect this frame.
-        private void ApplyMinimapScaleNow()
+        // Returns true once the scale has been applied or reset (or definitively
+        // no-opped); false only while the UIMinimap is not yet in the scene, so the
+        // coroutine's retry loop knows to try again next frame.
+        private bool ApplyMinimapScaleNow()
         {
             if (DashFallConfigLoader.ClientConfig?.EnableMinimapTweaks == false)
             {
                 ResetMinimapScale();
-                return;
+                return true;
             }
 
             // Pull the arena scale from the effective source: local config when hosting,
             // synced values when joined to a modded server, or "vanilla rink" (returns
             // false) when joined to a vanilla server.  Without this gate the local
             // config was applied to vanilla servers, stretching the minimap to match
-            // an arena that does not exist on that server.
-            if (!GoalNetTweaks.TryGetEffectiveArenaScale(out float scaleX, out float scaleY))
+            // an arena that does not exist on that server.  The returned scales are the
+            // ground-plane axes: scaleX = rink width (world X), scaleZ = rink depth/length
+            // (world Z).  World Y (vertical) is irrelevant to a top-down map.
+            if (!GoalNetTweaks.TryGetEffectiveArenaScale(out float scaleX, out float scaleZ))
             {
                 ResetMinimapScale();
-                return;
-            }
-
-            if (Mathf.Approximately(scaleX, 1f) && Mathf.Approximately(scaleY, 1f))
-            {
-                ResetMinimapScale();
-                return;
+                return true;
             }
 
             var uiMinimap = FindUIMinimap();
             if (uiMinimap == null)
             {
                 CompetitiveAdjustments.ConfigManager.Log("ApplyMinimapScale: UIMinimap not in scene yet");
-                return;
+                return false;
             }
 
-            var minimapField = typeof(UIMinimap).GetField("minimap", BindingFlags.NonPublic | BindingFlags.Instance);
-            var contentField = typeof(UIMinimap).GetField("content", BindingFlags.NonPublic | BindingFlags.Instance);
-            if (minimapField == null || contentField == null)
-            {
-                CompetitiveAdjustments.ConfigManager.Log("ApplyMinimapScale: field(s) not found on UIMinimap");
-                return;
-            }
+            if (!TryGetMinimapElements(uiMinimap, out var minimapEl, out var contentEl))
+                return true; // reflection broke; the vanilla minimap is the safe fallback
 
-            var minimapEl = minimapField.GetValue(uiMinimap) as UITK.VisualElement;
-            var contentEl = contentField.GetValue(uiMinimap) as UITK.VisualElement;
-            if (minimapEl == null || contentEl == null)
-            {
-                CompetitiveAdjustments.ConfigManager.Log("ApplyMinimapScale: minimap or content VisualElement is null");
-                return;
-            }
-
+            // The minimap is a top-down view: on-screen width tracks rink width (world X),
+            // on-screen height tracks rink depth/length (world Z).  arenaDefault (0.80)
+            // matches the barrier inset (GoalNetTweaks barrierScaleX/Z) so the frame tracks
+            // the actual playable area, which is arenaScale * 0.80.  Note there is no
+            // scale==1 early-out: when arena tweaks are active the 0.80 inset always applies,
+            // so a tweaked 1.0x rink correctly renders smaller than a vanilla rink (which
+            // takes the TryGetEffectiveArenaScale==false reset path above instead).
             float arenaDefaultX = 0.80f;
-            float arenaDefaultY = 0.80f;
+            float arenaDefaultZ = 0.80f;
             float widthFactor  = scaleX * arenaDefaultX;
-            float heightFactor = scaleY * arenaDefaultY;
+            float heightFactor = scaleZ * arenaDefaultZ;
             float baseScale = SettingsManager.MinimapScale;
+            _lastAppliedMinimapBaseScale = baseScale;
             minimapEl.style.scale = new UnityEngine.Vector2(baseScale * widthFactor, baseScale * heightFactor);
             contentEl.style.scale = new UnityEngine.Vector2(1f / widthFactor, 1f / heightFactor);
             Debug.Log($"[COMPADJUST] Minimap scale: {baseScale * widthFactor:F3}x{baseScale * heightFactor:F3}, dots counter: {1f/widthFactor:F3}x{1f/heightFactor:F3}");
+            return true;
         }
 
         // Coroutine version: yields one frame first so level-spawn geometry is ready,
-        // then delegates to the synchronous method.
+        // then retries for up to ~1s in case the UIMinimap element is created a few
+        // frames late (slow UI document load / frame-timing race).
         private IEnumerator ApplyMinimapScaleCoroutine()
         {
             yield return null; // let UIMinimapController.Event_Everyone_OnLevelSpawned run first
-            ApplyMinimapScaleNow();
+            for (int i = 0; i < 60; i++)
+            {
+                if (ApplyMinimapScaleNow()) yield break;
+                yield return null;
+            }
         }
 
         private static bool IsHeadlessServer()
@@ -264,8 +318,9 @@ namespace DashFallMod.Client
                 PoncePuck.Keybinds.ServerBridge.OnFullConfigReceived -= OnFullConfigReceived;
                 PoncePuck.Keybinds.ServerBridge.OnAdminAuthResult -= OnAdminAuthResult;
                 EventManager.RemoveEventListener("Event_Everyone_OnLevelSpawned", OnLevelSpawnedForMinimap);
-                if (Unity.Netcode.NetworkManager.Singleton != null)
-                    Unity.Netcode.NetworkManager.Singleton.OnClientStopped -= OnClientStopped;
+                if (_clientStoppedSubscribedNm != null)
+                    _clientStoppedSubscribedNm.OnClientStopped -= OnClientStopped;
+                _clientStoppedSubscribedNm = null;
                 DashFallMod.GoalNetTweaks.OnTweaksSynced -= OnTweaksSynced;
 
                 // CleanupHUD(); //TODO: Re-enable when HUD is ready
@@ -298,7 +353,26 @@ namespace DashFallMod.Client
                     _cmm = nm.CustomMessagingManager;
                     _helloSent = false; // Reset when CMM changes
                 }
-                
+
+                // (Re)bind the disconnect handler lazily; Singleton may have been null at Awake
+                // or changed across sessions. Without this, OnClientStopped cleanup (minimap
+                // reset + ClearSyncedTweaks so a later vanilla server is treated as vanilla)
+                // could silently never run.
+                TryBindClientStopped(nm);
+
+                // Re-apply the minimap if the vanilla minimap-size slider changed while arena
+                // tweaks are active. No vanilla settings-changed event exists to hook, so we
+                // poll the cheap scalar; gated to an active session and to frames where it
+                // actually differs, so FindUIMinimap runs only on the rare changed frame.
+                if (nm != null && nm.IsConnectedClient
+                    && DashFallConfigLoader.ClientConfig?.EnableMinimapTweaks == true
+                    && !float.IsNaN(_lastAppliedMinimapBaseScale)
+                    && !Mathf.Approximately(SettingsManager.MinimapScale, _lastAppliedMinimapBaseScale)
+                    && FindUIMinimap() != null)
+                {
+                    ApplyMinimapScaleNow();
+                }
+
                 // Send Hello when connected and CMM available
                 if (nm != null && nm.IsConnectedClient && _cmm != null && !_helloSent)
                 {

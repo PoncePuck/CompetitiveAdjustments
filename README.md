@@ -154,7 +154,7 @@ The plugin actively detects "joined a server without this mod" and stays inert:
 
 - **Bounds patch** ([src/ArenaTweaks.cs:1572](src/ArenaTweaks.cs#L1572)). `EnsurePatched` is never reached; no Harmony prefix on `EncodeSynchronizedObject`/`DecodeSynchronizedObjectData` is installed. One-shot diagnostic log on first skip.
 - **Arena visuals, goal scaling, audio reverb** ([src/GoalNetTweaks.cs:295](src/GoalNetTweaks.cs#L295)). `RefreshAll` distinguishes "host using local config" from "unsynced client" and forces both `enabled` and `arenaEnabled` to `false` in the unsynced-client case.
-- **Minimap** ([src/DashFall.ClientRunner.cs:163](src/DashFall.ClientRunner.cs#L163)). Routes through `GoalNetTweaks.TryGetEffectiveArenaScale`, which returns `false` when not synced and a non-host.
+- **Minimap** ([src/DashFall.ClientRunner.cs:233](src/DashFall.ClientRunner.cs#L233)). Routes through `GoalNetTweaks.TryGetEffectiveArenaScale`, which returns `false` when not synced and a non-host. The minimap tracks the world ground plane (X = width, Z = length). Because the arena prefab carries a default 90 degree X rotation (`ArenaRotX = 90`), the config field `ArenaScaleY` scales world-Z length and `ArenaScaleZ` scales vertical height, so the minimap length is driven by `ArenaScaleY` (not `ArenaScaleZ`).
 
 `OnClientStopped` clears the synced flag and tears down the bounds patch so the next connection starts from a clean state.
 

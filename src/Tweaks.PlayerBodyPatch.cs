@@ -69,10 +69,23 @@ namespace CompetitivePuckTweaks.src
          ref float ___tackleForceThreshold, ref float ___tackleSpeedThreshold) {
             if (__instance.Player.IsReplay.Value) return;
 
-            if (GameManager.Instance.Phase == GamePhase.FaceOff) {
-                if (__instance.Player.PlayerPosition.Name == "C") {
-                    if (__instance.Player.Team == PlayerTeam.Blue) __instance.transform.position += new UnityEngine.Vector3(0, 0, PluginCore.config.CenterSpawnOffset);
-                    else __instance.transform.position -= new UnityEngine.Vector3(0, 0, PluginCore.config.CenterSpawnOffset);
+            // Spawn positioning is server-authoritative -- positions replicate via the
+            // SynchronizedObjectManager, not a NetworkTransform, so a client-side write
+            // here would just be overwritten by the next sync. The body is despawned and
+            // respawned at its PlayerPosition dot on EVERY spawn (warm-up/practice Play
+            // spawn and every face-off), so this runs for all phases.
+            if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer) {
+                // Scale the spawn so players land at the proportional spot in a resized
+                // rink instead of outside a shrunk one. The shared helper (also used for
+                // warm-up pucks) scales world X/Z about the rink centre by the effective
+                // arena scale with a small inset, and is a no-op when arena tweaks are off.
+                __instance.transform.position = DashFallMod.GoalNetTweaks.ScaleSpawnPositionWithArena(__instance.transform.position);
+
+                if (GameManager.Instance.Phase == GamePhase.FaceOff) {
+                    if (__instance.Player.PlayerPosition.Name == "C") {
+                        if (__instance.Player.Team == PlayerTeam.Blue) __instance.transform.position += new UnityEngine.Vector3(0, 0, PluginCore.config.CenterSpawnOffset);
+                        else __instance.transform.position -= new UnityEngine.Vector3(0, 0, PluginCore.config.CenterSpawnOffset);
+                    }
                 }
             }
 

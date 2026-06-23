@@ -188,7 +188,7 @@ namespace DashFallMod.Client
             // Title
             var bigTitle = new UITK.Label("COMPADJUST");
             bigTitle.style.fontSize = 50;
-            bigTitle.style.marginBottom = 8;
+            bigTitle.style.marginBottom = 16;
             MakeReadable(bigTitle);
             _dfPanel.Add(bigTitle);
 
@@ -226,10 +226,6 @@ namespace DashFallMod.Client
             searchRow.style.paddingLeft = 12;
             searchRow.style.paddingRight = 12;
             searchRow.style.backgroundColor = new UITK.StyleColor(RowBg);
-            searchRow.style.borderTopLeftRadius = 4;
-            searchRow.style.borderTopRightRadius = 4;
-            searchRow.style.borderBottomLeftRadius = 4;
-            searchRow.style.borderBottomRightRadius = 4;
 
             var searchLabel = new UITK.Label("SEARCH");
             searchLabel.style.fontSize = 18;
@@ -273,15 +269,15 @@ namespace DashFallMod.Client
             // Build the action rows
             BuildActionsUI();
 
+                // PlayerQoL footer buttons: no bottom margins of their own - the
+                // 8px gap under the row comes from the panel's bottom padding.
                 UITK.Button MakeDonateButton(string t, Action onClick)
                 {
                     var b = new UITK.Button(onClick) { text = t.ToUpperInvariant() };
                     b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
                     b.style.height = 50;
-                    b.style.marginTop = 8;
-                    b.style.marginBottom = 0;
                     b.style.paddingLeft = 18; b.style.paddingRight = 18;
-                    b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
+                    b.style.backgroundColor = new UITK.StyleColor(RowBg);
                     MakeReadable(b);
                     AddButtonFlash(b);
                     return b;
@@ -291,11 +287,9 @@ namespace DashFallMod.Client
                     var b = new UITK.Button(onClick) { text = t.ToUpperInvariant() };
                     b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
                     b.style.height = 50;
-                    b.style.marginTop = 8;
-                    b.style.marginBottom = 0;
+                    b.style.marginLeft = 8;
                     b.style.paddingLeft = 18; b.style.paddingRight = 18;
-                    b.style.marginRight = 8;
-                    b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
+                    b.style.backgroundColor = new UITK.StyleColor(RowBg);
                     MakeReadable(b);
                     AddButtonFlash(b);
                     return b;
@@ -305,10 +299,9 @@ namespace DashFallMod.Client
                     var b = new UITK.Button(onClick) { text = t.ToUpperInvariant() };
                     b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
                     b.style.height = 50;
-                    b.style.marginTop = 8;
-                    b.style.marginBottom = 0;
-                    b.style.paddingLeft = 18; b.style.paddingRight = 18;
-                    b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
+                    b.style.marginLeft = 8;
+                    b.style.paddingLeft = 18; b.style.paddingRight = 182;
+                    b.style.backgroundColor = new UITK.StyleColor(RowBg);
                     MakeReadable(b);
                     AddButtonFlash(b);
                     return b;
@@ -335,19 +328,19 @@ namespace DashFallMod.Client
                 CloseDashFallPanel();
             });
 
-            // Button row at bottom: COFFEE hugs the left, RESET + CLOSE hug the
-            // right.  A flex spacer (rather than fixed margins) keeps CLOSE flush
-            // to the panel's right inner edge at any panel width.
+            // Button row at bottom (PlayerQoL layout): COFFEE alone on the left;
+            // RESET + CLOSE grouped together on the right.
             var buttonRow = new UITK.VisualElement();
             buttonRow.style.flexDirection = UITK.FlexDirection.Row;
-            buttonRow.style.alignItems = UITK.Align.Center;
+            buttonRow.style.justifyContent = UITK.Justify.SpaceBetween;
+            buttonRow.style.marginTop = 8;
             buttonRow.style.flexShrink = 0;   // footer keeps its size; the list shrinks instead
             buttonRow.Add(donate);
-            var footerSpacer = new UITK.VisualElement();
-            footerSpacer.style.flexGrow = 1;
-            buttonRow.Add(footerSpacer);
-            buttonRow.Add(resetBtn);
-            buttonRow.Add(closeBtn);
+            var rightButtons = new UITK.VisualElement();
+            rightButtons.style.flexDirection = UITK.FlexDirection.Row;
+            rightButtons.Add(resetBtn);
+            rightButtons.Add(closeBtn);
+            buttonRow.Add(rightButtons);
             _dfPanel.Add(buttonRow);
 
             // Add to root
@@ -804,10 +797,6 @@ namespace DashFallMod.Client
             row.style.backgroundColor = new UITK.StyleColor(RowBg);
             row.style.paddingLeft = 12;
             row.style.paddingRight = 12;
-            row.style.borderTopLeftRadius = 4;
-            row.style.borderTopRightRadius = 4;
-            row.style.borderBottomLeftRadius = 4;
-            row.style.borderBottomRightRadius = 4;
 
             var label = new UITK.Label(title);
             label.style.flexGrow = 1;
@@ -1163,10 +1152,6 @@ namespace DashFallMod.Client
             row.style.backgroundColor = new UITK.StyleColor(RowBg);
             row.style.paddingLeft = 12;
             row.style.paddingRight = 12;
-            row.style.borderTopLeftRadius = 4;
-            row.style.borderTopRightRadius = 4;
-            row.style.borderBottomLeftRadius = 4;
-            row.style.borderBottomRightRadius = 4;
 
             var textContainer = new UITK.VisualElement();
             textContainer.style.flexGrow = 1;
@@ -1214,10 +1199,6 @@ namespace DashFallMod.Client
             row.style.backgroundColor = new UITK.StyleColor(RowBg);
             row.style.paddingLeft = 12;
             row.style.paddingRight = 12;
-            row.style.borderTopLeftRadius = 4;
-            row.style.borderTopRightRadius = 4;
-            row.style.borderBottomLeftRadius = 4;
-            row.style.borderBottomRightRadius = 4;
 
             var textContainer = new UITK.VisualElement();
             textContainer.style.flexGrow = 1;
@@ -1263,10 +1244,6 @@ namespace DashFallMod.Client
             row.style.backgroundColor = new UITK.StyleColor(RowBg);
             row.style.paddingLeft = 12;
             row.style.paddingRight = 12;
-            row.style.borderTopLeftRadius = 4;
-            row.style.borderTopRightRadius = 4;
-            row.style.borderBottomLeftRadius = 4;
-            row.style.borderBottomRightRadius = 4;
 
             var textContainer = new UITK.VisualElement();
             textContainer.style.flexGrow = 1;
@@ -1333,15 +1310,12 @@ namespace DashFallMod.Client
             row.style.backgroundColor = new UITK.StyleColor(RowBg);
             row.style.paddingLeft = 12;
             row.style.paddingRight = 12;
-            row.style.borderTopLeftRadius = 4;
-            row.style.borderTopRightRadius = 4;
-            row.style.borderBottomLeftRadius = 4;
-            row.style.borderBottomRightRadius = 4;
 
+            // PlayerQoL slider row layout: fixed-width label column, then the
+            // editable value field, then the slider filling the rest of the row.
             var textContainer = new UITK.VisualElement();
-            textContainer.style.flexGrow = 1;
-            textContainer.style.flexShrink = 1;
-            textContainer.style.minWidth = 0;
+            textContainer.style.minWidth = 300;
+            textContainer.style.maxWidth = 300;
             textContainer.style.flexDirection = UITK.FlexDirection.Column;
             textContainer.style.justifyContent = UITK.Justify.Center;
 
@@ -1363,30 +1337,25 @@ namespace DashFallMod.Client
 
             row.Add(textContainer);
 
-            // Slider fills the slack between the label and the value box; the
-            // value box is fixed-width and right-aligned so it lines up with the
-            // value column of the float rows.
-            var slider = new UITK.Slider(min, max);
-            slider.style.flexGrow = 1;
-            slider.style.flexBasis = 0;
-            slider.style.flexShrink = 1;
-            slider.style.minWidth = 120;
-            slider.style.height = 24;
-            slider.style.marginLeft = 12;
-            slider.style.marginRight = 12;
-            slider.value = Mathf.Clamp(currentValue, min, max);
-            StyleSliderControl(slider);
-
             var input = new TextField();
             input.value = currentValue.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
-            input.style.width = 72;
-            input.style.minWidth = 72;
-            input.style.flexShrink = 0;
-            input.style.height = 34;
-            input.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
+            input.style.minWidth = 65;
+            input.style.maxWidth = 65;
+            input.style.maxHeight = 30;
+            input.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleRight);
+            input.style.marginLeft = 8;
+            input.style.marginRight = 8;
             input.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
             input.style.color = Color.white;
             ForceUIFont(input);
+
+            var slider = new UITK.Slider(min, max);
+            slider.style.flexGrow = 1;
+            slider.style.flexBasis = 0;
+            slider.style.marginLeft = 6;
+            slider.style.marginRight = 6;
+            slider.value = Mathf.Clamp(currentValue, min, max);
+            StyleSliderControl(slider);
 
             bool syncing = false;
             slider.RegisterValueChangedCallback(evt =>
@@ -1414,35 +1383,48 @@ namespace DashFallMod.Client
                 onChanged?.Invoke(v);
             });
 
-            row.Add(slider);
             row.Add(input);
+            row.Add(slider);
 
             return row;
         }
 
-        private static void StyleSliderControl(UITK.Slider slider)
+        // PlayerQoL slider look: thin translucent white rail with a large round
+        // white thumb.
+        private static void StyleSliderControl(UITK.Slider s)
         {
-            var tracker = slider.Q<UITK.VisualElement>(className: "unity-base-slider__tracker");
+            s.style.height = 26;
+            s.style.marginLeft = 6;
+            s.style.marginRight = 6;
+
+            // Cover legacy, current, and base-slider USS class names - Unity
+            // renames these between versions and only one will match per build.
+            var tracker = s.Q<UITK.VisualElement>(className: "unity-base-slider__tracker")
+                       ?? s.Q<UITK.VisualElement>(className: "unity-slider__tracker")
+                       ?? s.Q<UITK.VisualElement>(className: "unity-tracker");
+            var dragger = s.Q<UITK.VisualElement>(className: "unity-base-slider__dragger")
+                       ?? s.Q<UITK.VisualElement>(className: "unity-slider__dragger")
+                       ?? s.Q<UITK.VisualElement>(className: "unity-dragger");
             if (tracker != null)
             {
-                tracker.style.backgroundColor = new UITK.StyleColor(new Color(0.18f, 0.18f, 0.18f, 0.95f));
-                tracker.style.height = 6;
-                tracker.style.borderTopLeftRadius = 3;
-                tracker.style.borderTopRightRadius = 3;
-                tracker.style.borderBottomLeftRadius = 3;
-                tracker.style.borderBottomRightRadius = 3;
+                tracker.style.height = 4;
+                tracker.style.marginTop = 11; // vertically center the 4px rail in 26px
+                tracker.style.backgroundColor = new UITK.StyleColor(new Color(1f, 1f, 1f, 0.35f));
+                tracker.style.borderTopLeftRadius = 2;
+                tracker.style.borderTopRightRadius = 2;
+                tracker.style.borderBottomLeftRadius = 2;
+                tracker.style.borderBottomRightRadius = 2;
             }
-
-            var dragger = slider.Q<UITK.VisualElement>(className: "unity-base-slider__dragger");
             if (dragger != null)
             {
-                dragger.style.backgroundColor = new UITK.StyleColor(new Color(0.9f, 0.9f, 0.9f, 1f));
-                dragger.style.width = 12;
-                dragger.style.height = 12;
-                dragger.style.borderTopLeftRadius = 6;
-                dragger.style.borderTopRightRadius = 6;
-                dragger.style.borderBottomLeftRadius = 6;
-                dragger.style.borderBottomRightRadius = 6;
+                dragger.style.width = 18;
+                dragger.style.height = 18;
+                dragger.style.marginTop = 4; // center on the rail
+                dragger.style.backgroundColor = new UITK.StyleColor(Color.white);
+                dragger.style.borderTopLeftRadius = 9;
+                dragger.style.borderTopRightRadius = 9;
+                dragger.style.borderBottomLeftRadius = 9;
+                dragger.style.borderBottomRightRadius = 9;
             }
         }
 
@@ -1457,10 +1439,6 @@ namespace DashFallMod.Client
             row.style.backgroundColor = new UITK.StyleColor(RowBg);
             row.style.paddingLeft = 12;
             row.style.paddingRight = 12;
-            row.style.borderTopLeftRadius = 4;
-            row.style.borderTopRightRadius = 4;
-            row.style.borderBottomLeftRadius = 4;
-            row.style.borderBottomRightRadius = 4;
 
             var textContainer = new UITK.VisualElement();
             textContainer.style.flexGrow = 1;
@@ -1630,10 +1608,6 @@ namespace DashFallMod.Client
             row.style.backgroundColor = new UITK.StyleColor(enabled ? RowBg : DisabledRowBg);
             row.style.paddingLeft = 12; row.style.paddingRight = 12;
             row.style.paddingTop = 8; row.style.paddingBottom = 8;
-            row.style.borderTopLeftRadius = 4;
-            row.style.borderTopRightRadius = 4;
-            row.style.borderBottomLeftRadius = 4;
-            row.style.borderBottomRightRadius = 4;
             row.style.opacity = enabled ? 1f : 0.5f;
 
             // Label
