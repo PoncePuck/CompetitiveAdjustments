@@ -275,8 +275,11 @@ namespace DashFallMod
             // (visual + wall colliders + corner barrier override, all children) up to
             // base size at ArenaScale 1.0. Spawns/minimap use the vanilla rink as their
             // reference, so they line up once the arena matches base.
-            // Horizontal axes (width + length) only; localScale.z is the height axis and stays uncorrected.
-            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ);
+            // Uniform correction on all three axes. A non-uniform correction (excluding
+            // height) shears the barrier override, which carries its own rotation to cancel
+            // the arena tilt -- non-uniform scale does not commute with rotation. Uniform
+            // keeps the barrier clean; the barrier override then divides this back out.
+            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ * ArenaBaseScaleCorrection);
 
             // Sync layers and debug brushes on the Colliders sub-tree
             if (_collidersInstance != null)
@@ -323,8 +326,11 @@ namespace DashFallMod
             // (visual + wall colliders + corner barrier override, all children) up to
             // base size at ArenaScale 1.0. Spawns/minimap use the vanilla rink as their
             // reference, so they line up once the arena matches base.
-            // Horizontal axes (width + length) only; localScale.z is the height axis and stays uncorrected.
-            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ);
+            // Uniform correction on all three axes. A non-uniform correction (excluding
+            // height) shears the barrier override, which carries its own rotation to cancel
+            // the arena tilt -- non-uniform scale does not commute with rotation. Uniform
+            // keeps the barrier clean; the barrier override then divides this back out.
+            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ * ArenaBaseScaleCorrection);
 
             // Colliders from separate prefab or scene clone
             if (_collidersPrefab != null)
@@ -576,13 +582,12 @@ namespace DashFallMod
             // Cancel parent arena visual rotation for barrier overrides, then
             // apply independent barrier rotation controls.
             overrideRoot.localPosition = Vector3.zero;
-            // The override root is a child of the arena instance, which now scales its two
-            // horizontal localScale axes (X + Y) by ArenaBaseScaleCorrection (height Z is
-            // excluded). The barrier is cloned from the already-base-sized vanilla barrier,
-            // so it must NOT also inherit that 1.5x or it sticks out ~1.2x past the walls.
-            // Divide the correction back out of the two horizontal axes; leave Z (height).
+            // The override root is a child of the arena instance, which uniformly scales
+            // by ArenaBaseScaleCorrection. The barrier is cloned from the already-base-sized
+            // vanilla barrier, so divide that correction back out (uniformly, preserving the
+            // barrier's aspect ratio) or it sticks out ~1.5x past the walls.
             float k = ArenaBaseScaleCorrection;
-            overrideRoot.localScale = new Vector3(barrierScaleX / k, barrierScaleY / k, barrierScaleZ);
+            overrideRoot.localScale = new Vector3(barrierScaleX / k, barrierScaleY / k, barrierScaleZ / k);
             var arenaVisualRotation = Quaternion.Euler(arenaRotX, arenaRotY, arenaRotZ);
             var barrierAdjustment = Quaternion.Euler(barrierRotX, barrierRotY, barrierRotZ);
             overrideRoot.localRotation = Quaternion.Inverse(arenaVisualRotation) * barrierAdjustment;
