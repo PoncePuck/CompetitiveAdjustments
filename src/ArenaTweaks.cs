@@ -89,6 +89,7 @@ namespace DashFallMod
                     _colliderLayersSynced = false;
                 }
 
+                DestroyBarrierStandalone();
                 RestoreOriginalArenaColliders();
                 _usingArenaVisualColliderFallback = false;
                 _arenaAppearanceSynced = false;
@@ -196,6 +197,9 @@ namespace DashFallMod
                     int barrierOverrides = SyncBarrierColliderOverridesFromOriginal(
                         arenaRoot,
                         collidersChild,
+                        scaleX,
+                        scaleY,
+                        scaleZ,
                         rotX,
                         rotY,
                         rotZ,
@@ -240,6 +244,9 @@ namespace DashFallMod
                         SyncBarrierColliderOverridesFromOriginal(
                             arenaRoot,
                             collidersChild,
+                            scaleX,
+                            scaleY,
+                            scaleZ,
                             rotX,
                             rotY,
                             rotZ,
@@ -257,6 +264,9 @@ namespace DashFallMod
                     SyncBarrierColliderOverridesFromOriginal(
                         arenaRoot,
                         _collidersInstance.transform,
+                        scaleX,
+                        scaleY,
+                        scaleZ,
                         rotX,
                         rotY,
                         rotZ,
@@ -275,11 +285,12 @@ namespace DashFallMod
             // (visual + wall colliders + corner barrier override, all children) up to
             // base size at ArenaScale 1.0. Spawns/minimap use the vanilla rink as their
             // reference, so they line up once the arena matches base.
-            // Uniform correction on all three axes. A non-uniform correction (excluding
-            // height) shears the barrier override, which carries its own rotation to cancel
-            // the arena tilt -- non-uniform scale does not commute with rotation. Uniform
-            // keeps the barrier clean; the barrier override then divides this back out.
-            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ * ArenaBaseScaleCorrection);
+            // Correction on the two horizontal axes only; localScale.z (config ArenaScaleZ
+            // -> world Y height) is EXCLUDED so the boards keep base height. This makes the
+            // instance non-uniform, which would shear the rounded barrier -- so the barrier
+            // is built as a standalone object under the (unscaled, unrotated) rink root
+            // instead of as a child here (see SyncBarrierColliderOverridesFromOriginal).
+            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ);
 
             // Sync layers and debug brushes on the Colliders sub-tree
             if (_collidersInstance != null)
@@ -326,11 +337,12 @@ namespace DashFallMod
             // (visual + wall colliders + corner barrier override, all children) up to
             // base size at ArenaScale 1.0. Spawns/minimap use the vanilla rink as their
             // reference, so they line up once the arena matches base.
-            // Uniform correction on all three axes. A non-uniform correction (excluding
-            // height) shears the barrier override, which carries its own rotation to cancel
-            // the arena tilt -- non-uniform scale does not commute with rotation. Uniform
-            // keeps the barrier clean; the barrier override then divides this back out.
-            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ * ArenaBaseScaleCorrection);
+            // Correction on the two horizontal axes only; localScale.z (config ArenaScaleZ
+            // -> world Y height) is EXCLUDED so the boards keep base height. This makes the
+            // instance non-uniform, which would shear the rounded barrier -- so the barrier
+            // is built as a standalone object under the (unscaled, unrotated) rink root
+            // instead of as a child here (see SyncBarrierColliderOverridesFromOriginal).
+            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ);
 
             // Colliders from separate prefab or scene clone
             if (_collidersPrefab != null)
@@ -372,6 +384,9 @@ namespace DashFallMod
                 int barrierOverrides = SyncBarrierColliderOverridesFromOriginal(
                     arenaRoot,
                     _collidersInstance.transform,
+                    scaleX,
+                    scaleY,
+                    scaleZ,
                     rotX,
                     rotY,
                     rotZ,
@@ -398,6 +413,9 @@ namespace DashFallMod
                 SyncBarrierColliderOverridesFromOriginal(
                     arenaRoot,
                     _collidersInstance.transform,
+                    scaleX,
+                    scaleY,
+                    scaleZ,
                     rotX,
                     rotY,
                     rotZ,
@@ -558,6 +576,9 @@ namespace DashFallMod
         private static int SyncBarrierColliderOverridesFromOriginal(
             Transform arenaRoot,
             Transform customCollidersRoot,
+            float scaleX,
+            float scaleY,
+            float scaleZ,
             float arenaRotX,
             float arenaRotY,
             float arenaRotZ,
@@ -571,29 +592,29 @@ namespace DashFallMod
             if (arenaRoot == null || customCollidersRoot == null) return 0;
 
             const string barrierOverrideRootName = "__originalBarrierOverrides";
-            var overrideRoot = customCollidersRoot.Find(barrierOverrideRootName);
+            // Parent the barrier override to the RINK ROOT, not the arena instance. The
+            // instance is non-uniformly scaled (height excluded) and rotated; a rounded
+            // perimeter mesh under it would shear. The rink root is unscaled and world
+            // aligned, so here the barrier is cloned 1:1 from the (base-size) vanilla
+            // barrier and then scaled cleanly by the raw config scale in world axes:
+            // world X = ArenaScaleX (width), world Y = ArenaScaleZ (height), world Z =
+            // ArenaScaleY (length). No ArenaBaseScaleCorrection here -- the vanilla barrier
+            // is already base-size, so raw config makes it track the corrected arena.
+            var overrideRoot = arenaRoot.Find(barrierOverrideRootName);
             if (overrideRoot == null)
             {
                 var go = new GameObject(barrierOverrideRootName);
-                go.transform.SetParent(customCollidersRoot, false);
+                go.transform.SetParent(arenaRoot, false);
                 overrideRoot = go.transform;
             }
+            _barrierStandalone = overrideRoot;
 
-            // Cancel parent arena visual rotation for barrier overrides, then
-            // apply independent barrier rotation controls.
             overrideRoot.localPosition = Vector3.zero;
-            // The override root is a child of the arena instance (uniformly scaled by
-            // ArenaBaseScaleCorrection) AND carries its own rotation to cancel the arena
-            // tilt. Its scale must therefore be UNIFORM or the rotated perimeter mesh shears
-            // and shifts. The barrier is cloned from the already-base-sized vanilla barrier,
-            // so a uniform 1/k puts it back at exactly vanilla size/position -- which equals
-            // the walls at ArenaScale 1.0. (The old non-uniform 0.8 footprint inset is
-            // dropped precisely because it shears; the barrier sits at the board face.)
-            float k = ArenaBaseScaleCorrection;
-            overrideRoot.localScale = Vector3.one / k;
-            var arenaVisualRotation = Quaternion.Euler(arenaRotX, arenaRotY, arenaRotZ);
-            var barrierAdjustment = Quaternion.Euler(barrierRotX, barrierRotY, barrierRotZ);
-            overrideRoot.localRotation = Quaternion.Inverse(arenaVisualRotation) * barrierAdjustment;
+            overrideRoot.localRotation = Quaternion.Euler(barrierRotX, barrierRotY, barrierRotZ);
+            overrideRoot.localScale = new Vector3(
+                scaleX > 0f ? scaleX : 1f,
+                scaleZ > 0f ? scaleZ : 1f,
+                scaleY > 0f ? scaleY : 1f);
 
             if (overrideRoot.GetComponentsInChildren<Collider>(true).Length > 0)
                 return 0;
@@ -602,6 +623,8 @@ namespace DashFallMod
             foreach (var source in arenaRoot.GetComponentsInChildren<Collider>(true))
             {
                 if (source == null) continue;
+                if (source.transform == overrideRoot || source.transform.IsChildOf(overrideRoot))
+                    continue;
                 if (_arenaInstance != null && (source.transform == _arenaInstance.transform || source.transform.IsChildOf(_arenaInstance.transform)))
                     continue;
                 if (_collidersInstance != null && (source.transform == _collidersInstance.transform || source.transform.IsChildOf(_collidersInstance.transform)))
@@ -625,8 +648,14 @@ namespace DashFallMod
                 }
             }
 
+            // The standalone barrier is not visited by SyncCustomColliderLayersAndStates
+            // (that only walks the arena instance's Colliders child), so set its tag here.
+            // Clones already inherit the source's Boards layer via TryCloneCollider.
+            foreach (var bc in overrideRoot.GetComponentsInChildren<Collider>(true))
+                if (bc != null) { try { bc.gameObject.tag = "Soft Collider"; } catch { } }
+
             if (cloned > 0)
-                Debug.Log($"[COMPADJUST] Cloned {cloned} original barrier collider(s) into custom collider root for transform syncing.");
+                Debug.Log($"[COMPADJUST] Cloned {cloned} original barrier collider(s) into the standalone rink-root barrier for clean non-uniform scaling.");
 
             return cloned;
         }
@@ -1102,6 +1131,8 @@ namespace DashFallMod
                     continue;
                 if (_collidersInstance != null && (col.transform == _collidersInstance.transform || col.transform.IsChildOf(_collidersInstance.transform)))
                     continue;
+                if (_barrierStandalone != null && (col.transform == _barrierStandalone || col.transform.IsChildOf(_barrierStandalone)))
+                    continue;
                 if (!ShouldHideOriginalArenaCollider(col, arenaRoot))
                     continue;
                 if (!col.enabled)
@@ -1117,6 +1148,17 @@ namespace DashFallMod
                 Debug.Log($"[COMPADJUST] Disabled {_disabledOriginalColliders.Count} original arena colliders.");
             else
                 CompetitiveAdjustments.ConfigManager.LogWarning("No original arena colliders matched disable filter.");
+        }
+
+        // Tear down the standalone rounded-barrier clone (under the rink root). The
+        // original barrier colliders it disabled are re-enabled by RestoreOriginalArenaColliders.
+        private static void DestroyBarrierStandalone()
+        {
+            if (_barrierStandalone != null)
+            {
+                UnityEngine.Object.Destroy(_barrierStandalone.gameObject);
+                _barrierStandalone = null;
+            }
         }
 
         private static void RestoreOriginalArenaColliders()

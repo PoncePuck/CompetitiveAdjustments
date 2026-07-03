@@ -43,6 +43,10 @@ namespace DashFallMod
         private static GameObject  _arenaAndCollidersPrefab;
         private static GameObject  _arenaInstance;
         private static GameObject  _collidersInstance;
+        // Rounded barrier collision is a standalone object under the (unscaled) rink root,
+        // NOT a child of the scaled arena instance, so a non-uniform arena scale cannot
+        // shear it. Tracked here so it can be torn down with the arena.
+        private static Transform   _barrierStandalone;
         private static readonly List<Collider> _disabledOriginalColliders = new List<Collider>();
         private static readonly Dictionary<int, GameObject> _goalFrames = new Dictionary<int, GameObject>();
         private static readonly Dictionary<int, List<Renderer>> _hiddenGoalRenderers = new Dictionary<int, List<Renderer>>();
@@ -802,6 +806,8 @@ namespace DashFallMod
                 UnityEngine.Object.Destroy(_collidersInstance);
                 _collidersInstance = null;
             }
+
+            DestroyBarrierStandalone();
 
             _loggedArenaPrefabMissing = false;
             _loggedArenaSpawned = false;
