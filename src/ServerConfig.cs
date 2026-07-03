@@ -73,14 +73,19 @@ namespace CompetitiveAdjustments
         public float GoalBackOffset = 0f;
         // Custom goal-frame alignment. The bundled frame prefab's mesh orientation
         // does not match the b1117 goal, so expose live-tunable local rotation (Euler
-        // degrees) and position offset to line the frame up with the net. Applied on
-        // every goal refresh (host path), so /reload updates it live.
+        // degrees), position offset, and uniform scale to line the frame up with the
+        // net. Applied on every goal refresh (host path), so /reload updates it live.
+        // RotY defaults to 180: the b1117 goal frame faces opposite the prefab mesh
+        // (confirmed in-game). Scale defaults to the historical 100x Blender-unit
+        // correction; the b1117 goal is slightly larger, so bump it if the frame reads
+        // small against the net.
         public float GoalFrameRotX = 0f;
-        public float GoalFrameRotY = 0f;
+        public float GoalFrameRotY = 180f;
         public float GoalFrameRotZ = 0f;
         public float GoalFrameOffsetX = 0f;
         public float GoalFrameOffsetY = 0f;
         public float GoalFrameOffsetZ = 0f;
+        public float GoalFrameScale = 100f;
         public bool EnableArenaTweaks = false;
         public float ArenaScaleX = 1f;
         public float ArenaScaleY = 1f;

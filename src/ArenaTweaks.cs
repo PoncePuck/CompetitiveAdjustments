@@ -1326,6 +1326,7 @@ namespace DashFallMod
                 CompetitiveAdjustments.Diag.ArenaDumped = true;
                 CompetitiveAdjustments.Diag.DumpColliders(arenaRoot, "ARENA ROOT (originals + custom)");
                 CompetitiveAdjustments.Diag.DumpColliders(customCollidersRoot, "CUSTOM COLLIDERS ROOT");
+                CompetitiveAdjustments.Diag.DumpArenaScale(_arenaInstance, arenaRoot);
             }
         }
 

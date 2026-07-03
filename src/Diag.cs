@@ -60,6 +60,31 @@ namespace CompetitiveAdjustments
             }
         }
 
+        /// <summary>Dump arena vs vanilla-rink scale so the b1117 base-size change can be measured.</summary>
+        public static void DumpArenaScale(GameObject arenaInstance, Transform arenaRoot)
+        {
+            if (!Enabled) return;
+            Log("=== ARENA SCALE ===");
+            if (arenaInstance != null)
+            {
+                var rends = arenaInstance.GetComponentsInChildren<Renderer>(true);
+                if (rends.Length > 0)
+                {
+                    Bounds b = rends[0].bounds;
+                    for (int i = 1; i < rends.Length; i++) b.Encapsulate(rends[i].bounds);
+                    Log($"  custom arena '{arenaInstance.name}' localScale={arenaInstance.transform.localScale} worldBoundsSize={b.size} center={b.center}");
+                }
+            }
+            else Log("  custom arena instance: <null>");
+            // Goals sit at the ends of the vanilla base rink -> their span marks base length.
+            foreach (var g in UnityEngine.Object.FindObjectsByType<Goal>(FindObjectsSortMode.None))
+                if (g != null) Log($"  goal {g.Team} worldPos={g.transform.position}");
+            // Sample the spawn scaling (vanilla -> scaled) at a reference point.
+            Vector3 sample = new Vector3(7f, 0f, 22f);
+            Vector3 scaled = DashFallMod.GoalNetTweaks.ScaleSpawnPositionWithArena(sample);
+            Log($"  spawn scale sample: vanilla {sample} -> scaled {scaled} (x={(sample.x != 0 ? scaled.x / sample.x : 0):F3} z={(sample.z != 0 ? scaled.z / sample.z : 0):F3})");
+        }
+
         /// <summary>Dump a goal's transform and its child renderers so frame orientation can be computed.</summary>
         public static void DumpGoal(Transform goalRoot, string teamLabel, Transform originalFrame, Transform customFrame)
         {

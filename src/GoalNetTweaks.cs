@@ -364,6 +364,7 @@ namespace DashFallMod
             // clients (which read the same defaults) get them without extra sync wiring.
             float frameRotX = cfg.GoalFrameRotX, frameRotY = cfg.GoalFrameRotY, frameRotZ = cfg.GoalFrameRotZ;
             float frameOffX = cfg.GoalFrameOffsetX, frameOffY = cfg.GoalFrameOffsetY, frameOffZ = cfg.GoalFrameOffsetZ;
+            float frameScale = Mathf.Max(0.01f, cfg.GoalFrameScale);
             bool arenaEnabled    = clientUnsynced ? false : (useSynced ? _syncedEnableArenaTweaks  : cfg.EnableArenaTweaks);
             float arenaScaleX    = Mathf.Max(0.1f, useSynced ? _syncedArenaScaleX : cfg.ArenaScaleX);
             float arenaScaleY    = Mathf.Max(0.1f, useSynced ? _syncedArenaScaleY : cfg.ArenaScaleY);
@@ -387,6 +388,7 @@ namespace DashFallMod
                 currentHash = currentHash * 397 ^ frameOffX.GetHashCode();
                 currentHash = currentHash * 397 ^ frameOffY.GetHashCode();
                 currentHash = currentHash * 397 ^ frameOffZ.GetHashCode();
+                currentHash = currentHash * 397 ^ frameScale.GetHashCode();
             }
 
             bool configChanged = _forceNextRefresh || currentHash != _lastRefreshHash;
@@ -554,11 +556,13 @@ namespace DashFallMod
                     }
 
                     // Apply the live-tunable frame alignment every refresh so /reload
-                    // updates orientation/position without recreating the frame. The
-                    // prefab mesh does not match the b1117 goal, so this offset lines it
-                    // up. localScale stays at the 100x Blender-unit correction.
+                    // updates orientation/position/scale without recreating the frame.
+                    // The prefab mesh does not match the b1117 goal, so these knobs line
+                    // it up (RotY defaults to 180; scale defaults to the 100x Blender-unit
+                    // correction).
                     frameObj.transform.localRotation = Quaternion.Euler(frameRotX, frameRotY, frameRotZ);
                     frameObj.transform.localPosition = new Vector3(frameOffX, frameOffY, frameOffZ);
+                    frameObj.transform.localScale = new Vector3(frameScale, frameScale, frameScale);
 
                     HideOriginalGoalFrameRenderers(goal, rootId, frameObj.transform);
                 }
