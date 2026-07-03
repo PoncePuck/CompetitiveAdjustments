@@ -582,12 +582,15 @@ namespace DashFallMod
             // Cancel parent arena visual rotation for barrier overrides, then
             // apply independent barrier rotation controls.
             overrideRoot.localPosition = Vector3.zero;
-            // The override root is a child of the arena instance, which uniformly scales
-            // by ArenaBaseScaleCorrection. The barrier is cloned from the already-base-sized
-            // vanilla barrier, so divide that correction back out (uniformly, preserving the
-            // barrier's aspect ratio) or it sticks out ~1.5x past the walls.
+            // The override root is a child of the arena instance (uniformly scaled by
+            // ArenaBaseScaleCorrection) AND carries its own rotation to cancel the arena
+            // tilt. Its scale must therefore be UNIFORM or the rotated perimeter mesh shears
+            // and shifts. The barrier is cloned from the already-base-sized vanilla barrier,
+            // so a uniform 1/k puts it back at exactly vanilla size/position -- which equals
+            // the walls at ArenaScale 1.0. (The old non-uniform 0.8 footprint inset is
+            // dropped precisely because it shears; the barrier sits at the board face.)
             float k = ArenaBaseScaleCorrection;
-            overrideRoot.localScale = new Vector3(barrierScaleX / k, barrierScaleY / k, barrierScaleZ / k);
+            overrideRoot.localScale = Vector3.one / k;
             var arenaVisualRotation = Quaternion.Euler(arenaRotX, arenaRotY, arenaRotZ);
             var barrierAdjustment = Quaternion.Euler(barrierRotX, barrierRotY, barrierRotZ);
             overrideRoot.localRotation = Quaternion.Inverse(arenaVisualRotation) * barrierAdjustment;
