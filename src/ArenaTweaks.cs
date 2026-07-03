@@ -1437,6 +1437,18 @@ namespace DashFallMod
                 if (collider == null) continue;
                 SyncArenaColliderDebugBrush(collider, enabled);
             }
+
+            // The rounded barrier is a standalone object under the rink root, not under
+            // collidersRoot, so brush it separately -- otherwise the clip-brush visual
+            // covers the straight walls but misses the corners.
+            if (_barrierStandalone != null && _barrierStandalone != collidersRoot)
+            {
+                foreach (var collider in _barrierStandalone.GetComponentsInChildren<Collider>(true))
+                {
+                    if (collider == null) continue;
+                    SyncArenaColliderDebugBrush(collider, enabled);
+                }
+            }
         }
 
         private static void SyncArenaColliderDebugBrush(Collider collider, bool enabled)
