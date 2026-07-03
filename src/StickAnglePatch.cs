@@ -188,22 +188,32 @@ namespace CompetitiveCompanion
 
     // ── 4. Apply blade-angle limits on client after spawn ───────────────────
 
-    [HarmonyPatch(typeof(PlayerBodyV2), "OnNetworkPostSpawn")]
+    // Hooked on PlayerInput.OnNetworkSpawn rather than PlayerBody.OnNetworkPostSpawn.
+    // In b1117 the body's Player reference is resolved via HandlePlayerReference from
+    // the replicated PlayerReference, which is not guaranteed resolvable at
+    // OnNetworkPostSpawn (it needs the Player NetworkObject to have already spawned on
+    // this client). When it was null the old hook silently skipped and the blade stayed
+    // clamped to the vanilla +/-4 limit (the reported "freeblade won't rotate"). On
+    // PlayerInput, Player is set in Awake via GetComponent, so it is always available
+    // here. The config-timing case is still covered by RefreshFreeBladeForAllPlayers on
+    // config-sync receive.
+    [HarmonyPatch(typeof(PlayerInput), "OnNetworkSpawn")]
     public static class ClientBladeAngleSpawnPatch
     {
         [HarmonyPostfix]
-        public static void Postfix(PlayerBodyV2 __instance)
+        public static void Postfix(PlayerInput __instance)
         {
-            if (__instance.Player?.PlayerInput == null) return;
+            var player = __instance.Player;
+            if (player == null) return;
 
             // Save vanilla limits before modification so config sync can restore them
-            StickAngleRefs.SaveOriginals(__instance.Player);
+            StickAngleRefs.SaveOriginals(player);
 
             var cfg = DashFallMod.ConfigManager.CompAdjustEffective;
             if (!cfg.FreeBladeEnabled) return;
 
-            StickAngleRefs.minBladeRef(__instance.Player.PlayerInput) = -127;
-            StickAngleRefs.maxBladeRef(__instance.Player.PlayerInput) = 127;
+            StickAngleRefs.minBladeRef(__instance) = -127;
+            StickAngleRefs.maxBladeRef(__instance) = 127;
         }
     }
 
