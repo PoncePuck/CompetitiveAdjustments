@@ -271,7 +271,13 @@ namespace DashFallMod
 
             _arenaInstance.transform.localPosition = new Vector3(offsetX, offsetY, offsetZ);
             _arenaInstance.transform.localRotation = Quaternion.Euler(rotX, rotY, rotZ);
-            _arenaInstance.transform.localScale = new Vector3(scaleX, scaleY, scaleZ);
+            // b1117 base rink is ~1.5x the bundled prefab, so scale the whole instance
+            // (visual + wall colliders + corner barrier override, all children) up to
+            // base size at ArenaScale 1.0. Spawns/minimap use the vanilla rink as their
+            // reference, so they line up once the arena matches base.
+            float baseCorrection = CompetitiveAdjustments.ConfigManager.Config?.CompAdjust?.ArenaScaleBaseCorrection ?? 1.5f;
+            if (baseCorrection <= 0f) baseCorrection = 1.5f;
+            _arenaInstance.transform.localScale = new Vector3(scaleX * baseCorrection, scaleY * baseCorrection, scaleZ * baseCorrection);
 
             // Sync layers and debug brushes on the Colliders sub-tree
             if (_collidersInstance != null)
@@ -314,7 +320,13 @@ namespace DashFallMod
 
             _arenaInstance.transform.localPosition = new Vector3(offsetX, offsetY, offsetZ);
             _arenaInstance.transform.localRotation = Quaternion.Euler(rotX, rotY, rotZ);
-            _arenaInstance.transform.localScale = new Vector3(scaleX, scaleY, scaleZ);
+            // b1117 base rink is ~1.5x the bundled prefab, so scale the whole instance
+            // (visual + wall colliders + corner barrier override, all children) up to
+            // base size at ArenaScale 1.0. Spawns/minimap use the vanilla rink as their
+            // reference, so they line up once the arena matches base.
+            float baseCorrection = CompetitiveAdjustments.ConfigManager.Config?.CompAdjust?.ArenaScaleBaseCorrection ?? 1.5f;
+            if (baseCorrection <= 0f) baseCorrection = 1.5f;
+            _arenaInstance.transform.localScale = new Vector3(scaleX * baseCorrection, scaleY * baseCorrection, scaleZ * baseCorrection);
 
             // Colliders from separate prefab or scene clone
             if (_collidersPrefab != null)

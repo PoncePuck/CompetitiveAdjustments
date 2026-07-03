@@ -91,6 +91,12 @@ namespace CompetitiveAdjustments
         // historical 0.85 pulls spawns 15% inward even at arena scale 1.0.
         public float SpawnFitInset = 0.85f;
         public bool EnableArenaTweaks = false;
+        // b1117 enlarged the base rink ~1.5x relative to the bundled arena prefab, so
+        // the custom arena rendered too small (walls/corners/spawns/minimap all mis-fit).
+        // This multiplies the arena instance scale so ArenaScale 1.0 == base-game size.
+        // The spawn (0.85) and minimap (0.80) insets are relative to the vanilla rink, so
+        // once the arena matches base at 1.0 they line up automatically. Tune if not exact.
+        public float ArenaScaleBaseCorrection = 1.5f;
         public float ArenaScaleX = 1f;
         public float ArenaScaleY = 1f;
         public float ArenaScaleZ = 1f;
