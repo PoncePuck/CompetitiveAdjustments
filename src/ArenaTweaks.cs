@@ -576,7 +576,13 @@ namespace DashFallMod
             // Cancel parent arena visual rotation for barrier overrides, then
             // apply independent barrier rotation controls.
             overrideRoot.localPosition = Vector3.zero;
-            overrideRoot.localScale = new Vector3(barrierScaleX, barrierScaleY, barrierScaleZ);
+            // The override root is a child of the arena instance, which now scales its two
+            // horizontal localScale axes (X + Y) by ArenaBaseScaleCorrection (height Z is
+            // excluded). The barrier is cloned from the already-base-sized vanilla barrier,
+            // so it must NOT also inherit that 1.5x or it sticks out ~1.2x past the walls.
+            // Divide the correction back out of the two horizontal axes; leave Z (height).
+            float k = ArenaBaseScaleCorrection;
+            overrideRoot.localScale = new Vector3(barrierScaleX / k, barrierScaleY / k, barrierScaleZ);
             var arenaVisualRotation = Quaternion.Euler(arenaRotX, arenaRotY, arenaRotZ);
             var barrierAdjustment = Quaternion.Euler(barrierRotX, barrierRotY, barrierRotZ);
             overrideRoot.localRotation = Quaternion.Inverse(arenaVisualRotation) * barrierAdjustment;

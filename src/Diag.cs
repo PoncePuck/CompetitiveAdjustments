@@ -56,7 +56,8 @@ namespace CompetitiveAdjustments
             {
                 if (c == null) continue;
                 Vector3 s = c.bounds.size;
-                Log($"  {Path(root, c.transform)} | {c.GetType().Name} | layer={LayerMask.LayerToName(c.gameObject.layer)}({c.gameObject.layer}) | enabled={c.enabled} activeSelf={c.gameObject.activeSelf} | trigger={c.isTrigger} | tag={c.tag} | size=({s.x:F2},{s.y:F2},{s.z:F2})");
+                Vector3 ls = c.transform.lossyScale;
+                Log($"  {Path(root, c.transform)} | {c.GetType().Name} | layer={LayerMask.LayerToName(c.gameObject.layer)}({c.gameObject.layer}) | enabled={c.enabled} | trigger={c.isTrigger} | lossyScale=({ls.x:F2},{ls.y:F2},{ls.z:F2}) | worldSize=({s.x:F2},{s.y:F2},{s.z:F2})");
             }
         }
 
