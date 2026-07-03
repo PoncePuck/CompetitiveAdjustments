@@ -268,14 +268,12 @@ namespace DashFallMod.Client
             // scale==1 early-out: when arena tweaks are active the 0.80 inset always applies,
             // so a tweaked 1.0x rink correctly renders smaller than a vanilla rink (which
             // takes the TryGetEffectiveArenaScale==false reset path above instead).
-            float arenaDefaultX = 0.80f;
-            float arenaDefaultZ = 0.80f;
-            // Apply the same base-rink correction as the arena instance so the minimap
-            // tracks the 1.5x-bigger arena instead of staying at the old (too-small) size.
-            // Both minimap axes are horizontal (world X width, world Z length).
-            float k = GoalNetTweaks.ArenaBaseScaleCorrection;
-            float widthFactor  = scaleX * arenaDefaultX * k;
-            float heightFactor = scaleZ * arenaDefaultZ * k;
+            // After the arena base-scale correction, ArenaScale 1.0 == the vanilla rink
+            // that the vanilla minimap already represents, so the minimap factor is just
+            // the config scale (net 1.0x at ArenaScale 1.0). The old 0.80 inset was tuned
+            // for the pre-correction (too-small) arena and now reads too small.
+            float widthFactor  = scaleX;
+            float heightFactor = scaleZ;
             float baseScale = SettingsManager.MinimapScale;
             _lastAppliedMinimapBaseScale = baseScale;
             minimapEl.style.scale = new UnityEngine.Vector2(baseScale * widthFactor, baseScale * heightFactor);

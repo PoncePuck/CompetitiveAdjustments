@@ -266,7 +266,7 @@ namespace DashFallMod
         // comfortably inside the rink. The custom arena prefab is a little larger than
         // the vanilla rink the spawn/puck markers were authored against, so the raw
         // proportional spread lands a touch too wide without this.
-        private const float SpawnFitInset = 0.85f;
+        private const float SpawnFitInset = 1.0f;
 
         // b1117 enlarged the base rink ~1.5x (horizontal plane only) vs the bundled
         // arena prefab. Hardcoded correction so ArenaScale 1.0 == base-game size.
@@ -287,14 +287,14 @@ namespace DashFallMod
         {
             if (!TryGetEffectiveArenaScale(out float scaleX, out float scaleZ))
                 return pos;
-            // Configurable inset (default 0.85). Reached only when arena tweaks are
-            // active, so CompAdjustEffective is the live (non-sentinel) config here.
+            // After the arena base-scale correction, ArenaScale 1.0 == the vanilla rink,
+            // and vanilla spawn positions already belong to that rink, so the spawn factor
+            // is just the config scale (net 1.0x at ArenaScale 1.0) -- no inset, no extra
+            // correction. SpawnFitInset (default 1.0) lets you nudge spawns inward if
+            // desired. Reached only when arena tweaks are active, so CompAdjustEffective
+            // is the live (non-sentinel) config here.
             float inset = CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.SpawnFitInset ?? SpawnFitInset;
-            // Apply the same base-rink correction as the arena so spawns track it (both
-            // horizontal axes; Y is untouched). Without this, spawns stay at the old scale
-            // while the arena is 1.5x bigger, so players land far inside the boards.
-            float k = ArenaBaseScaleCorrection;
-            return new Vector3(pos.x * scaleX * inset * k, pos.y, pos.z * scaleZ * inset * k);
+            return new Vector3(pos.x * scaleX * inset, pos.y, pos.z * scaleZ * inset);
         }
 
         [HarmonyPostfix]

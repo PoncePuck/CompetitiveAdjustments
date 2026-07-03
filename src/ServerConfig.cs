@@ -87,9 +87,9 @@ namespace CompetitiveAdjustments
         public float GoalFrameOffsetZ = 0f;
         public float GoalFrameScale = 100f;
         // Inset applied to faceoff/spawn positions when the arena is scaled. 1.0 keeps
-        // spawns at the exact proportional spot; <1 pulls them toward centre ice. The
-        // historical 0.85 pulls spawns 15% inward even at arena scale 1.0.
-        public float SpawnFitInset = 0.85f;
+        // spawns at the exact proportional spot (correct now that ArenaScale 1.0 == the
+        // base rink); <1 pulls them toward centre ice.
+        public float SpawnFitInset = 1.0f;
         public bool EnableArenaTweaks = false;
         public float ArenaScaleX = 1f;
         public float ArenaScaleY = 1f;
