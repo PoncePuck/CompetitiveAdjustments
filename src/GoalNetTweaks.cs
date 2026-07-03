@@ -280,7 +280,10 @@ namespace DashFallMod
         {
             if (!TryGetEffectiveArenaScale(out float scaleX, out float scaleZ))
                 return pos;
-            return new Vector3(pos.x * scaleX * SpawnFitInset, pos.y, pos.z * scaleZ * SpawnFitInset);
+            // Configurable inset (default 0.85). Reached only when arena tweaks are
+            // active, so CompAdjustEffective is the live (non-sentinel) config here.
+            float inset = CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.SpawnFitInset ?? SpawnFitInset;
+            return new Vector3(pos.x * scaleX * inset, pos.y, pos.z * scaleZ * inset);
         }
 
         [HarmonyPostfix]
