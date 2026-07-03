@@ -131,16 +131,24 @@ namespace CompetitiveCompanion
     [HarmonyPatch(typeof(MeshRendererTexturer), "SetTexture")]
     public class MeshRendererTexturerPatch
     {
+        // b1117 reworked MeshRendererTexturer from an instantiated `Material material`
+        // field to a MaterialPropertyBlock, so the old `___material` field injection
+        // no longer resolves and this patch silently failed to apply. Drive the
+        // torso/groin transparency through the renderer's instanced material instead
+        // (which is what `___material` effectively was in b897).
         [HarmonyPostfix]
-        public static void Postfix(MeshRendererTexturer __instance, ref Material ___material)
+        public static void Postfix(MeshRendererTexturer __instance, MeshRenderer ___meshRenderer)
         {
-            if (___material == null) return;
+            if (___meshRenderer == null) return;
             if (!__instance.gameObject.name.Contains("Torso") &&
                 !__instance.gameObject.name.Contains("Groin")) return;
 
             // Skip goalies — their torso/groin materials must not be modified.
             var body = __instance.GetComponentInParent<PlayerBodyV2>();
             if (body == null || body.name.Contains("Goalie")) return;
+
+            Material material = ___meshRenderer.material;
+            if (material == null) return;
 
             var dfCfg = CompetitiveAdjustments.ConfigManager.CompAdjustEffective;
             bool customActive = PluginCore.torsoMesh != null
@@ -150,19 +158,19 @@ namespace CompetitiveCompanion
             if (customActive)
             {
                 // Custom torso is active — keep torso and groin fully opaque so they render correctly.
-                ___material.DisableKeyword("_SURFACE_TYPE_TRANSPARENT");
-                ___material.SetOverrideTag("RenderType", "Opaque");
-                Color c = ___material.color;
+                material.DisableKeyword("_SURFACE_TYPE_TRANSPARENT");
+                material.SetOverrideTag("RenderType", "Opaque");
+                Color c = material.color;
                 c.a = 1.0f;
-                ___material.color = c;
+                material.color = c;
             }
             else
             {
-                ___material.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
-                ___material.SetOverrideTag("RenderType", "Transparent");
-                Color color = ___material.color;
+                material.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+                material.SetOverrideTag("RenderType", "Transparent");
+                Color color = material.color;
                 color.a = 0.1f;
-                ___material.color = color;
+                material.color = color;
             }
         }
     }
@@ -237,12 +245,18 @@ namespace CompetitivePuckTweaks.src
         public float value { get; set; } = 0f;
     }
 
-    [HarmonyPatch(typeof(GoalController), "OnNetworkSpawn")]
+    // b1117 GoalController is a plain MonoBehaviour with no OnNetworkSpawn (b897
+    // had one); patching the missing method threw at patch time and silently
+    // dropped the goal-post bounciness tweak. Retarget to Awake, which sets the
+    // private `goal` field on its first line, so ___goal is valid in this postfix.
+    [HarmonyPatch(typeof(GoalController), "Awake")]
     public class GoalControllerPatch
     {
         [HarmonyPostfix]
         public static void Postfix(GoalController __instance, ref Goal ___goal)
         {
+            if (___goal == null) return;
+
             Transform postCollider = null;
             for (int i = 0; i < ___goal.transform.childCount; i++)
             {

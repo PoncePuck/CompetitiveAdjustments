@@ -130,27 +130,29 @@ namespace DashFallMod.Net
         // Harmony prefixes -- full-replacement encode / decode.
         // ──────────────────────────────────────────────────────────────────
 
+        // b1117 changed EncodeSynchronizedObject's return type from the b897
+        // ValueTuple<ushort, short[], short[]> to the SynchronizedObjectData
+        // struct. __result must match the current return type or Harmony throws
+        // at patch time (which was silently disabling the whole chunked feature).
         public static bool EncodePrefix(
             ulong networkObjectId,
             Vector3 position,
             Quaternion rotation,
-            ref System.ValueTuple<ushort, short[], short[]> __result)
+            ref SynchronizedObjectData __result)
         {
             ushort id = (ushort)networkObjectId;
 
-            short rx = (short)(rotation.x * 32767f);
-            short ry = (short)(rotation.y * 32767f);
-            short rz = (short)(rotation.z * 32767f);
-            short rw = (short)(rotation.w * 32767f);
-
-            short px = ChunkRegistry.EncodeX(position.x, id);
-            short py = ChunkRegistry.EncodeY(position.y);
-            short pz = ChunkRegistry.EncodeZ(position.z, id);
-
-            __result = new System.ValueTuple<ushort, short[], short[]>(
-                id,
-                new short[] { px, py, pz },
-                new short[] { rx, ry, rz, rw });
+            __result = new SynchronizedObjectData
+            {
+                NetworkObjectId = id,
+                X = ChunkRegistry.EncodeX(position.x, id),
+                Y = ChunkRegistry.EncodeY(position.y),
+                Z = ChunkRegistry.EncodeZ(position.z, id),
+                Rx = (short)(rotation.x * 32767f),
+                Ry = (short)(rotation.y * 32767f),
+                Rz = (short)(rotation.z * 32767f),
+                Rw = (short)(rotation.w * 32767f)
+            };
 
             return false;
         }

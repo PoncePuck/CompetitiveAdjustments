@@ -1183,7 +1183,8 @@ namespace DashFallMod
             if (arenaRoot == null || customCollidersRoot == null) return;
 
             int iceLayer = LayerMask.NameToLayer("Ice");
-            int boardsLayer = LayerMask.NameToLayer("Boards");
+            // b1117 renamed the "Boards" puck-collision layer to "Barrier".
+            int boardsLayer = LayerMask.NameToLayer("Barrier");
             int fallbackLayer = arenaRoot.gameObject.layer;
 
             if (iceLayer < 0)
@@ -1193,7 +1194,7 @@ namespace DashFallMod
             }
             if (boardsLayer < 0)
             {
-                CompetitiveAdjustments.ConfigManager.LogWarning("Unity layer 'Boards' not found, falling back to arena root layer.");
+                CompetitiveAdjustments.ConfigManager.LogWarning("Unity layer 'Barrier' not found, falling back to arena root layer.");
                 boardsLayer = fallbackLayer;
             }
 

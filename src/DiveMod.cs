@@ -29,7 +29,7 @@ namespace DashFallMod
         {
             var player = input?.Player; if (player == null) return;
             var body = player.PlayerBody; if (body == null) return;
-            if (!body.IsGrounded || body.HasFallen || IsFaceOff()) return;
+            if (!body.IsGrounded || body.HasFallen.Value || IsFaceOff()) return;
             
             var id = player.NetworkObjectId;
             if (DiveToggled.Contains(id)) return;
@@ -101,7 +101,7 @@ namespace DashFallMod
             
             // === DIVE FALLEN DRAG ===
             // Apply extra drag when player has fallen after diving
-            if (Config.EnableDiveFallenDrag && __instance.HasFallen)
+            if (Config.EnableDiveFallenDrag && __instance.HasFallen.Value)
             {
                 __instance.Movement.AmbientDrag = Config.DiveFallenDragAmount;
             }
@@ -110,7 +110,7 @@ namespace DashFallMod
             if (elapsed < Config.DiveAutoClearIfNoFallSeconds) return;
             
             // never fell → clear toggle so dive can be used again
-            if (__instance.IsGrounded && !__instance.HasFallen)
+            if (__instance.IsGrounded && !__instance.HasFallen.Value)
             {
                 DiveMod.DiveToggled.Remove(id);
                 DiveMod.DiveStartedAt.Remove(id);

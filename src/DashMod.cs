@@ -136,7 +136,7 @@ namespace DashFallMod
             bool airborne = !__instance.IsGrounded;
             
             // global early-outs
-            if (__instance.HasFallen) return false;
+            if (__instance.HasFallen.Value) return false;
             
             // Note: Goalie sliding dash is handled above (returns true for vanilla handling)
             // If we get here as goalie, we're doing standing dash (not sliding)

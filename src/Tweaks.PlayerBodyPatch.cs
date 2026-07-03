@@ -210,6 +210,14 @@ namespace CompetitivePuckTweaks.src
         [HarmonyPostfix]
         public static void Postfix(PlayerBodyV2 __instance)
         {
+            // OnFall() must run server-side only. In b1117 HasFallen became a
+            // NetworkVariable<bool> with server write-authority and OnFall() writes
+            // HasFallen.Value with no internal guard (vanilla only ever calls it
+            // inside FixedUpdate's `if (IsServer)` block). Calling it on a client
+            // throws "Client is not allowed to write to this NetworkVariable" every
+            // fall. In b897 HasFallen was a plain bool so the unguarded call was
+            // harmless. The server write replicates HasFallen to clients as before.
+            if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer) return;
             if (!__instance.IsUpright && !__instance.IsSideways) __instance.OnFall();
         }
     }

@@ -41,8 +41,11 @@ public sealed class DashFallGameMod
             _harmony.PatchAll(typeof(DashFallGameMod));
             HarmonyPatchHelper.PatchNamespaces(_harmony, "DashFallMod", "PoncePuck.Keybinds", "PonceMods.Shared");
             
-            EventManager.AddEventListener("Event_OnPlayerBodySpawned", OnBodySpawned);
-            EventManager.AddEventListener("Event_OnPlayerRoleChanged", OnRoleChanged);
+            // b1117 renamed the spawn broadcast to Event_Everyone_OnPlayerBodySpawned,
+            // and role changes are now delivered through the combined
+            // Event_Everyone_OnPlayerGameStateChanged (phase/team/role) event.
+            EventManager.AddEventListener("Event_Everyone_OnPlayerBodySpawned", OnBodySpawned);
+            EventManager.AddEventListener("Event_Everyone_OnPlayerGameStateChanged", OnRoleChanged);
             
             // Initialize client immediately if not headless
             
@@ -81,8 +84,8 @@ public sealed class DashFallGameMod
         ServerBridge.Unhook();
         _harmony?.UnpatchSelf();
 
-        EventManager.RemoveEventListener("Event_OnPlayerBodySpawned", OnBodySpawned);
-        EventManager.RemoveEventListener("Event_OnPlayerRoleChanged", OnRoleChanged);
+        EventManager.RemoveEventListener("Event_Everyone_OnPlayerBodySpawned", OnBodySpawned);
+        EventManager.RemoveEventListener("Event_Everyone_OnPlayerGameStateChanged", OnRoleChanged);
 
         // Tear down CMM handlers our subsystems registered via the per-frame
         // EnsureCMMRegistered polls. Without this, a plugin disable/re-enable
@@ -117,8 +120,18 @@ public sealed class DashFallGameMod
     
     private void OnRoleChanged(Dictionary<string, object> msg)
     {
-        var player = msg?["player"] as Player;
+        if (msg == null) return;
+        var player = msg["player"] as Player;
         if (player?.PlayerBody == null) return;
+
+        // Event_Everyone_OnPlayerGameStateChanged fires on any game-state change
+        // (phase / team / role). Preserve the old Event_OnPlayerRoleChanged
+        // semantics by acting only when the role actually changed.
+        if (msg.TryGetValue("oldGameState", out var oldObj) && msg.TryGetValue("newGameState", out var newObj)
+            && oldObj is PlayerGameState oldState && newObj is PlayerGameState newState
+            && oldState.Role == newState.Role)
+            return;
+
         DashMod.EnableDash(player.PlayerBody);
 
         // A goalie that switches to a skater stops being ticked by the goalie leg
