@@ -516,19 +516,21 @@ namespace DashFallMod
                         frameObj.name = "CustomGoalFrame";
                         frameObj.transform.SetParent(t, worldPositionStays: false);
                         frameObj.transform.localPosition = Vector3.zero;
-                        // b1117 re-authored the Goal prefab so its local orientation is
-                        // yawed 180 degrees relative to b897. The frame inherits the goal
-                        // transform, so an identity local rotation now points it away from
-                        // center ice; a uniform 180 yaw re-aligns both nets. (GoalController
-                        // and Level spawn code are byte-identical across the two builds, so
-                        // the flip lives in the prefab asset, not in code.)
-                        frameObj.transform.localRotation = Quaternion.Euler(0f, 180f, 0f);
+                        frameObj.transform.localRotation = Quaternion.identity;
                         frameObj.transform.localScale = new Vector3(100f, 100f, 100f);
 
                         SyncCustomFrameAppearance(goal, frameObj.transform);
                         _syncedGoalFrameAppearances.Add(rootId);
                         DisableCustomFrameNetPieces(frameObj);
                         _goalFrames[rootId] = frameObj;
+
+                        // b1117 migration diagnostic: report the goal + original/custom
+                        // frame orientation so the correct frame rotation can be computed.
+                        // The creation block is already once-per-goal-per-enable, so both
+                        // nets dump exactly once.
+                        CompetitiveAdjustments.Diag.DumpGoal(t, goal.Team.ToString(),
+                            FindOriginalGoalFrameRenderer(goal, frameObj.transform)?.transform,
+                            frameObj.transform);
                     }
                     else if (!_syncedGoalFrameAppearances.Contains(rootId))
                     {
