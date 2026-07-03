@@ -69,12 +69,14 @@ namespace CompetitiveAdjustments
             Log("=== ARENA SCALE ===");
             if (arenaInstance != null)
             {
+                var t = arenaInstance.transform;
+                Log($"  instance transform worldPos={t.position} localPos={t.localPosition} euler={t.eulerAngles} localScale={t.localScale} lossyScale={t.lossyScale}");
                 var rends = arenaInstance.GetComponentsInChildren<Renderer>(true);
                 if (rends.Length > 0)
                 {
                     Bounds b = rends[0].bounds;
                     for (int i = 1; i < rends.Length; i++) b.Encapsulate(rends[i].bounds);
-                    Log($"  custom arena '{arenaInstance.name}' localScale={arenaInstance.transform.localScale} worldBoundsSize={b.size} center={b.center}");
+                    Log($"  custom arena '{arenaInstance.name}' worldBoundsSize={b.size} center={b.center}");
                 }
             }
             else Log("  custom arena instance: <null>");
