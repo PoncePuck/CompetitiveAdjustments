@@ -268,6 +268,13 @@ namespace DashFallMod
         // proportional spread lands a touch too wide without this.
         private const float SpawnFitInset = 0.85f;
 
+        // b1117 enlarged the base rink ~1.5x (horizontal plane only) vs the bundled
+        // arena prefab. Hardcoded correction so ArenaScale 1.0 == base-game size.
+        // Applied to the arena's two HORIZONTAL axes (width + length) and to the
+        // minimap and spawn scaling so they all track together; the vertical/height
+        // axis (config ArenaScaleZ -> world Y) is deliberately excluded.
+        public const float ArenaBaseScaleCorrection = 1.5f;
+
         /// <summary>
         /// Maps a vanilla spawn position (player body or puck) to the equivalent spot
         /// in the arena-scaled rink. Scales world X/Z about the rink centre (world
@@ -283,7 +290,11 @@ namespace DashFallMod
             // Configurable inset (default 0.85). Reached only when arena tweaks are
             // active, so CompAdjustEffective is the live (non-sentinel) config here.
             float inset = CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.SpawnFitInset ?? SpawnFitInset;
-            return new Vector3(pos.x * scaleX * inset, pos.y, pos.z * scaleZ * inset);
+            // Apply the same base-rink correction as the arena so spawns track it (both
+            // horizontal axes; Y is untouched). Without this, spawns stay at the old scale
+            // while the arena is 1.5x bigger, so players land far inside the boards.
+            float k = ArenaBaseScaleCorrection;
+            return new Vector3(pos.x * scaleX * inset * k, pos.y, pos.z * scaleZ * inset * k);
         }
 
         [HarmonyPostfix]

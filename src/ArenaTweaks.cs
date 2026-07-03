@@ -275,9 +275,8 @@ namespace DashFallMod
             // (visual + wall colliders + corner barrier override, all children) up to
             // base size at ArenaScale 1.0. Spawns/minimap use the vanilla rink as their
             // reference, so they line up once the arena matches base.
-            float baseCorrection = CompetitiveAdjustments.ConfigManager.Config?.CompAdjust?.ArenaScaleBaseCorrection ?? 1.5f;
-            if (baseCorrection <= 0f) baseCorrection = 1.5f;
-            _arenaInstance.transform.localScale = new Vector3(scaleX * baseCorrection, scaleY * baseCorrection, scaleZ * baseCorrection);
+            // Horizontal axes (width + length) only; localScale.z is the height axis and stays uncorrected.
+            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ);
 
             // Sync layers and debug brushes on the Colliders sub-tree
             if (_collidersInstance != null)
@@ -324,9 +323,8 @@ namespace DashFallMod
             // (visual + wall colliders + corner barrier override, all children) up to
             // base size at ArenaScale 1.0. Spawns/minimap use the vanilla rink as their
             // reference, so they line up once the arena matches base.
-            float baseCorrection = CompetitiveAdjustments.ConfigManager.Config?.CompAdjust?.ArenaScaleBaseCorrection ?? 1.5f;
-            if (baseCorrection <= 0f) baseCorrection = 1.5f;
-            _arenaInstance.transform.localScale = new Vector3(scaleX * baseCorrection, scaleY * baseCorrection, scaleZ * baseCorrection);
+            // Horizontal axes (width + length) only; localScale.z is the height axis and stays uncorrected.
+            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ);
 
             // Colliders from separate prefab or scene clone
             if (_collidersPrefab != null)

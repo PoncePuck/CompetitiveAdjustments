@@ -270,8 +270,12 @@ namespace DashFallMod.Client
             // takes the TryGetEffectiveArenaScale==false reset path above instead).
             float arenaDefaultX = 0.80f;
             float arenaDefaultZ = 0.80f;
-            float widthFactor  = scaleX * arenaDefaultX;
-            float heightFactor = scaleZ * arenaDefaultZ;
+            // Apply the same base-rink correction as the arena instance so the minimap
+            // tracks the 1.5x-bigger arena instead of staying at the old (too-small) size.
+            // Both minimap axes are horizontal (world X width, world Z length).
+            float k = GoalNetTweaks.ArenaBaseScaleCorrection;
+            float widthFactor  = scaleX * arenaDefaultX * k;
+            float heightFactor = scaleZ * arenaDefaultZ * k;
             float baseScale = SettingsManager.MinimapScale;
             _lastAppliedMinimapBaseScale = baseScale;
             minimapEl.style.scale = new UnityEngine.Vector2(baseScale * widthFactor, baseScale * heightFactor);
