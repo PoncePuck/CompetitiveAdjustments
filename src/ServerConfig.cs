@@ -71,6 +71,16 @@ namespace CompetitiveAdjustments
         public float GoalSizeScaleY = 1f;
         public float GoalSizeScaleZ = 1f;
         public float GoalBackOffset = 0f;
+        // Custom goal-frame alignment. The bundled frame prefab's mesh orientation
+        // does not match the b1117 goal, so expose live-tunable local rotation (Euler
+        // degrees) and position offset to line the frame up with the net. Applied on
+        // every goal refresh (host path), so /reload updates it live.
+        public float GoalFrameRotX = 0f;
+        public float GoalFrameRotY = 0f;
+        public float GoalFrameRotZ = 0f;
+        public float GoalFrameOffsetX = 0f;
+        public float GoalFrameOffsetY = 0f;
+        public float GoalFrameOffsetZ = 0f;
         public bool EnableArenaTweaks = false;
         public float ArenaScaleX = 1f;
         public float ArenaScaleY = 1f;

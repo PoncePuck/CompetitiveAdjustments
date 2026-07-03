@@ -17,12 +17,14 @@ namespace CompetitivePuckTweaks.src
             ___softCollisionForce = PluginCore.config.SoftCollisionForce;
             ___bladeTargetFocusPointInitialLocalPosition += new Vector3(0, PluginCore.config.BladeTargetFocusPointOffsetY, 0);
 
-            // Ensure the Barrier layer is included in the stick raycast mask so custom
+            // Ensure the board collision layer is in the stick raycast mask so custom
             // arena boards block and push the stick exactly like the game's own boards.
-            // (b1117 renamed the "Boards" collision layer to "Barrier".)
-            int barrierLayer = LayerMask.NameToLayer("Barrier");
-            if (barrierLayer >= 0)
-                ___raycastLayerMask |= 1 << barrierLayer;
+            // The shipped build names this layer "Boards"; some b1117 decompiles name
+            // it "Barrier". Resolve whichever exists.
+            int boardsLayer = LayerMask.NameToLayer("Boards");
+            if (boardsLayer < 0) boardsLayer = LayerMask.NameToLayer("Barrier");
+            if (boardsLayer >= 0)
+                ___raycastLayerMask |= 1 << boardsLayer;
 
             if (PluginCore.config.EnableStickSpeedDecay) __instance.gameObject.AddComponent<FloatComponent>();
         }

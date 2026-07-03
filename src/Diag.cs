@@ -45,9 +45,11 @@ namespace CompetitiveAdjustments
             int boards = LayerMask.NameToLayer("Boards");
             int ice = LayerMask.NameToLayer("Ice");
             int puck = LayerMask.NameToLayer("Puck");
-            bool puckHitsBarrier = puck >= 0 && barrier >= 0 && !Physics.GetIgnoreLayerCollision(puck, barrier);
+            int boardLayer = boards >= 0 ? boards : barrier;
+            bool puckHitsBoard = puck >= 0 && boardLayer >= 0 && !Physics.GetIgnoreLayerCollision(puck, boardLayer);
+            bool puckHitsDefault = puck >= 0 && !Physics.GetIgnoreLayerCollision(puck, 0);
             Log($"=== COLLIDERS {label} root='{root.name}' worldScale={root.lossyScale} ===");
-            Log($"layers: Barrier={barrier} Boards={boards} Ice={ice} Puck={puck} | Puck<->Barrier collide={puckHitsBarrier}");
+            Log($"layers: Barrier={barrier} Boards={boards} Ice={ice} Puck={puck} boardLayer={boardLayer} | Puck<->board collide={puckHitsBoard} | Puck<->Default collide={puckHitsDefault}");
             var cols = root.GetComponentsInChildren<Collider>(true);
             Log($"collider count={cols.Length}");
             foreach (var c in cols)

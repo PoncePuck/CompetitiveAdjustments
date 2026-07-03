@@ -359,6 +359,11 @@ namespace DashFallMod
             float scaleY         = Mathf.Max(0.1f,  useSynced ? _syncedGoalSizeScaleY        : cfg.GoalSizeScaleY);
             float scaleZ         = Mathf.Max(0.1f,  useSynced ? _syncedGoalSizeScaleZ        : cfg.GoalSizeScaleZ);
             float goalBackOffset = useSynced ? _syncedGoalBackOffset : cfg.GoalBackOffset;
+            // Custom-frame alignment knobs. Host-config driven for live tuning; once the
+            // correct values are found they are baked as the ServerConfig defaults so
+            // clients (which read the same defaults) get them without extra sync wiring.
+            float frameRotX = cfg.GoalFrameRotX, frameRotY = cfg.GoalFrameRotY, frameRotZ = cfg.GoalFrameRotZ;
+            float frameOffX = cfg.GoalFrameOffsetX, frameOffY = cfg.GoalFrameOffsetY, frameOffZ = cfg.GoalFrameOffsetZ;
             bool arenaEnabled    = clientUnsynced ? false : (useSynced ? _syncedEnableArenaTweaks  : cfg.EnableArenaTweaks);
             float arenaScaleX    = Mathf.Max(0.1f, useSynced ? _syncedArenaScaleX : cfg.ArenaScaleX);
             float arenaScaleY    = Mathf.Max(0.1f, useSynced ? _syncedArenaScaleY : cfg.ArenaScaleY);
@@ -373,6 +378,16 @@ namespace DashFallMod
                 enabled, thicknessScale, scaleX, scaleY, scaleZ, goalBackOffset,
                 arenaEnabled, arenaScaleX, arenaScaleY, arenaScaleZ,
                 arenaOffsetX, arenaOffsetY, arenaOffsetZ, arenaRotX, arenaRotY, arenaRotZ);
+            unchecked
+            {
+                // Fold the frame knobs in so tuning them via /reload triggers a refresh.
+                currentHash = currentHash * 397 ^ frameRotX.GetHashCode();
+                currentHash = currentHash * 397 ^ frameRotY.GetHashCode();
+                currentHash = currentHash * 397 ^ frameRotZ.GetHashCode();
+                currentHash = currentHash * 397 ^ frameOffX.GetHashCode();
+                currentHash = currentHash * 397 ^ frameOffY.GetHashCode();
+                currentHash = currentHash * 397 ^ frameOffZ.GetHashCode();
+            }
 
             bool configChanged = _forceNextRefresh || currentHash != _lastRefreshHash;
             _forceNextRefresh = false;
@@ -537,6 +552,13 @@ namespace DashFallMod
                         SyncCustomFrameAppearance(goal, frameObj.transform);
                         _syncedGoalFrameAppearances.Add(rootId);
                     }
+
+                    // Apply the live-tunable frame alignment every refresh so /reload
+                    // updates orientation/position without recreating the frame. The
+                    // prefab mesh does not match the b1117 goal, so this offset lines it
+                    // up. localScale stays at the 100x Blender-unit correction.
+                    frameObj.transform.localRotation = Quaternion.Euler(frameRotX, frameRotY, frameRotZ);
+                    frameObj.transform.localPosition = new Vector3(frameOffX, frameOffY, frameOffZ);
 
                     HideOriginalGoalFrameRenderers(goal, rootId, frameObj.transform);
                 }

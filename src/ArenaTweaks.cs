@@ -1178,13 +1178,25 @@ namespace DashFallMod
             return isThinOnY && nearFloor;
         }
 
+        // Resolve the puck-collision board layer by name. The shipped build names it
+        // "Boards"; some b1117 decompiles show "Barrier". Returns -1 if neither exists.
+        private static int ResolveBoardLayer()
+        {
+            int layer = LayerMask.NameToLayer("Boards");
+            if (layer < 0) layer = LayerMask.NameToLayer("Barrier");
+            return layer;
+        }
+
         private static void SyncCustomColliderLayersAndStates(Transform arenaRoot, Transform customCollidersRoot)
         {
             if (arenaRoot == null || customCollidersRoot == null) return;
 
             int iceLayer = LayerMask.NameToLayer("Ice");
-            // b1117 renamed the "Boards" puck-collision layer to "Barrier".
-            int boardsLayer = LayerMask.NameToLayer("Barrier");
+            // The puck-collision board layer is "Boards" in the shipped build; some
+            // decompiled b1117 trees name it "Barrier". Resolve whichever actually
+            // exists. Do NOT fall back to the arena-root layer here: that is "Default",
+            // which the puck does not collide with, so custom boards would pass through.
+            int boardsLayer = ResolveBoardLayer();
             int fallbackLayer = arenaRoot.gameObject.layer;
 
             if (iceLayer < 0)
@@ -1194,7 +1206,7 @@ namespace DashFallMod
             }
             if (boardsLayer < 0)
             {
-                CompetitiveAdjustments.ConfigManager.LogWarning("Unity layer 'Barrier' not found, falling back to arena root layer.");
+                CompetitiveAdjustments.ConfigManager.LogWarning("Neither 'Boards' nor 'Barrier' layer found; custom boards will not collide with the puck.");
                 boardsLayer = fallbackLayer;
             }
 
