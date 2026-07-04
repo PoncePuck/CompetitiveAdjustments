@@ -1384,16 +1384,6 @@ namespace DashFallMod
                     LogArenaColliderHeights(customCollidersRoot);
                 _colliderLayersSynced = true;
             }
-
-            // b1117 migration diagnostic: dump the real collider layout so the
-            // resized-arena collision failure can be root-caused from runtime data.
-            if (!CompetitiveAdjustments.Diag.ArenaDumped)
-            {
-                CompetitiveAdjustments.Diag.ArenaDumped = true;
-                CompetitiveAdjustments.Diag.DumpColliders(arenaRoot, "ARENA ROOT (originals + custom)");
-                CompetitiveAdjustments.Diag.DumpColliders(customCollidersRoot, "CUSTOM COLLIDERS ROOT");
-                CompetitiveAdjustments.Diag.DumpArenaScale(_arenaInstance, arenaRoot);
-            }
         }
 
         // Find a representative vanilla board PhysicsMaterial from the original

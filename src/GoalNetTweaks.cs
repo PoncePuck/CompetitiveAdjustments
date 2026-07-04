@@ -558,14 +558,6 @@ namespace DashFallMod
                         _syncedGoalFrameAppearances.Add(rootId);
                         DisableCustomFrameNetPieces(frameObj);
                         _goalFrames[rootId] = frameObj;
-
-                        // b1117 migration diagnostic: report the goal + original/custom
-                        // frame orientation so the correct frame rotation can be computed.
-                        // The creation block is already once-per-goal-per-enable, so both
-                        // nets dump exactly once.
-                        CompetitiveAdjustments.Diag.DumpGoal(t, goal.Team.ToString(),
-                            FindOriginalGoalFrameRenderer(goal, frameObj.transform)?.transform,
-                            frameObj.transform);
                     }
                     else if (!_syncedGoalFrameAppearances.Contains(rootId))
                     {

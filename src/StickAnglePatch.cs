@@ -137,14 +137,7 @@ namespace CompetitivePuckTweaks.src
         public static void Postfix(PlayerInput __instance, sbyte value)
         {
             if (StickAngleRefs.Cfg.FreeBladeEnabled)
-            {
                 __instance.BladeAngleInput.ServerValue = value;
-                // High-signal: only fires when a beyond-vanilla (>|4|) blade value
-                // actually reaches the server. If this never logs while free-blading,
-                // the client is not sending big values (limits not applied client-side).
-                if (System.Math.Abs((int)value) > 4)
-                    CompetitiveAdjustments.Diag.Log($"FreeBlade RPC raw value={value} -> ServerValue={__instance.BladeAngleInput.ServerValue}");
-            }
         }
     }
 
@@ -217,12 +210,10 @@ namespace CompetitiveCompanion
             StickAngleRefs.SaveOriginals(player);
 
             var cfg = DashFallMod.ConfigManager.CompAdjustEffective;
-            CompetitiveAdjustments.Diag.Log($"FreeBlade client spawn: owner={__instance.IsOwner} FreeBladeEnabled={cfg.FreeBladeEnabled} curMin={StickAngleRefs.minBladeRef(__instance)} curMax={StickAngleRefs.maxBladeRef(__instance)}");
             if (!cfg.FreeBladeEnabled) return;
 
             StickAngleRefs.minBladeRef(__instance) = -127;
             StickAngleRefs.maxBladeRef(__instance) = 127;
-            CompetitiveAdjustments.Diag.Log($"FreeBlade applied: min={StickAngleRefs.minBladeRef(__instance)} max={StickAngleRefs.maxBladeRef(__instance)}");
         }
     }
 
