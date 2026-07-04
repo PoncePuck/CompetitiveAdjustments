@@ -119,11 +119,20 @@ namespace DashFallMod.Client
 
         private void OnLevelSpawnedForMinimap(System.Collections.Generic.Dictionary<string, object> _)
         {
+            // One-shot scene-hierarchy dump for planning the base-game arena+hangar resize.
+            CompetitiveAdjustments.ArenaHierarchyDiag.ResetOneShot();
+            StartCoroutine(DumpArenaHierarchyNextFrame());
             StartCoroutine(ApplyMinimapScaleCoroutine());
             // Re-apply arena clip brushes after level geometry loads (if the setting is on).
             var clientCfg = DashFallConfigLoader.ClientConfig;
             if (clientCfg != null && clientCfg.ShowArenaClipBrushes)
                 StartCoroutine(ApplyArenaClipBrushesNextFrame());
+        }
+
+        private System.Collections.IEnumerator DumpArenaHierarchyNextFrame()
+        {
+            for (int i = 0; i < 5; i++) yield return null; // let level geometry finish spawning
+            CompetitiveAdjustments.ArenaHierarchyDiag.DumpOnce();
         }
 
         private IEnumerator ApplyArenaClipBrushesNextFrame()
@@ -222,6 +231,10 @@ namespace DashFallMod.Client
             _lastAppliedMinimapBaseScale = baseScale;
             minimapEl.style.scale = new UnityEngine.Vector2(baseScale, baseScale);
             contentEl.style.scale = new UnityEngine.Vector2(1f, 1f);
+            // Restore vanilla bounds in case a prior scaled apply enlarged them (arena tweaks
+            // turned off mid-session, or joined a vanilla server after a modded one).
+            var level = UnityEngine.Object.FindObjectsByType<Level>(FindObjectsSortMode.None).FirstOrDefault();
+            if (level != null) uiMinimap.Bounds = level.Bounds;
             CompetitiveAdjustments.ConfigManager.Log("Minimap scale reset to default.");
         }
 
@@ -261,24 +274,29 @@ namespace DashFallMod.Client
             if (!TryGetMinimapElements(uiMinimap, out var minimapEl, out var contentEl))
                 return true; // reflection broke; the vanilla minimap is the safe fallback
 
-            // The minimap is a top-down view: on-screen width tracks rink width (world X),
-            // on-screen height tracks rink depth/length (world Z).  arenaDefault (0.80)
-            // matches the barrier inset (GoalNetTweaks barrierScaleX/Z) so the frame tracks
-            // the actual playable area, which is arenaScale * 0.80.  Note there is no
-            // scale==1 early-out: when arena tweaks are active the 0.80 inset always applies,
-            // so a tweaked 1.0x rink correctly renders smaller than a vanilla rink (which
-            // takes the TryGetEffectiveArenaScale==false reset path above instead).
-            // After the arena base-scale correction, ArenaScale 1.0 == the vanilla rink
-            // that the vanilla minimap already represents, so the minimap factor is just
-            // the config scale (net 1.0x at ArenaScale 1.0). The old 0.80 inset was tuned
-            // for the pre-correction (too-small) arena and now reads too small.
-            float widthFactor  = scaleX;
-            float heightFactor = scaleZ;
+            // Hybrid arena resize: the real base rink is scaled directly, so players/pucks
+            // sit at scaled WORLD positions, but Level.Bounds keeps its Awake-time vanilla
+            // value. UIMinimap.WorldPositionToMinimapPosition plots each dot as
+            // worldPos / Bounds.size * contentPixels, so with vanilla bounds the dots land at
+            // arenaScale x too far and overflow the frame. The old fix ballooned the minimap
+            // element itself and counter-scaled the dots -- which made the on-screen map grow
+            // with the arena. Instead keep the map at the user's chosen size and scale the
+            // BOUNDS the game normalizes against (width by world-X, length by world-Z) so dots
+            // land correctly on a normal-sized minimap. UIMinimap.Bounds is a public field.
             float baseScale = SettingsManager.MinimapScale;
             _lastAppliedMinimapBaseScale = baseScale;
-            minimapEl.style.scale = new UnityEngine.Vector2(baseScale * widthFactor, baseScale * heightFactor);
-            contentEl.style.scale = new UnityEngine.Vector2(1f / widthFactor, 1f / heightFactor);
-            Debug.Log($"[COMPADJUST] Minimap scale: {baseScale * widthFactor:F3}x{baseScale * heightFactor:F3}, dots counter: {1f/widthFactor:F3}x{1f/heightFactor:F3}");
+            minimapEl.style.scale = new UnityEngine.Vector2(baseScale, baseScale);
+            contentEl.style.scale = new UnityEngine.Vector2(1f, 1f);
+
+            var level = UnityEngine.Object.FindObjectsByType<Level>(FindObjectsSortMode.None).FirstOrDefault();
+            if (level != null)
+            {
+                var vb = level.Bounds; // vanilla baseline (the mod never modifies Level.Bounds)
+                uiMinimap.Bounds = new UnityEngine.Bounds(
+                    new UnityEngine.Vector3(vb.center.x * scaleX, vb.center.y, vb.center.z * scaleZ),
+                    new UnityEngine.Vector3(vb.size.x * scaleX, vb.size.y, vb.size.z * scaleZ));
+                Debug.Log($"[COMPADJUST] Minimap bounds scaled to size {uiMinimap.Bounds.size} (arena {scaleX:F2}x{scaleZ:F2}); map element stays at user size {baseScale:F2}.");
+            }
             return true;
         }
 

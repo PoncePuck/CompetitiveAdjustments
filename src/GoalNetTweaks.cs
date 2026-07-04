@@ -289,16 +289,13 @@ namespace DashFallMod
         /// </summary>
         public static Vector3 ScaleSpawnPositionWithArena(Vector3 pos)
         {
-            if (!TryGetEffectiveArenaScale(out float scaleX, out float scaleZ))
-                return pos;
-            // After the arena base-scale correction, ArenaScale 1.0 == the vanilla rink,
-            // and vanilla spawn positions already belong to that rink, so the spawn factor
-            // is just the config scale (net 1.0x at ArenaScale 1.0) -- no inset, no extra
-            // correction. SpawnFitInset (default 1.0) lets you nudge spawns inward if
-            // desired. Reached only when arena tweaks are active, so CompAdjustEffective
-            // is the live (non-sentinel) config here.
-            float inset = CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.SpawnFitInset ?? SpawnFitInset;
-            return new Vector3(pos.x * scaleX * inset, pos.y, pos.z * scaleZ * inset);
+            // No-op under the hybrid arena resize. The faceoff PlayerPosition and puck
+            // PuckPosition markers all live under the 'Level Default' scene root, which the
+            // arena resize scales directly, so the game already reads scaled marker world
+            // positions when it spawns players/pucks. Re-scaling here would double it.
+            // Kept as a stable no-op so the call sites (PlayerBodyPatch, SmallPatches warmup)
+            // don't need to change; SpawnFitInset is likewise retired.
+            return pos;
         }
 
         [HarmonyPostfix]

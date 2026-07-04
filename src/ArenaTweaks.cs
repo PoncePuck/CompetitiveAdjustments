@@ -38,6 +38,27 @@ namespace DashFallMod
         private static PhysicsMaterial _vanillaBoardPhysicMaterial;
         private static bool _vanillaBoardPhysicMaterialResolved;
 
+        // ── Hybrid arena resize ───────────────────────────────────────────────
+        // The base-game arena/hangar visual surfaces are STATICALLY BATCHED (baked
+        // into a scene-root "Combined Mesh", non-readable), so a mod cannot move or
+        // resize them at runtime. Their COLLIDERS, the goals, the faceoff/puck spawn
+        // markers and the bounds source are NOT batched and all live under the
+        // 'Level Default' scene root, which is at world origin and identity rotation.
+        // So scaling that single transform resizes the entire GAMEPLAY layer for free,
+        // shear-free. We therefore:
+        //   (1) scale 'Level Default' by the config -> real collision + goals + spawns, and
+        //   (2) keep the bundled arena prefab purely as the scalable VISUAL (the only
+        //       resizable rink surface there is), driven by the SAME config so it stays
+        //       locked to the resized base, and hide the frozen base rink visuals.
+        // FindArenaRoot() returns the 'Rink' node; its .root is 'Level Default'.
+
+        // Level Default resize state (baseline captured before the first scale).
+        private static Transform _scaledLevelRoot;
+        private static int       _scaledLevelRootId;
+        private static Vector3   _levelRootBaseScale = Vector3.one;
+        private static Vector3   _levelRootBasePos   = Vector3.zero;
+        private static bool      _levelRootBaseCaptured;
+
         private static void SyncArenaVisuals(
             bool enabled,
             float scaleX,
@@ -53,19 +74,13 @@ namespace DashFallMod
             float barrierScaleY,
             float barrierScaleZ)
         {
-            const float barrierRotX = 0f, barrierRotY = 0f, barrierRotZ = 0f;
             RefreshFrameBundleIfChanged();
             TryLoadFrameBundle();
 
-            if (enabled)
-            {
-                ApplyNetworkBoundsPatches();
-                HandleAudioEnvironment();
-            }
+            var arenaRoot = FindArenaRoot();                                    // 'Rink'
+            Transform levelRoot = arenaRoot != null ? arenaRoot.root : null;    // 'Level Default'
 
-            // ── Determine which prefab to use ────────────────────────────────
-            // Prefer the unified ArenaAndColliders prefab.  Fall back to the
-            // legacy split arena/colliders pair when the unified one is absent.
+            // Prefer the unified ArenaAndColliders prefab; fall back to legacy arena.
             GameObject effectivePrefab = _arenaAndCollidersPrefab ?? _arenaPrefab;
 
             if (!enabled || effectivePrefab == null)
@@ -81,17 +96,13 @@ namespace DashFallMod
                     UnityEngine.Object.Destroy(_arenaInstance);
                     _arenaInstance = null;
                 }
-
                 if (_collidersInstance != null)
                 {
                     UnityEngine.Object.Destroy(_collidersInstance);
                     _collidersInstance = null;
-                    _colliderLayersSynced = false;
                 }
 
-                DestroyBarrierStandalone();
-                RestoreOriginalArenaColliders();
-                _usingArenaVisualColliderFallback = false;
+                RestoreLevelDefaultScale();
                 _arenaAppearanceSynced = false;
                 RestoreOriginalArenaRenderers();
                 RemoveNetworkBoundsPatches();
@@ -99,17 +110,15 @@ namespace DashFallMod
                 return;
             }
 
-            var arenaRoot = FindArenaRoot();
-            if (arenaRoot == null)
+            if (arenaRoot == null || levelRoot == null)
             {
                 if (!_loggedArenaRootMissing)
                 {
-                    CompetitiveAdjustments.ConfigManager.LogWarning("Could not find arena root in scene; custom arena visual not spawned.");
+                    CompetitiveAdjustments.ConfigManager.LogWarning("Could not find arena/Level Default root in scene; arena resize not applied.");
                     _loggedArenaRootMissing = true;
                 }
                 return;
             }
-
             _loggedArenaRootMissing = false;
 
             int arenaRootId = arenaRoot.GetInstanceID();
@@ -118,43 +127,159 @@ namespace DashFallMod
                 _arenaRootInstanceId = arenaRootId;
                 _arenaAppearanceSynced = false;
                 _loggedArenaRendererMatches = false;
-                // A different arena has different board materials; drop the cache.
-                _vanillaBoardPhysicMaterial = null;
-                _vanillaBoardPhysicMaterialResolved = false;
             }
 
-            // ── Unified prefab path (ArenaAndColliders) ──────────────────────
-            if (_arenaAndCollidersPrefab != null)
-            {
-                SyncUnifiedInstance(arenaRoot, scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, rotX, rotY, rotZ, barrierRotX, barrierRotY, barrierRotZ, barrierScaleX, barrierScaleY, barrierScaleZ);
-            }
-            // ── Legacy split path (separate arena + colliders prefabs) ───────
-            else
-            {
-                SyncLegacyArenaInstance(arenaRoot, scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, rotX, rotY, rotZ, barrierRotX, barrierRotY, barrierRotZ, barrierScaleX, barrierScaleY, barrierScaleZ);
-            }
+            ApplyNetworkBoundsPatches();
+            HandleAudioEnvironment();
+
+            // (1) Resize the REAL base game (colliders + goals + spawn markers).
+            ScaleLevelDefaultRoot(levelRoot, scaleX, scaleY, offsetX, offsetY, offsetZ);
+
+            // (2) The scalable VISUAL clone, matching the resized base.
+            SyncVisualClone(arenaRoot, effectivePrefab, scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, rotX, rotY, rotZ);
 
             if (!_arenaAppearanceSynced)
             {
-                var visualRoot = _arenaInstance;
-                if (visualRoot != null)
+                if (_arenaInstance != null)
                 {
-                    SyncArenaVisualAppearance(arenaRoot, visualRoot.transform);
+                    SyncArenaVisualAppearance(arenaRoot, _arenaInstance.transform);
                     _arenaAppearanceSynced = true;
                 }
             }
             else
             {
-                // Every tick after initial setup: propagate texture/color changes from the
-                // (hidden) source renderers to our custom clones.  Smoothness and metallic
-                // are intentionally skipped so other mods can control those values freely.
                 LiveSyncArenaSourceTextures();
             }
 
             if (_arenaInstance != null)
                 HideOriginalArenaRenderers(arenaRoot, _arenaInstance.transform);
+        }
 
-            //BoardColliderPatch.Postfix();
+        // (2) Instantiate/reuse the bundled arena prefab as a pure VISUAL clone at the
+        // SCENE ROOT (not under the scaled Level Default, which would double-scale and
+        // shear the rotated prefab). The prefab's 'Colliders' child is stripped --
+        // collision now comes from the real, scaled base-game colliders.
+        private static void SyncVisualClone(
+            Transform arenaRoot,
+            GameObject prefab,
+            float scaleX, float scaleY, float scaleZ,
+            float offsetX, float offsetY, float offsetZ,
+            float rotX, float rotY, float rotZ)
+        {
+            if (prefab == null || arenaRoot == null) return;
+
+            bool needsNewInstance = _arenaInstance == null
+                || !string.Equals(_arenaInstance.name, UnifiedInstanceName, StringComparison.Ordinal);
+
+            if (needsNewInstance)
+            {
+                if (_arenaInstance != null)
+                    UnityEngine.Object.Destroy(_arenaInstance);
+                if (_collidersInstance != null)
+                {
+                    UnityEngine.Object.Destroy(_collidersInstance);
+                    _collidersInstance = null;
+                }
+
+                _arenaInstance = UnityEngine.Object.Instantiate(prefab);
+                _arenaInstance.name = UnifiedInstanceName;
+                _arenaInstance.transform.SetParent(null, false); // scene root
+                _arenaAppearanceSynced = false;
+
+                // Strip the prefab's collider child; real base colliders handle physics.
+                var collidersChild = _arenaInstance.transform.Find(CollidersChildName);
+                if (collidersChild != null)
+                    UnityEngine.Object.Destroy(collidersChild.gameObject);
+
+                if (!_loggedArenaSpawned)
+                {
+                    Debug.Log("[COMPADJUST] Spawned visual arena clone (collision uses the scaled base game).");
+                    _loggedArenaSpawned = true;
+                }
+            }
+
+            // Anchor at the rink centre (world origin) and drive scale from config. The
+            // horizontal correction maps the bundled prefab to base-game size at
+            // ArenaScale 1.0 (so it matches the base scaled by (X, 1, Y)); local Z (world
+            // height) uses raw ArenaScaleZ, whose ~1.20 user convention == base height.
+            _arenaInstance.transform.position = arenaRoot.position + new Vector3(offsetX, offsetY, offsetZ);
+            _arenaInstance.transform.rotation = Quaternion.Euler(rotX, rotY, rotZ);
+            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ);
+        }
+
+        // (1) Resize the real base-game arena via the 'Level Default' scene root.
+        // Width = Unity X = ArenaScaleX, length = Unity Z = ArenaScaleY. Height (Unity Y)
+        // is deliberately kept at base so the ice plane and wall/ceiling collider heights
+        // stay at vanilla for gameplay safety (visual wall height rides ArenaScaleZ on the
+        // clone). Goal net cloth is disabled around the write so the transform delta is not
+        // read as an impulse that explodes the net.
+        private static void ScaleLevelDefaultRoot(Transform levelRoot, float scaleX, float scaleY, float offsetX, float offsetY, float offsetZ)
+        {
+            if (levelRoot == null) return;
+
+            if (_scaledLevelRootId != levelRoot.GetInstanceID())
+            {
+                _scaledLevelRootId = levelRoot.GetInstanceID();
+                _levelRootBaseCaptured = false;
+            }
+            _scaledLevelRoot = levelRoot;
+            if (!_levelRootBaseCaptured)
+            {
+                _levelRootBaseScale = levelRoot.localScale;
+                _levelRootBasePos   = levelRoot.localPosition;
+                _levelRootBaseCaptured = true;
+            }
+
+            var targetScale = Vector3.Scale(_levelRootBaseScale, new Vector3(scaleX, 1f, scaleY));
+            var targetPos   = _levelRootBasePos + new Vector3(offsetX, offsetY, offsetZ);
+
+            if (ApproxEqual(levelRoot.localScale, targetScale) && ApproxEqual(levelRoot.localPosition, targetPos))
+                return; // already applied; don't disturb the cloth sim
+
+            var reenable = DisableAllGoalNetCloth();
+            levelRoot.localScale    = targetScale;
+            levelRoot.localPosition = targetPos;
+            ReenableGoalNetCloth(reenable);
+
+            // Verify the real base colliders actually re-cooked to the new size (the
+            // MeshCollider-re-cook risk). Only logs when the scale changes, so it is quiet.
+            var barrierCol = levelRoot.Find("Rink/Barrier Collider") ?? levelRoot.Find("rink/Barrier Collider");
+            var probe = barrierCol != null ? barrierCol.GetComponent<Collider>() : null;
+            if (probe != null)
+                Debug.Log($"[COMPADJUST] Resized Level Default to {targetScale}; base 'Barrier Collider' world bounds now {probe.bounds.size}.");
+        }
+
+        private static void RestoreLevelDefaultScale()
+        {
+            var levelRoot = _scaledLevelRoot;
+            if (levelRoot == null || !_levelRootBaseCaptured) { _scaledLevelRoot = null; return; }
+
+            if (!ApproxEqual(levelRoot.localScale, _levelRootBaseScale) || !ApproxEqual(levelRoot.localPosition, _levelRootBasePos))
+            {
+                var reenable = DisableAllGoalNetCloth();
+                levelRoot.localScale    = _levelRootBaseScale;
+                levelRoot.localPosition = _levelRootBasePos;
+                ReenableGoalNetCloth(reenable);
+            }
+            _scaledLevelRoot = null;
+        }
+
+        private static List<Cloth> DisableAllGoalNetCloth()
+        {
+            var disabled = new List<Cloth>();
+            foreach (var goal in UnityEngine.Object.FindObjectsByType<Goal>(FindObjectsSortMode.None))
+            {
+                var cloth = goal != null ? goal.NetCloth : null;
+                if (cloth != null && cloth.enabled) { cloth.enabled = false; disabled.Add(cloth); }
+            }
+            return disabled;
+        }
+
+        private static void ReenableGoalNetCloth(List<Cloth> cloths)
+        {
+            if (cloths == null) return;
+            for (int i = 0; i < cloths.Count; i++)
+                if (cloths[i] != null) cloths[i].enabled = true;
         }
 
         // ── Unified prefab: one instance has visuals + Colliders child ───────
