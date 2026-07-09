@@ -199,22 +199,4 @@
              Condition="!Exists('$(FrameBundleSrc)')" />
   </Target>
 
-  <!-- Mirror the build into the PonceModpack bundle (one workshop item that
-       ships every client-side mod; see PonceModpack/README.md in the
-       poncepuckmods repo). The asset bundles keep their assets\ layout next
-       to the DLL because the mod resolves them via its assembly location. -->
-  <Target Name="CopyToModpack" AfterTargets="Build">
-    <PropertyGroup>
-      <ModpackModulesDir>C:\Users\Amiki\OneDrive\Desktop\Desk\Development\poncepuckmods\PonceClientHelper\dist\modules</ModpackModulesDir>
-    </PropertyGroup>
-    <MakeDir Directories="$(ModpackModulesDir)" />
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModpackModulesDir)" SkipUnchangedFiles="true" />
-    <ItemGroup>
-      <ModpackAssetBundles Include="$(MSBuildProjectDirectory)\assets\*" Condition="Exists('$(MSBuildProjectDirectory)\assets')" />
-    </ItemGroup>
-    <MakeDir Directories="$(ModpackModulesDir)\assets" Condition="'@(ModpackAssetBundles)' != '' Or Exists('$(FrameBundleSrc)')" />
-    <Copy SourceFiles="@(ModpackAssetBundles)" DestinationFolder="$(ModpackModulesDir)\assets" SkipUnchangedFiles="true" Condition="'@(ModpackAssetBundles)' != ''" />
-    <Copy SourceFiles="$(FrameBundleSrc)" DestinationFiles="$(ModpackModulesDir)\assets\compassets" SkipUnchangedFiles="true" OverwriteReadOnlyFiles="true" Condition="Exists('$(FrameBundleSrc)')" />
-  </Target>
-
 </Project>
