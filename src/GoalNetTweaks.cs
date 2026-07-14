@@ -420,10 +420,19 @@ namespace DashFallMod
 
             Dictionary<string, object> message;
             if (arenaEnabled) {
+                // Cross-mod contract: oomtm450's Ruleset mod consumes this event and
+                // multiplies its VANILLA offside/icing/goal-line positions (and the
+                // lowered barrier height) by these values. Send the REAL, resized-rink
+                // scale/offset -- NOT the internal barrier-collider factors
+                // (barrierScaleX/Y/Z) used for our own barrier clone. Those 0.8 factors
+                // would shrink the Ruleset's zone lines ~20% even at ArenaScale 1.0 (its
+                // "== 1" early-out never fires), desyncing its lines from the actual rink.
+                // Axis map (matches the Ruleset's own): ArenaScaleX -> world X width,
+                // ArenaScaleY -> world Z length, ArenaScaleZ -> world Y height.
                 message = new Dictionary<string, object> {
-                    { "ArenaScaleX", arenaScaleX * barrierScaleX },
-                    { "ArenaScaleY", arenaScaleY * barrierScaleZ },
-                    { "ArenaScaleZ", arenaScaleZ * barrierScaleY },
+                    { "ArenaScaleX", arenaScaleX },
+                    { "ArenaScaleY", arenaScaleY },
+                    { "ArenaScaleZ", arenaScaleZ },
                     { "ArenaOffsetX", arenaOffsetX },
                     { "ArenaOffsetY", arenaOffsetY },
                     { "ArenaOffsetZ", arenaOffsetZ },

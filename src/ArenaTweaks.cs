@@ -1802,7 +1802,25 @@ namespace DashFallMod
                 else if (containsRink) score += 600f;
 
                 if (t.parent == null) score += 200f;
-                score += Mathf.Min(200f, t.GetComponentsInChildren<Renderer>(true).Length * 4f);
+
+                // Count descendants that are actual rink surfaces we would hide
+                // (ice / boards / glass / barrier ...). A candidate that parents NONE of
+                // them is not a real arena root -- e.g. the bare mesh named exactly
+                // "Arena" in the Ponce custom-scenery scene, which otherwise hijacks the
+                // exact-name score (1200) away from the real ice parent, leaving the base
+                // rink visible and anchoring the visual clone to the wrong node. Skip it.
+                var descendantRenderers = t.GetComponentsInChildren<Renderer>(true);
+                int hideableRinkSurfaces = 0;
+                foreach (var candidateRenderer in descendantRenderers)
+                    if (ShouldHideOriginalArenaRenderer(candidateRenderer, t)) hideableRinkSurfaces++;
+                if (hideableRinkSurfaces == 0)
+                    continue;
+
+                score += Mathf.Min(200f, descendantRenderers.Length * 4f);
+                // Bias strongly toward the node that actually contains the rink surfaces,
+                // so a richer container (ice + boards + glass) wins over a name-only match
+                // and hiding covers the whole rink rather than just the ice.
+                score += Mathf.Min(600f, hideableRinkSurfaces * 50f);
 
                 int depth = 0;
                 var p = t.parent;
@@ -1856,12 +1874,18 @@ namespace DashFallMod
                 }
             }
 
-            foreach (var renderer in arenaRoot.GetComponentsInChildren<Renderer>(true))
+            // Scan one level up from the arena root so rink surfaces that are SIBLINGS
+            // of it (e.g. a 'Boards' or 'Arena' mesh next to the 'rink'/ice node in the
+            // Ponce custom-scenery scene) are hidden too, not just the ice directly under
+            // the arena root. ShouldHideOriginalArenaRenderer still decides what is
+            // actually disabled (it excludes crowd/seats/stands/lights/ceiling/scoreboard).
+            Transform scanRoot = arenaRoot.parent != null ? arenaRoot.parent : arenaRoot;
+            foreach (var renderer in scanRoot.GetComponentsInChildren<Renderer>(true))
             {
                 if (renderer == null) continue;
                 if (customArenaRoot != null && (renderer.transform == customArenaRoot || renderer.transform.IsChildOf(customArenaRoot)))
                     continue;
-                if (!ShouldHideOriginalArenaRenderer(renderer, arenaRoot))
+                if (!ShouldHideOriginalArenaRenderer(renderer, scanRoot))
                     continue;
 
                 if (!_hiddenArenaRenderers.Contains(renderer))
