@@ -1,4 +1,4 @@
-// ServerConfig.cs
+﻿// ServerConfig.cs
 // Unified server-side configuration for CompetitiveAdjustments.
 // Nested JSON: { "ConfigVersion": 12, "Dashfall": { ... }, "CompAdjust": { ... }, "CompTweaks": { ... } }
 // Uses JsonUtility with comment-stripping (DashFall pattern).
@@ -60,11 +60,6 @@ namespace CompetitiveAdjustments
     public class CompAdjustConfig
     {
         public bool SprintShoulderTrailEnabled = true;
-        public bool EnableCustomSkaterTorsoModel = false;
-        public float CustomTorsoScaleX = 1f;
-        public float CustomTorsoScaleY = 1f;
-        public float CustomTorsoScaleZ = 1f;
-        public bool DisableCustomTorsoVisual = false;
         public bool EnableGoalNetTweaks = false;
         public float GoalThicknessScale = 1f;
         public float GoalSizeScaleX = 1f;
@@ -91,15 +86,22 @@ namespace CompetitiveAdjustments
         // base rink); <1 pulls them toward centre ice.
         public float SpawnFitInset = 1.0f;
         public bool EnableArenaTweaks = false;
-        public float ArenaScaleX = 1f;
+        // Arena scale axes are WORLD axes, and have been since ConfigVersion 16.
+        // Before that Y and Z were swapped: ArenaScaleY drove world Z and ArenaScaleZ
+        // drove world Y, inherited from a bundled arena prefab that was rotated 90
+        // degrees so its local Z pointed up. That prefab is gone, the swap outlived its
+        // reason, and it confused every consumer that met it. Existing configs are
+        // migrated by swapping the two values on load, so a rink keeps its shape.
+        public float ArenaScaleX = 1f;   // world X, rink width
+        // World Y, rink height. Scales for REAL, not just visually: the boards, glass and
+        // ceiling colliders grow with it, and so does everything else under the level
+        // root, the goals included. Turn GoalSizeScaleY down to compensate if a tall
+        // arena leaves the nets stretched.
         public float ArenaScaleY = 1f;
-        public float ArenaScaleZ = 1f;
+        public float ArenaScaleZ = 1f;   // world Z, rink length
         public float ArenaOffsetX = 0f;
         public float ArenaOffsetY = 0.0108f;
         public float ArenaOffsetZ = 0f;
-        public float ArenaRotX = 90f;
-        public float ArenaRotY = 180f;
-        public float ArenaRotZ = 0f;
 
         // --- Free Blade ---
         public bool FreeBladeEnabled = false;
@@ -292,7 +294,7 @@ namespace CompetitiveAdjustments
         // Single source of truth for the config schema version.  Bump this
         // whenever fields are added or removed so existing files are migrated
         // (merged onto the current defaults) on the next load.
-        public const int CURRENT_VERSION = 14;
+        public const int CURRENT_VERSION = 16;
         public int ConfigVersion = CURRENT_VERSION;
         // Top-level section enables.  Each gates a whole feature category so
         // a user who only wants one category can disable the others without
@@ -363,8 +365,6 @@ namespace CompetitiveAdjustments
         private static readonly CompAdjustConfig _disabledCompAdjust = new CompAdjustConfig
         {
             SprintShoulderTrailEnabled    = false,
-            EnableCustomSkaterTorsoModel  = false,
-            DisableCustomTorsoVisual      = false,
             EnableGoalNetTweaks           = false,
             EnableArenaTweaks             = false,
             FreeBladeEnabled              = false,
@@ -658,6 +658,8 @@ namespace CompetitiveAdjustments
             if (!string.IsNullOrEmpty(compTweaksJson))
                 JsonUtility.FromJsonOverwrite(compTweaksJson, cfg.CompTweaks);
 
+            MigrateArenaScaleAxes(cfg, ParseConfigVersion(clean));
+
             // Admin credentials live in the on-disk file only.  ParseConfig is
             // the disk path, so it is the one place we DO read the Admin block.
             // The wire path (LoadFromJson) deliberately never touches it.
@@ -666,6 +668,31 @@ namespace CompetitiveAdjustments
                 JsonUtility.FromJsonOverwrite(adminJson, cfg.Admin);
 
             return cfg;
+        }
+
+        /// <summary>
+        /// ConfigVersion 16 made the arena scale axes world axes. Before it,
+        /// ArenaScaleY drove world Z (length) and ArenaScaleZ drove world Y (height);
+        /// now each drives the axis it is named after. Swapping the two stored values on
+        /// the way in keeps an existing rink exactly the shape its owner set up, which
+        /// matters because the alternative is silently turning a tall rink into a long
+        /// one on the next server restart.
+        /// </summary>
+        private static void MigrateArenaScaleAxes(ServerConfig cfg, int storedVersion)
+        {
+            if (cfg?.CompAdjust == null) return;
+            if (storedVersion < 0 || storedVersion >= 16) return;   // absent (-1) means pre-versioning; leave it
+
+            float oldLength = cfg.CompAdjust.ArenaScaleY;   // world Z under the old naming
+            float oldHeight = cfg.CompAdjust.ArenaScaleZ;   // world Y under the old naming
+            if (Mathf.Approximately(oldLength, oldHeight)) return;
+
+            cfg.CompAdjust.ArenaScaleY = oldHeight;
+            cfg.CompAdjust.ArenaScaleZ = oldLength;
+
+            Log($"Config v{storedVersion} -> v{ServerConfig.CURRENT_VERSION}: arena scale axes are now world axes, " +
+                $"so ArenaScaleY/ArenaScaleZ were swapped ({oldLength}/{oldHeight} -> {oldHeight}/{oldLength}) " +
+                "to keep the rink the same shape.");
         }
 
         // Overwrite ONLY the three sections and the three section enables from a
@@ -730,8 +757,6 @@ namespace CompetitiveAdjustments
 
             return !clean.Contains("\"GoalieSlidingReachReduction\"")
                 || !clean.Contains("\"GoalieSlidingReachScale\"")
-                || !clean.Contains("\"CustomTorsoScaleX\"")
-                || !clean.Contains("\"DisableCustomTorsoVisual\"")
                 || !clean.Contains("\"CompAdjust\"")
                 || !clean.Contains("\"EnableDashfall\"")
                 || !clean.Contains("\"EnableCompAdjust\"")

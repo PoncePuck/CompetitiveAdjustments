@@ -1,4 +1,4 @@
-// DashFall.UI.cs - Full UI Panel with keybind editing (copied from PlayerInput style)
+﻿// DashFall.UI.cs - Full UI Panel with keybind editing (copied from PlayerInput style)
 
 using System;
 using System.Collections;
@@ -977,13 +977,6 @@ namespace DashFallMod.Client
             _actionsSection.Add(header);
 
             var clientConfig = DashFallConfigLoader.ClientConfig;
-
-            _actionsSection.Add(MakeToggleRow("CUSTOM TORSO MESH", "Show custom skater torso mesh", clientConfig.ShowCustomTorsoMesh, (val) =>
-            {
-                clientConfig.ShowCustomTorsoMesh = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-                CompetitivePuckTweaks.src.PluginCore.RefreshTorsoVisualsForClient();
-            }));
 
             _actionsSection.Add(MakeToggleRow("MINIMAP TWEAKS", "Apply arena-scale minimap rescaling (disable if you prefer default minimap)", clientConfig.EnableMinimapTweaks, (val) =>
             {

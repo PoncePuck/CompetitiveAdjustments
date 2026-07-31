@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using System;
 using Unity.Netcode;
 using UnityEngine;
@@ -99,66 +99,13 @@ namespace CompetitivePuckTweaks.src
             __instance.GetComponent<SphereCollider>().radius *= PluginCore.config.HeadColliderRadiusFactor;
 
             bool isGoalie = __instance.name.Contains("Goalie");
-            bool useCustomCollider = !isGoalie
-                && DashFallMod.ConfigManager.CompAdjustEffective.EnableCustomSkaterTorsoModel
-                && PluginCore.torsoMesh != null;
 
-            // SmallerModels goalie groin offset
-            if (isGoalie && PluginCore.config.EnableSmallerModels)
-                ___playerMesh.PlayerGroin.transform.localPosition += new Vector3(0, 0.1f, 0);
-
-            if (!isGoalie) {
-                var mf = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshFilter>();
-                var mc = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>();
-
-                // Save originals so RefreshPlayerTorsoStates can restore them.
-                if (mf != null) {
-                    int mfId = mf.GetInstanceID();
-                    if (!PluginCore.OriginalTorsoMeshes.ContainsKey(mfId))
-                        PluginCore.OriginalTorsoMeshes[mfId] = mf.sharedMesh;
-                }
-
-                // ── COLLIDER — server config (EnableCustomSkaterTorsoModel) only ────────
-                if (mc != null) {
-                    int mcId = mc.GetInstanceID();
-                    if (!PluginCore.OriginalTorsoColliderMeshes.ContainsKey(mcId))
-                        PluginCore.OriginalTorsoColliderMeshes[mcId] = mc.sharedMesh;
-                    if (!PluginCore.OriginalTorsoColliderLayers.ContainsKey(mcId))
-                        PluginCore.OriginalTorsoColliderLayers[mcId] = mc.gameObject.layer;
-
-                    if (useCustomCollider) {
-                        var colliderMesh = PluginCore.GetOrBuildScaledColliderMesh();
-                        if (colliderMesh != null) {
-                            mc.convex = true;
-                            mc.isTrigger = false;
-                            mc.sharedMesh = colliderMesh;
-                            // CRITICAL: Keep the original layer (not player body layer 8).
-                            // The physics matrix excludes player body layer from puck collisions.
-                            // The original layer allows puck collision to work correctly.
-                            // (Layer remains unchanged from game default)
-                            mc.enabled = false;
-                            mc.enabled = true;
-                            PluginCore.Dbg($"[TorsoApply] Custom collider. convex={mc.convex} layer={mc.gameObject.layer} bounds={mc.bounds}");
-                            TorsoDebugBrush.Sync(mc);
-                        }
-                        else
-                            PluginCore.Dbg($"[TorsoApply] Custom collider skipped (readable={PluginCore.torsoMesh.isReadable}).");
-                    }
-                    // If !useCustomCollider: original collider stays — nothing to do at spawn time.
-                }
-                else
-                    PluginCore.Dbg($"[TorsoApply] No MeshCollider on PlayerTorso. children={string.Join(", ", System.Linq.Enumerable.Select(___playerMesh.PlayerTorso.GetComponentsInChildren<Collider>(true), c => c.GetType().Name + ":" + c.name))}");
-
-                // ── VISUAL — handled by CompetitiveCompanion.PlayerBodyPatch (client config) ──
-                // The game's MeshRendererHider (Event_OnPlayerCameraEnabled) hides the local player's
-                // own body automatically — we must never touch mr.enabled here.
-
-                if (PluginCore.config.EnableSmallerModels) {
-                    ___playerMesh.PlayerTorso.transform.localPosition += new Vector3(0, 0.27f, 0);
-                    ___playerMesh.PlayerGroin.GetComponentInChildren<MeshFilter>().mesh = PluginCore.groinMesh;
-                    ___playerMesh.PlayerGroin.GetComponentInChildren<MeshCollider>().sharedMesh = PluginCore.groinMesh;
-                }
-            }
+            // The custom skater torso used to be swapped in here, mesh and collider both,
+            // from the CompAssets bundle. That bundle is gone, so there is nothing to swap
+            // and the vanilla torso stands as shipped. EnableSmallerModels went the same
+            // way: it swapped shrunken torso/groin meshes, and the position offsets it
+            // paired with would only shift a vanilla mesh out of place on its own. Both
+            // config flags are kept so existing config files still load.
 
             ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>().material.bounciness = PluginCore.config.PlayerColliderBounciness;
             ___playerMesh.PlayerGroin.GetComponentInChildren<MeshCollider>().material.bounciness = PluginCore.config.PlayerColliderBounciness;
@@ -189,16 +136,10 @@ namespace CompetitivePuckTweaks.src
                     var s = groinMc.transform.localScale;
                     groinMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
                 }
-                // When a custom torso model is active its MeshFilter and MeshCollider share the same
-                // child transform, which was already set to 100x scale to correct the Blender export unit
-                // mismatch.  Applying ThinSkaterBodies here would overwrite that scale, making the mesh
-                // invisible.  Skip torso thinning in that case — the custom shape defines its own width.
-                if (!useCustomCollider) {
-                    var torsoMc = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>();
-                    if (torsoMc != null) {
-                        var s = torsoMc.transform.localScale;
-                        torsoMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
-                    }
+                var torsoMc = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>();
+                if (torsoMc != null) {
+                    var s = torsoMc.transform.localScale;
+                    torsoMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
                 }
             }
         }

@@ -1,4 +1,4 @@
-using CompetitivePuckTweaks.src;
+﻿using CompetitivePuckTweaks.src;
 using DashFallMod.Net;
 using System;
 using System.Collections;
@@ -35,8 +35,6 @@ namespace DashFallMod
         // colliders so rebuilt custom boards can fall back to stock bounce when
         // soft boards are disabled. Resolved-flag distinguishes "not looked yet"
         // from "looked, none found".
-        private static PhysicsMaterial _vanillaBoardPhysicMaterial;
-        private static bool _vanillaBoardPhysicMaterialResolved;
 
         // ── Hybrid arena resize ───────────────────────────────────────────────
         // The base-game arena/hangar visual surfaces are STATICALLY BATCHED (baked
@@ -57,54 +55,29 @@ namespace DashFallMod
         private static int       _scaledLevelRootId;
         private static Vector3   _levelRootBaseScale = Vector3.one;
         private static Vector3   _levelRootBasePos   = Vector3.zero;
-        private static bool      _levelRootBaseCaptured;
 
         private static void SyncArenaVisuals(
             bool enabled,
-            float scaleX,
-            float scaleY,
-            float scaleZ,
+            float width,    // world X
+            float height,   // world Y
+            float length,   // world Z
             float offsetX,
             float offsetY,
-            float offsetZ,
-            float rotX,
-            float rotY,
-            float rotZ,
-            float barrierScaleX,
-            float barrierScaleY,
-            float barrierScaleZ)
+            float offsetZ)
         {
-            RefreshFrameBundleIfChanged();
-            TryLoadFrameBundle();
-
             var arenaRoot = FindArenaRoot();                                    // 'Rink'
             Transform levelRoot = arenaRoot != null ? arenaRoot.root : null;    // 'Level Default'
 
-            // Prefer the unified ArenaAndColliders prefab; fall back to legacy arena.
-            GameObject effectivePrefab = _arenaAndCollidersPrefab ?? _arenaPrefab;
-
-            if (!enabled || effectivePrefab == null)
+            // Only EnableArenaTweaks tears the resize down. The visual mode must never do
+            // it: a dedicated server resolves to Off because it renders nothing, and
+            // treating that as "disabled" left the server on vanilla-sized collision while
+            // every client played a resized rink.
+            if (!enabled)
             {
-                if (enabled && effectivePrefab == null && !_loggedArenaPrefabMissing)
-                {
-                    CompetitiveAdjustments.ConfigManager.LogWarning("Arena visual tweaks enabled but no arena prefab found in bundle.");
-                    _loggedArenaPrefabMissing = true;
-                }
-
-                if (_arenaInstance != null)
-                {
-                    UnityEngine.Object.Destroy(_arenaInstance);
-                    _arenaInstance = null;
-                }
-                if (_collidersInstance != null)
-                {
-                    UnityEngine.Object.Destroy(_collidersInstance);
-                    _collidersInstance = null;
-                }
-
+                _proxyWanted = false;
+                ArenaProxyVisual.Clear();
+                RestoreAllStrandedScenery();
                 RestoreLevelDefaultScale();
-                _arenaAppearanceSynced = false;
-                RestoreOriginalArenaRenderers();
                 RemoveNetworkBoundsPatches();
                 RestoreAudioEnvironment();
                 return;
@@ -121,116 +94,499 @@ namespace DashFallMod
             }
             _loggedArenaRootMissing = false;
 
-            int arenaRootId = arenaRoot.GetInstanceID();
-            if (_arenaRootInstanceId != arenaRootId)
-            {
-                _arenaRootInstanceId = arenaRootId;
-                _arenaAppearanceSynced = false;
-                _loggedArenaRendererMatches = false;
-            }
-
             ApplyNetworkBoundsPatches();
             HandleAudioEnvironment();
 
-            // (1) Resize the REAL base game (colliders + goals + spawn markers).
-            ScaleLevelDefaultRoot(levelRoot, scaleX, scaleY, offsetX, offsetY, offsetZ);
+            // (1) Resize the REAL base game (colliders + goals + spawn markers). Not a
+            // rendering step, so it runs on a dedicated server too. Skipping it there put
+            // the goals at vanilla positions on the server while their nets drew scaled on
+            // every client, which is the goal collider mismatch.
+            ScaleLevelDefaultRoot(levelRoot, width, height, length, offsetX, offsetY, offsetZ);
 
-            // (2) The scalable VISUAL clone, matching the resized base.
-            SyncVisualClone(arenaRoot, effectivePrefab, scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, rotX, rotY, rotZ);
-
-            if (!_arenaAppearanceSynced)
-            {
-                if (_arenaInstance != null)
-                {
-                    SyncArenaVisualAppearance(arenaRoot, _arenaInstance.transform);
-                    _arenaAppearanceSynced = true;
-                }
-            }
-            else
-            {
-                LiveSyncArenaSourceTextures();
-            }
-
-            if (_arenaInstance != null)
-                HideOriginalArenaRenderers(arenaRoot, _arenaInstance.transform);
+            // (2) Everything the resize implies. Transform work inside runs everywhere;
+            // the render-only parts gate themselves on the visual mode.
+            SyncProxyVisual(ResolveArenaVisualMode(), arenaRoot, width, height, length, offsetX, offsetY, offsetZ);
         }
 
-        // (2) Instantiate/reuse the bundled arena prefab as a pure VISUAL clone at the
-        // SCENE ROOT (not under the scaled Level Default, which would double-scale and
-        // shear the rotated prefab). The prefab's 'Colliders' child is stripped --
-        // collision now comes from the real, scaled base-game colliders.
-        private static void SyncVisualClone(
-            Transform arenaRoot,
-            GameObject prefab,
-            float scaleX, float scaleY, float scaleZ,
-            float offsetX, float offsetY, float offsetZ,
-            float rotX, float rotY, float rotZ)
+
+        /// <summary>
+        /// Tears the whole visual layer back down to vanilla so the next pass can build it
+        /// from scratch.
+        ///
+        /// Every piece of this feature keeps state that survives a config change: which
+        /// renderers a proxy group owns and has disabled, which the prefab path hid, the
+        /// captured baselines for hand-moved scenery and lights, the revived fixtures.
+        /// Diffing new config into that state is how a stale group ends up drawing the same
+        /// geometry alongside a fresh one, which reads in-game as a doubled goal frame that
+        /// only a restart clears. Rebuilding from vanilla makes a config save behave
+        /// exactly like a fresh session, at the cost of one frame of churn.
+        /// </summary>
+        private static void InvalidateVisualState()
         {
-            if (prefab == null || arenaRoot == null) return;
+            ArenaProxyVisual.Clear();
+            _lastReportedBatched = -1;
+        }
 
-            bool needsNewInstance = _arenaInstance == null
-                || !string.Equals(_arenaInstance.name, UnifiedInstanceName, StringComparison.Ordinal);
+        // Client-local choice of where the rink visual comes from. Off means "use the
+        // bundled prefab". A dedicated server renders nothing, so it always takes the
+        // untouched legacy path.
+        private static ArenaProxyVisual.Mode ResolveArenaVisualMode()
+        {
+            if (ArenaProxyVisual.IsHeadless()) return ArenaProxyVisual.Mode.Off;
 
-            if (needsNewInstance)
+            try
             {
-                if (_arenaInstance != null)
-                    UnityEngine.Object.Destroy(_arenaInstance);
-                if (_collidersInstance != null)
-                {
-                    UnityEngine.Object.Destroy(_collidersInstance);
-                    _collidersInstance = null;
-                }
+                return ArenaProxyVisual.ParseMode(
+                    DashFallMod.Client.DashFallConfigLoader.ClientConfig?.ArenaVisualMode);
+            }
+            catch { }
 
-                _arenaInstance = UnityEngine.Object.Instantiate(prefab);
-                _arenaInstance.name = UnifiedInstanceName;
-                _arenaInstance.transform.SetParent(null, false); // scene root
-                _arenaAppearanceSynced = false;
+            return ArenaProxyVisual.Mode.DrawMesh;
+        }
 
-                // Strip the prefab's collider child; real base colliders handle physics.
-                var collidersChild = _arenaInstance.transform.Find(CollidersChildName);
-                if (collidersChild != null)
-                    UnityEngine.Object.Destroy(collidersChild.gameObject);
+        // (2a) No-asset visual: rescale the base game's own geometry so it matches the
+        // resized collision. See src/ArenaProxyVisual.cs for why statically batched
+        // geometry needs a trick at all.
+        //
+        // The scale is EXACTLY the one fed to 'Level Default' on all three axes, so the
+        // visual cannot drift from collision, and no ArenaBaseScaleCorrection is involved:
+        // this IS the base geometry, so 1.0 means base size.
+        //
+        // Returns false when nothing could be proxied, leaving the prefab path to run.
+        private static bool SyncProxyVisual(
+            ArenaProxyVisual.Mode mode,
+            Transform arenaRoot,
+            float width, float height, float length,
+            float offsetX, float offsetY, float offsetZ)
+        {
+            _proxyWanted = false;
 
-                if (!_loggedArenaSpawned)
-                {
-                    Debug.Log("[COMPADJUST] Spawned visual arena clone (collision uses the scaled base game).");
-                    _loggedArenaSpawned = true;
-                }
+            var worldScale  = new Vector3(width, height, length);
+            var worldOffset = new Vector3(offsetX, offsetY, offsetZ);
+
+            // At vanilla size there is nothing to move, and proxying anyway would trade
+            // the rink's baked lightmaps for a pixel-identical shape. The tolerance
+            // absorbs the ~1 cm ArenaOffsetY default, which is not worth the bake.
+            if (IsVisuallyUnresized(worldScale, worldOffset))
+            {
+                RestoreAllStrandedScenery();
+                ArenaProxyVisual.ClearGroup(ArenaProxyVisual.ArenaGroupKey);
+                return true;
             }
 
-            // Anchor at the rink centre (world origin) and drive scale from config. The
-            // horizontal correction maps the bundled prefab to base-game size at
-            // ArenaScale 1.0 (so it matches the base scaled by (X, 1, Y)); local Z (world
-            // height) uses raw ArenaScaleZ, whose ~1.20 user convention == base height.
-            _arenaInstance.transform.position = arenaRoot.position + new Vector3(offsetX, offsetY, offsetZ);
-            _arenaInstance.transform.rotation = Quaternion.Euler(rotX, rotY, rotZ);
-            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ);
+            _proxyWanted = true;
+            _proxyMode = mode;
+            _proxyArenaRoot = arenaRoot;
+            _proxyWorldScale = worldScale;
+            _proxyWorldOffset = worldOffset;
+
+            return TryApplyArenaProxy();
+        }
+
+        // Proxy state kept so the 1 Hz runner can retry and re-scan without a full
+        // RefreshAll. Without the retry, one early attempt that finds no batched renderers
+        // latches the bundled prefab in for the rest of the session, because RefreshAll
+        // only does real work when the config hash changes.
+        private static bool _proxyWanted;
+        private static ArenaProxyVisual.Mode _proxyMode;
+        private static Transform _proxyArenaRoot;
+        private static Vector3 _proxyWorldScale = Vector3.one;
+        private static Vector3 _proxyWorldOffset;
+        private static float _nextProxyRescan;
+
+        /// <summary>
+        /// Re-scan for batched geometry every couple of seconds while the proxy is wanted.
+        /// Two jobs: retry after an attempt that ran before the scene was ready, and pick
+        /// up geometry that only appears later, such as a crowd enabled at warmup. The
+        /// scan is the only cost; an unchanged result short-circuits on the group
+        /// signature without touching a single renderer.
+        /// </summary>
+        internal static void TickArenaProxyRescan()
+        {
+            if (!_proxyWanted || _proxyArenaRoot == null) return;
+
+            // Ahead of the rescan gate and on its own faster cadence, because a scenery swap
+            // destroys the loaded building and instantiates a new one. Waiting for the next
+            // rescan would leave that new building at vanilla size around a resized rink for
+            // up to two seconds, and the cost of checking is one static field read.
+            SyncSceneryLoaderArena(_proxyWorldScale, _proxyWorldOffset);
+
+            if (Time.unscaledTime < _nextProxyRescan) return;
+            _nextProxyRescan = Time.unscaledTime + 2f;
+
+            TryApplyArenaProxy();
+        }
+
+        private static bool TryApplyArenaProxy()
+        {
+            if (!_proxyWanted || _proxyArenaRoot == null) return false;
+
+            var delta = Matrix4x4.TRS(_proxyWorldOffset, Quaternion.identity, _proxyWorldScale);
+
+            // Before the scan, not after. This parents loaded scenery under a scaler, and
+            // the scan skips everything under that scaler. Run it second and a scenery
+            // prefab that carries baked static batching spends the gap between two rescans
+            // scaled twice, once by the scaler and once by the proxy.
+            SyncSceneryLoaderArena(_proxyWorldScale, _proxyWorldOffset);
+
+            var targets = CollectArenaProxyTargets(delta, out var stranded);
+
+            // ── Rendering: clients only ──────────────────────────────────────────
+            // A dedicated server draws nothing, so the proxy draws, the crowd and the
+            // lights have no work to do there.
+            if (_proxyMode == ArenaProxyVisual.Mode.Off) return true;
+
+            // Built before the scenery and light passes so they can read this build's
+            // lightmap coverage. The light pass in particular decides whether to stand in
+            // for a lost bake, and answering that from the PREVIOUS build's numbers means
+            // it is always one config change behind.
+            bool proxied = ArenaProxyVisual.SyncGroup(
+                ArenaProxyVisual.ArenaGroupKey, _proxyMode, targets, "arena");
+
+            // Scenery the proxy cannot reach because it is not batched and not parented to
+            // the scaled level root. A crowd of SkinnedMeshRenderers is the case in point:
+            // the seats around them are batched and move, the people are not and do not,
+            // so they end up sitting in mid-air over the ice.
+            SyncStrandedScenery(delta, stranded);
+
+            // Lights are not renderers, so nothing above reaches them: the fixtures move
+            // with the ceiling and the light stays where it was baked.
+            SyncArenaLights(delta, _proxyArenaRoot.root);
+
+            return proxied;
+        }
+
+        // EVERYTHING static batching has frozen, not just the rink surfaces. Scaling the
+        // ice while the hangar shell, stands, crowd and ceiling stay at vanilla size
+        // leaves the boards punching through the building, so the whole baked world moves
+        // together. That is also why this does not reuse ShouldHideOriginalArenaRenderer:
+        // that predicate exists to pick what the bundled prefab REPLACES, and it
+        // deliberately excludes the surroundings the prefab has no geometry for.
+        //
+        // Two exclusions. Goals get their own proxy group per goal, because their delta
+        // also has to carry GoalSizeScale. Non-batched renderers are ordinary children of
+        // the scaled 'Level Default' root and have already resized themselves, so touching
+        // them would apply the scale twice.
+        //
+        // Lights are not renderers and do not move, so at large scales the baked pools of
+        // light will no longer line up with the fixtures above them.
+        private static List<ArenaProxyVisual.Target> CollectArenaProxyTargets(
+            Matrix4x4 delta, out List<Transform> stranded)
+        {
+            var targets = new List<ArenaProxyVisual.Target>(256);
+            stranded = new List<Transform>();
+            var strandedUnitIds = new HashSet<int>();
+
+            // Scans Renderer, not MeshRenderer: a crowd built from SkinnedMeshRenderers
+            // can never be statically batched, and looking only at MeshRenderer would omit
+            // it from the diagnostics as well as the work, which reads as "the scan found
+            // nothing wrong" when it simply never looked.
+            var all = UnityEngine.Object.FindObjectsByType<Renderer>(
+                FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+
+            Transform levelRoot = _proxyArenaRoot != null ? _proxyArenaRoot.root : null;
+            string strandedSample = null;
+            string orphanSample = null;
+            int orphans = 0;
+            int underRoot = 0;
+
+            // Built from the GOAL side, by identity, using the exact same traversal
+            // SyncBaseGoalFrame uses to find its targets. Walking up from a renderer
+            // looking for a Goal component is the same idea only when the hierarchy is
+            // what you assume it is, and getting that wrong here means the arena group
+            // steals the frame and draws it at the building's scale while the goal group
+            // draws it at the goal's: two frames, same width, different heights.
+            var goalRendererIds = CollectGoalRendererIds();
+
+            for (int i = 0; i < all.Length; i++)
+            {
+                var mr = all[i];
+                if (mr == null) continue;
+
+                // A renderer the proxy already owns is disabled BY the proxy, so it must
+                // stay in the list. Dropping it would empty the target list on every
+                // rebuild and hand the visual straight back to the bundled prefab.
+                if (!mr.enabled && !ArenaProxyVisual.IsOwnedBy(mr, ArenaProxyVisual.ArenaGroupKey)) continue;
+                if (goalRendererIds.Contains(mr.GetInstanceID())) continue;
+                if (IsUnderGoal(mr.transform)) continue;
+
+                // Scenery-loader content already rides a scaler transform carrying this
+                // exact delta. It has to be skipped on BOTH branches below: batched, or the
+                // proxy draws the building a second time at the same size; unbatched, or the
+                // stranded pass moves whatever inside it matches a crowd container name.
+                if (IsSceneryLoaderOwned(mr.transform)) continue;
+
+                var meshRenderer = mr as MeshRenderer;
+                if (meshRenderer == null || !meshRenderer.isPartOfStaticBatch)
+                {
+                    // Not batched, so it follows its own transform. That is only a resize
+                    // if it hangs off the scaled 'Level Default' root; anything parked in
+                    // another scene root stays at vanilla size and position, which is what
+                    // a crowd left sitting inside a widened rink looks like.
+                    if (levelRoot == null) continue;
+
+                    if (!mr.transform.IsChildOf(levelRoot))
+                    {
+                        if (TryResolveSceneryContainer(mr.transform, out Transform container))
+                        {
+                            if (strandedUnitIds.Add(container.GetInstanceID()))
+                            {
+                                stranded.Add(container);
+                                if (strandedSample == null) strandedSample = DescribeTransformPath(container);
+                            }
+                            continue;
+                        }
+
+                        // Outside the scaled root and not scenery we know how to follow, so
+                        // NOTHING moves it. Counted rather than skipped in silence: on a
+                        // level whose arena is instantiated at runtime almost none of it is
+                        // batched, and a scan that only reports what it took over reads as
+                        // healthy while most of the rink stays at vanilla size.
+                        //
+                        // Networked objects are excluded from the count. Pucks and player
+                        // bodies are outside the level root and are SUPPOSED to be left
+                        // alone, so counting them buries the arena geometry that is not.
+                        if (mr.transform.GetComponentInParent<Unity.Netcode.NetworkObject>(true) != null) continue;
+
+                        orphans++;
+                        if (orphanSample == null)
+                            orphanSample = mr.GetType().Name + " " + DescribeTransformPath(mr.transform);
+                        continue;
+                    }
+
+                    // Under the scaled root, so the parent transform already carries the
+                    // full resize on all three axes. Nothing to do.
+                    if (IsMovableUnderLevelRoot(mr, levelRoot)) underRoot++;
+                    continue;
+                }
+
+                targets.Add(new ArenaProxyVisual.Target { Renderer = meshRenderer, WorldDelta = delta });
+            }
+
+            ReportStrandedRenderersOnce(all.Length, targets.Count, underRoot,
+                stranded.Count, strandedSample, orphans, orphanSample);
+            return targets;
+        }
+
+        /// <summary>
+        /// The same rule as <see cref="IsMovableScenery"/>, but the walk stops AT the level
+        /// root instead of running to the scene root.
+        ///
+        /// This distinction is the whole ball game: `Level` is a NetworkBehaviour, so the
+        /// level root itself carries a NetworkObject. A search that runs past it therefore
+        /// reports "networked" for every single renderer in the arena, which silently
+        /// emptied the height fix-up list and left the barrier glass squat. Networked
+        /// children that matter, goals above all, still sit strictly below the level root
+        /// and are still excluded.
+        /// </summary>
+        private static bool IsMovableUnderLevelRoot(Renderer renderer, Transform levelRoot)
+        {
+            if (renderer == null || levelRoot == null) return false;
+
+            for (Transform current = renderer.transform; current != null && current != levelRoot; current = current.parent)
+            {
+                if (current.GetComponent<Unity.Netcode.NetworkObject>() != null) return false;
+                if (current.name.StartsWith("CompAdjust", StringComparison.Ordinal)) return false;
+                if (string.Equals(current.name, UnifiedInstanceName, StringComparison.Ordinal)) return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Containers whose contents count as movable scenery. The crowd lives under
+        /// "Spectator Manager" in this game.
+        /// </summary>
+        private static readonly string[] SceneryContainerHints =
+        {
+            "spectator", "crowd", "audience", "bleacher",
+        };
+
+        /// <summary>
+        /// Finds the scenery container a renderer belongs to, if any.
+        ///
+        /// This is opt-IN on purpose. The rule used to be "anything outside the level root
+        /// that is not networked", which swept up 972 renderers including individual BONES
+        /// of players and crowd members. Writing a transform per bone is wrong twice over:
+        /// the animation overwrites it every frame, and the baseline gets captured from
+        /// whatever pose happened to be current.
+        ///
+        /// The CONTAINER is what gets returned rather than the object itself, because the
+        /// crowd is pooled: members are created and destroyed continuously, so a list of
+        /// members captured at rebuild time is stale within seconds. Following the
+        /// container means new members are picked up the frame they appear.
+        /// </summary>
+        private static bool TryResolveSceneryContainer(Transform t, out Transform container)
+        {
+            container = null;
+            if (t == null) return false;
+
+            Transform child = t;
+            for (Transform current = t; current != null; current = current.parent)
+            {
+                if (current.name.StartsWith("CompAdjust", StringComparison.Ordinal)) return false;
+                if (string.Equals(current.name, UnifiedInstanceName, StringComparison.Ordinal)) return false;
+
+                if (MatchesSceneryContainer(current.name))
+                {
+                    // Never move anything the server owns the position of.
+                    if (child.GetComponentInParent<Unity.Netcode.NetworkObject>(true) != null) return false;
+                    if (current == t) return false;
+
+                    container = current;
+                    return true;
+                }
+
+                child = current;
+            }
+
+            return false;
+        }
+
+        private static bool MatchesSceneryContainer(string name)
+        {
+            for (int i = 0; i < SceneryContainerHints.Length; i++)
+                if (name.IndexOf(SceneryContainerHints[i], StringComparison.OrdinalIgnoreCase) >= 0) return true;
+
+            return false;
+        }
+
+        private static int _lastReportedBatched = -1;
+
+        // Re-reported whenever the counts move, not just once: the first scan can easily
+        // run before a crowd or any other late geometry exists, and a one-shot line would
+        // then under-report the scene forever.
+        private static void ReportStrandedRenderersOnce(
+            int scanned, int batched, int underRoot, int stranded, string sample, int orphans, string orphanSample)
+        {
+            int signature = batched * 397 ^ underRoot * 31 ^ stranded * 7 ^ orphans;
+            if (signature == _lastReportedBatched) return;
+            _lastReportedBatched = signature;
+
+            string message = $"Arena proxy scan: {scanned} renderer(s) -> {batched} batched and proxy-drawn, " +
+                             $"{underRoot} unbatched under the scaled root, {stranded} scenery container(s) followed";
+            if (orphans > 0)
+                message += $", and {orphans} NOT batched and outside the scaled root, which NOTHING moves (e.g. '{orphanSample}')";
+            else if (stranded > 0)
+                message += $" (e.g. '{sample}')";
+
+            CompetitiveAdjustments.ConfigManager.Log(message + ".");
+        }
+
+        private static string DescribeTransformPath(Transform t)
+        {
+            var parts = new List<string>();
+            for (Transform current = t; current != null && parts.Count < 6; current = current.parent)
+                parts.Add(current.name);
+
+            parts.Reverse();
+            return string.Join("/", parts);
+        }
+
+        /// <summary>
+        /// Every renderer any Goal owns, by instance id. Goals are proxied per goal with a
+        /// delta that also carries GoalSizeScale, so the arena group must never touch one.
+        /// </summary>
+        private static HashSet<int> CollectGoalRendererIds()
+        {
+            var ids = new HashSet<int>();
+
+            foreach (var goal in UnityEngine.Object.FindObjectsByType<Goal>(FindObjectsSortMode.None))
+            {
+                if (goal == null) continue;
+
+                foreach (var r in goal.transform.GetComponentsInChildren<Renderer>(true))
+                    if (r != null) ids.Add(r.GetInstanceID());
+            }
+
+            return ids;
+        }
+
+        private static bool IsUnderGoal(Transform t)
+        {
+            for (Transform current = t; current != null; current = current.parent)
+                if (current.GetComponent<Goal>() != null) return true;
+
+            return false;
+        }
+
+        private static bool IsVisuallyUnresized(Vector3 worldScale, Vector3 worldOffset)
+        {
+            const float scaleTolerance  = 0.002f;
+            const float offsetTolerance = 0.05f;
+
+            return Mathf.Abs(worldScale.x - 1f) < scaleTolerance
+                && Mathf.Abs(worldScale.y - 1f) < scaleTolerance
+                && Mathf.Abs(worldScale.z - 1f) < scaleTolerance
+                && Mathf.Abs(worldOffset.x) < offsetTolerance
+                && Mathf.Abs(worldOffset.y) < offsetTolerance
+                && Mathf.Abs(worldOffset.z) < offsetTolerance;
         }
 
         // (1) Resize the real base-game arena via the 'Level Default' scene root.
         // Width = Unity X = ArenaScaleX, length = Unity Z = ArenaScaleY. Height (Unity Y)
-        // is deliberately kept at base so the ice plane and wall/ceiling collider heights
-        // stay at vanilla for gameplay safety (visual wall height rides ArenaScaleZ on the
-        // clone). Goal net cloth is disabled around the write so the transform delta is not
-        // read as an impulse that explodes the net.
-        private static void ScaleLevelDefaultRoot(Transform levelRoot, float scaleX, float scaleY, float offsetX, float offsetY, float offsetZ)
+        // rides ArenaScaleZ, so the boards, glass and ceiling get taller for REAL: their
+        // colliders grow with them and a puck that clears the vanilla barrier no longer
+        // leaves a rink whose walls are drawn three times that high. Goal net cloth is
+        // disabled around the write so the transform delta is not read as an impulse that
+        // explodes the net.
+        //
+        // Everything under the root scales with it, which is the point but is worth
+        // knowing: the goals stretch vertically too, so a tall ArenaScaleZ wants
+        // GoalSizeScaleY turned down to keep the net a net.
+        private static void ScaleLevelDefaultRoot(Transform levelRoot, float width, float height, float length, float offsetX, float offsetY, float offsetZ)
         {
             if (levelRoot == null) return;
 
             if (_scaledLevelRootId != levelRoot.GetInstanceID())
             {
+                // Hand the previous root back before adopting a new one, so a root that
+                // FindArenaRoot stops choosing is not left carrying our scale.
+                RestoreLevelDefaultScale();
                 _scaledLevelRootId = levelRoot.GetInstanceID();
-                _levelRootBaseCaptured = false;
             }
             _scaledLevelRoot = levelRoot;
-            if (!_levelRootBaseCaptured)
+
+            // The baseline comes off the OBJECT, never off a live measurement here. See
+            // ArenaBaselineMarker: the incoming level root can be a clone of the outgoing
+            // one taken while our scale was still applied, and it is indistinguishable
+            // from vanilla by inspection.
+            var marker = ArenaBaselineMarker.Resolve(levelRoot, out bool captured);
+            if (marker == null) return;
+
+            if (captured)
             {
-                _levelRootBaseScale = levelRoot.localScale;
-                _levelRootBasePos   = levelRoot.localPosition;
-                _levelRootBaseCaptured = true;
+                // A first sight that is ALREADY carrying exactly the scale this config
+                // produces is not a vanilla rink. A second scene load ('activeSceneChanged
+                // -> level_default') hands us a brand new level root, with no marker to
+                // inherit, already resized. Measured at face value it becomes the new
+                // vanilla and the config multiplies on top: 1.25 x 1.25 = 1.5625.
+                //
+                // Vanilla is unit scale in this game, verified as the first capture on both
+                // server and client. The correction is deliberately narrow: it only fires
+                // when the scale matches OUR OWN output, so a level genuinely authored at
+                // some other scale is still measured as it is.
+                var ourOutput = new Vector3(width, height, length);
+                if (!ApproxEqual(marker.BaseScale, Vector3.one) && ApproxEqual(marker.BaseScale, ourOutput))
+                {
+                    Debug.LogWarning($"[COMPADJUST] '{DescribeTransformPath(levelRoot)}' (id={_scaledLevelRootId}) " +
+                                     $"was already at {marker.BaseScale}, which is exactly this config's output, " +
+                                     "so it is a pre-resized root rather than a vanilla one. Treating its baseline " +
+                                     "as unit scale instead of compounding the resize.");
+                    marker.OverrideBaseline(Vector3.one, marker.BasePosition);
+                    DumpLevelRootCandidates(levelRoot);
+                }
+                else
+                {
+                    Debug.Log($"[COMPADJUST] Captured '{DescribeTransformPath(levelRoot)}' (id={_scaledLevelRootId}) " +
+                              $"vanilla baseline: scale {marker.BaseScale}, pos {marker.BasePosition}.");
+                }
             }
 
-            var targetScale = Vector3.Scale(_levelRootBaseScale, new Vector3(scaleX, 1f, scaleY));
+            _levelRootBaseScale = marker.BaseScale;
+            _levelRootBasePos   = marker.BasePosition;
+
+            var targetScale = Vector3.Scale(_levelRootBaseScale, new Vector3(width, height, length));
             var targetPos   = _levelRootBasePos + new Vector3(offsetX, offsetY, offsetZ);
 
             if (ApproxEqual(levelRoot.localScale, targetScale) && ApproxEqual(levelRoot.localPosition, targetPos))
@@ -241,27 +597,155 @@ namespace DashFallMod
             levelRoot.localPosition = targetPos;
             ReenableGoalNetCloth(reenable);
 
-            // Verify the real base colliders actually re-cooked to the new size (the
-            // MeshCollider-re-cook risk). Only logs when the scale changes, so it is quiet.
-            var barrierCol = levelRoot.Find("Rink/Barrier Collider") ?? levelRoot.Find("rink/Barrier Collider");
-            var probe = barrierCol != null ? barrierCol.GetComponent<Collider>() : null;
-            if (probe != null)
-                Debug.Log($"[COMPADJUST] Resized Level Default to {targetScale}; base 'Barrier Collider' world bounds now {probe.bounds.size}.");
+            // Logged unconditionally. It used to be gated on finding 'Rink/Barrier
+            // Collider' as a re-cook probe, which silently produced NO log at all on a
+            // scene that does not have that node, exactly when knowing whether the resize
+            // ran would have been most useful. The baseline is in here too, because a
+            // baseline captured from an already-scaled root is how a rejoin ends up
+            // misaligned.
+            Debug.Log($"[COMPADJUST] Resized '{DescribeTransformPath(levelRoot)}' (id={levelRoot.GetInstanceID()}) " +
+                      $"from base scale {_levelRootBaseScale} to {targetScale}, base pos {_levelRootBasePos} -> {targetPos}. " +
+                      DescribeBarrierColliderProbe(levelRoot));
+        }
+
+        /// <summary>
+        /// State of the game's real 'Barrier Collider', which the Ruleset mod moves via
+        /// GameObject.Find to open the rink for delay-of-game.
+        ///
+        /// Deliberately a NAME search rather than the old hardcoded 'Rink/Barrier Collider'
+        /// path. That path does not hold on scenery-mod scenes, so the probe printed "not in
+        /// this scene" for an object BoardColliderPatch was finding by name in the very same
+        /// session. A false negative is worse than no probe at all here, because this is the
+        /// line you read when the Ruleset's barrier lowering appears to do nothing.
+        ///
+        /// Reports what actually decides that question: how many candidates exist (their
+        /// GameObject.Find picks an arbitrary one), whether the object is ACTIVE (their
+        /// GameObject.Find cannot see inactive objects at all), and whether it hangs off the
+        /// root we scale (which is what gives it the right width and length for free).
+        ///
+        /// Near-misses are counted separately and named. Their lookup is an EXACT-name match,
+        /// so an object Unity has renamed 'Barrier Collider (Clone)' by instantiating it is
+        /// invisible to them while being obviously present to anyone reading the hierarchy.
+        /// Reporting "none found" without mentioning the clone sitting right there is how
+        /// that costs an afternoon.
+        /// </summary>
+        private static string DescribeBarrierColliderProbe(Transform levelRoot)
+        {
+            const string barrierName = "Barrier Collider";
+
+            var all = UnityEngine.Object.FindObjectsByType<Collider>(
+                FindObjectsInactive.Include, FindObjectsSortMode.None);
+
+            Collider chosen = null;
+            int matches = 0, active = 0, underRoot = 0;
+            var nearMisses = new List<string>();
+
+            for (int i = 0; i < all.Length; i++)
+            {
+                var col = all[i];
+                if (col == null) continue;
+
+                if (col.name != barrierName)
+                {
+                    // Same object, renamed. Worth naming exactly, because the difference
+                    // between this and an exact match IS the bug.
+                    if (col.name.StartsWith(barrierName, StringComparison.Ordinal)
+                        && nearMisses.Count < 4)
+                        nearMisses.Add($"'{col.name}' at '{DescribeTransformPath(col.transform)}'");
+                    continue;
+                }
+
+                matches++;
+                bool isActive = col.gameObject.activeInHierarchy;
+                if (isActive) active++;
+                if (levelRoot != null && col.transform.IsChildOf(levelRoot)) underRoot++;
+
+                // Prefer the one their Find could actually return.
+                if (chosen == null || (isActive && !chosen.gameObject.activeInHierarchy)) chosen = col;
+            }
+
+            string near = nearMisses.Count > 0
+                ? $" Also present under a DIFFERENT name, which an exact-name GameObject.Find " +
+                  $"cannot return: {string.Join(", ", nearMisses)}."
+                : string.Empty;
+
+            if (matches == 0)
+                return $"No collider named exactly '{barrierName}' anywhere in this scene, so the " +
+                       "Ruleset's GameObject.Find for it returns null and its barrier lowering " +
+                       "cannot run." + near;
+
+            return $"'{barrierName}': {matches} in scene ({active} active, {underRoot} under the scaled root), " +
+                   $"first at '{DescribeTransformPath(chosen.transform)}', world bounds now {chosen.bounds.size}." +
+                   (active == 0
+                       ? " NONE are active, so the Ruleset's GameObject.Find will return null."
+                       : matches > 1
+                           ? " More than one match, so the Ruleset's GameObject.Find picks an arbitrary one."
+                           : string.Empty) + near;
+        }
+
+        /// <summary>
+        /// Lists every scene root that could pass for a level root, with the state that
+        /// decides whether its baseline is trustworthy. Printed when a pre-resized root is
+        /// detected, to identify who handed it over already scaled.
+        /// </summary>
+        private static void DumpLevelRootCandidates(Transform chosen)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder("[COMPADJUST] Level root candidates: ");
+                foreach (var t in UnityEngine.Object.FindObjectsByType<Transform>(FindObjectsSortMode.None))
+                {
+                    if (t == null || t.parent != null) continue;   // scene roots only
+
+                    string name = t.name ?? string.Empty;
+                    if (name.IndexOf("level", StringComparison.OrdinalIgnoreCase) < 0
+                        && name.IndexOf("rink", StringComparison.OrdinalIgnoreCase) < 0
+                        && name.IndexOf("arena", StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+                    sb.Append($"['{name}' id={t.GetInstanceID()} scale={t.localScale} " +
+                              $"marked={(t.GetComponent<ArenaBaselineMarker>() != null)} " +
+                              $"scene={t.gameObject.scene.name} children={t.childCount}" +
+                              $"{(t == chosen ? " <-- CHOSEN" : string.Empty)}] ");
+                }
+
+                Debug.Log(sb.ToString());
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Forgets the level root and its captured baseline WITHOUT writing to the old
+        /// transform, for use when the scene it belonged to has gone away.
+        /// </summary>
+        private static void ResetLevelRootBaseline()
+        {
+            _scaledLevelRoot = null;
+            _scaledLevelRootId = 0;
+            _levelRootBaseScale = Vector3.one;
+            _levelRootBasePos = Vector3.zero;
+            _proxyWanted = false;
+            _proxyArenaRoot = null;
+            _loggedArenaRootMissing = false;
         }
 
         private static void RestoreLevelDefaultScale()
         {
             var levelRoot = _scaledLevelRoot;
-            if (levelRoot == null || !_levelRootBaseCaptured) { _scaledLevelRoot = null; return; }
+            _scaledLevelRoot = null;
+            if (levelRoot == null) return;
 
-            if (!ApproxEqual(levelRoot.localScale, _levelRootBaseScale) || !ApproxEqual(levelRoot.localPosition, _levelRootBasePos))
+            // Straight off the object, so this is correct even when our statics have been
+            // dropped or were never populated for this particular root.
+            var marker = levelRoot.GetComponent<ArenaBaselineMarker>();
+            if (marker == null) return;
+
+            if (!ApproxEqual(levelRoot.localScale, marker.BaseScale) || !ApproxEqual(levelRoot.localPosition, marker.BasePosition))
             {
                 var reenable = DisableAllGoalNetCloth();
-                levelRoot.localScale    = _levelRootBaseScale;
-                levelRoot.localPosition = _levelRootBasePos;
+                levelRoot.localScale    = marker.BaseScale;
+                levelRoot.localPosition = marker.BasePosition;
                 ReenableGoalNetCloth(reenable);
             }
-            _scaledLevelRoot = null;
         }
 
         private static List<Cloth> DisableAllGoalNetCloth()
@@ -280,586 +764,6 @@ namespace DashFallMod
             if (cloths == null) return;
             for (int i = 0; i < cloths.Count; i++)
                 if (cloths[i] != null) cloths[i].enabled = true;
-        }
-
-        // ── Unified prefab: one instance has visuals + Colliders child ───────
-        private static void SyncUnifiedInstance(
-            Transform arenaRoot,
-            float scaleX, float scaleY, float scaleZ,
-            float offsetX, float offsetY, float offsetZ,
-            float rotX, float rotY, float rotZ,
-            float barrierRotX, float barrierRotY, float barrierRotZ,
-            float barrierScaleX, float barrierScaleY, float barrierScaleZ)
-        {
-            bool needsNewInstance = _arenaInstance == null
-                || !string.Equals(_arenaInstance.name, UnifiedInstanceName, StringComparison.Ordinal)
-                || _arenaInstance.transform.parent != arenaRoot;
-
-            if (needsNewInstance)
-            {
-                if (_arenaInstance != null)
-                    UnityEngine.Object.Destroy(_arenaInstance);
-                if (_collidersInstance != null)
-                {
-                    UnityEngine.Object.Destroy(_collidersInstance);
-                    _collidersInstance = null;
-                    _colliderLayersSynced = false;
-                }
-
-                _arenaInstance = UnityEngine.Object.Instantiate(_arenaAndCollidersPrefab);
-                _arenaInstance.name = UnifiedInstanceName;
-                _arenaInstance.transform.SetParent(arenaRoot, false);// Parent to arena root so it inherits arena transform changes (e.g. from other mods) automatically.
-                _arenaAppearanceSynced = false;
-                _colliderLayersSynced = false;
-                _usingArenaVisualColliderFallback = false;
-
-                // Find the Colliders child and bookmark it
-                var collidersChild = _arenaInstance.transform.Find(CollidersChildName);
-                if (collidersChild != null)
-                {
-                    _collidersInstance = collidersChild.gameObject;
-                    int generated = EnsureCustomColliderComponents(collidersChild);
-                    int barrierOverrides = SyncBarrierColliderOverridesFromOriginal(
-                        arenaRoot,
-                        collidersChild,
-                        scaleX,
-                        scaleY,
-                        scaleZ,
-                        rotX,
-                        rotY,
-                        rotZ,
-                        barrierRotX,
-                        barrierRotY,
-                        barrierRotZ,
-                        barrierScaleX,
-                        barrierScaleY,
-                        barrierScaleZ);
-                    int colliderCount = collidersChild.GetComponentsInChildren<Collider>(true).Length;
-                    if (colliderCount > 0)
-                    {
-                        DisableOriginalArenaColliders(arenaRoot);
-                        Debug.Log($"[COMPADJUST] Unified prefab spawned: {colliderCount} colliders ({generated} auto-generated, {barrierOverrides} barrier overrides) + visuals.");
-                    }
-                    else
-                    {
-                        CompetitiveAdjustments.ConfigManager.LogWarning("Unified prefab 'Colliders' child has no Collider components.");
-                    }
-                }
-                else
-                {
-                    Debug.LogWarning($"[COMPADJUST] Unified prefab has no '{CollidersChildName}' child; colliders will not be replaced.");
-                }
-
-                if (!_loggedArenaSpawned)
-                {
-                    Debug.Log($"[COMPADJUST] Spawned unified arena+colliders under '{arenaRoot.name}'.");
-                    _loggedArenaSpawned = true;
-                }
-            }
-            else
-            {
-                // Existing instance – just ensure colliders child ref is valid
-                if (_collidersInstance == null)
-                {
-                    var collidersChild = _arenaInstance.transform.Find(CollidersChildName);
-                    if (collidersChild != null)
-                    {
-                        _collidersInstance = collidersChild.gameObject;
-                        EnsureCustomColliderComponents(collidersChild);
-                        SyncBarrierColliderOverridesFromOriginal(
-                            arenaRoot,
-                            collidersChild,
-                            scaleX,
-                            scaleY,
-                            scaleZ,
-                            rotX,
-                            rotY,
-                            rotZ,
-                            barrierRotX,
-                            barrierRotY,
-                            barrierRotZ,
-                            barrierScaleX,
-                            barrierScaleY,
-                            barrierScaleZ);
-                    }
-                }
-                else
-                {
-                    EnsureCustomColliderComponents(_collidersInstance.transform);
-                    SyncBarrierColliderOverridesFromOriginal(
-                        arenaRoot,
-                        _collidersInstance.transform,
-                        scaleX,
-                        scaleY,
-                        scaleZ,
-                        rotX,
-                        rotY,
-                        rotZ,
-                        barrierRotX,
-                        barrierRotY,
-                        barrierRotZ,
-                        barrierScaleX,
-                        barrierScaleY,
-                        barrierScaleZ);
-                }
-            }
-
-            _arenaInstance.transform.localPosition = new Vector3(offsetX, offsetY, offsetZ);
-            _arenaInstance.transform.localRotation = Quaternion.Euler(rotX, rotY, rotZ);
-            // b1117 base rink is ~1.5x the bundled prefab, so scale the whole instance
-            // (visual + wall colliders + corner barrier override, all children) up to
-            // base size at ArenaScale 1.0. Spawns/minimap use the vanilla rink as their
-            // reference, so they line up once the arena matches base.
-            // Correction on the two horizontal axes only; localScale.z (config ArenaScaleZ
-            // -> world Y height) is EXCLUDED so the boards keep base height. This makes the
-            // instance non-uniform, which would shear the rounded barrier -- so the barrier
-            // is built as a standalone object under the (unscaled, unrotated) rink root
-            // instead of as a child here (see SyncBarrierColliderOverridesFromOriginal).
-            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ);
-
-            // Sync layers and debug brushes on the Colliders sub-tree
-            if (_collidersInstance != null)
-            {
-                SyncCustomColliderLayersAndStates(arenaRoot, _collidersInstance.transform);
-                SyncArenaColliderDebugBrushes(_collidersInstance.transform);
-            }
-        }
-
-        // ── Legacy split path (old arena.prefab + colliders.prefab) ──────────
-        private static void SyncLegacyArenaInstance(
-            Transform arenaRoot,
-            float scaleX, float scaleY, float scaleZ,
-            float offsetX, float offsetY, float offsetZ,
-            float rotX, float rotY, float rotZ,
-            float barrierRotX, float barrierRotY, float barrierRotZ,
-            float barrierScaleX, float barrierScaleY, float barrierScaleZ)
-        {
-            if (_arenaInstance == null)
-            {
-                _arenaInstance = UnityEngine.Object.Instantiate(_arenaPrefab);
-                _arenaInstance.name = "CustomArenaVisual";
-                _arenaInstance.transform.SetParent(arenaRoot, false);
-                _arenaAppearanceSynced = false;
-                if (!_loggedArenaSpawned)
-                {
-                    Debug.Log($"[COMPADJUST] Spawned custom arena visual under '{arenaRoot.name}'.");
-                    _loggedArenaSpawned = true;
-                }
-            }
-            else if (_arenaInstance.transform.parent != arenaRoot)
-            {
-                UnityEngine.Object.Destroy(_arenaInstance);
-                _arenaInstance = UnityEngine.Object.Instantiate(_arenaPrefab);
-                _arenaInstance.name = "CustomArenaVisual";
-                _arenaInstance.transform.SetParent(arenaRoot, false);
-                _loggedArenaRendererMatches = false;
-                _arenaAppearanceSynced = false;
-            }
-
-            _arenaInstance.transform.localPosition = new Vector3(offsetX, offsetY, offsetZ);
-            _arenaInstance.transform.localRotation = Quaternion.Euler(rotX, rotY, rotZ);
-            // b1117 base rink is ~1.5x the bundled prefab, so scale the whole instance
-            // (visual + wall colliders + corner barrier override, all children) up to
-            // base size at ArenaScale 1.0. Spawns/minimap use the vanilla rink as their
-            // reference, so they line up once the arena matches base.
-            // Correction on the two horizontal axes only; localScale.z (config ArenaScaleZ
-            // -> world Y height) is EXCLUDED so the boards keep base height. This makes the
-            // instance non-uniform, which would shear the rounded barrier -- so the barrier
-            // is built as a standalone object under the (unscaled, unrotated) rink root
-            // instead of as a child here (see SyncBarrierColliderOverridesFromOriginal).
-            _arenaInstance.transform.localScale = new Vector3(scaleX * ArenaBaseScaleCorrection, scaleY * ArenaBaseScaleCorrection, scaleZ);
-
-            // Colliders from separate prefab or scene clone
-            if (_collidersPrefab != null)
-            {
-                _usingArenaVisualColliderFallback = false;
-                SyncLegacyColliders(arenaRoot, scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, rotX, rotY, rotZ, barrierRotX, barrierRotY, barrierRotZ, barrierScaleX, barrierScaleY, barrierScaleZ);
-            }
-            else
-            {
-                SyncArenaCollidersFromSceneClone(arenaRoot, _arenaInstance.transform, scaleX, scaleY, scaleZ, offsetX, offsetY, offsetZ, rotX, rotY, rotZ);
-            }
-        }
-
-        private static void SyncLegacyColliders(
-            Transform arenaRoot,
-            float scaleX, float scaleY, float scaleZ,
-            float offsetX, float offsetY, float offsetZ,
-            float rotX, float rotY, float rotZ,
-            float barrierRotX, float barrierRotY, float barrierRotZ,
-            float barrierScaleX, float barrierScaleY, float barrierScaleZ)
-        {
-            if (_collidersPrefab == null) return;
-
-            bool needsPrefabInstance = _collidersInstance == null
-                || !string.Equals(_collidersInstance.name, "CustomArenaColliders", StringComparison.Ordinal)
-                || _collidersInstance.transform.parent != arenaRoot;
-
-            if (needsPrefabInstance)
-            {
-                if (_collidersInstance != null)
-                    UnityEngine.Object.Destroy(_collidersInstance);
-
-                _collidersInstance = UnityEngine.Object.Instantiate(_collidersPrefab);
-                _collidersInstance.name = "CustomArenaColliders";
-                _collidersInstance.transform.SetParent(arenaRoot, false);
-                _colliderLayersSynced = false;
-
-                int generated = EnsureCustomColliderComponents(_collidersInstance.transform);
-                int barrierOverrides = SyncBarrierColliderOverridesFromOriginal(
-                    arenaRoot,
-                    _collidersInstance.transform,
-                    scaleX,
-                    scaleY,
-                    scaleZ,
-                    rotX,
-                    rotY,
-                    rotZ,
-                    barrierRotX,
-                    barrierRotY,
-                    barrierRotZ,
-                    barrierScaleX,
-                    barrierScaleY,
-                    barrierScaleZ);
-                int customCount = _collidersInstance.GetComponentsInChildren<Collider>(true).Length;
-                if (customCount > 0)
-                {
-                    DisableOriginalArenaColliders(arenaRoot);
-                    Debug.Log($"[COMPADJUST] Spawned custom arena colliders ({customCount} total, {generated} auto-generated, {barrierOverrides} barrier overrides).");
-                }
-                else
-                {
-                    CompetitiveAdjustments.ConfigManager.LogWarning("Custom colliders prefab has no Collider components.");
-                }
-            }
-            else
-            {
-                EnsureCustomColliderComponents(_collidersInstance.transform);
-                SyncBarrierColliderOverridesFromOriginal(
-                    arenaRoot,
-                    _collidersInstance.transform,
-                    scaleX,
-                    scaleY,
-                    scaleZ,
-                    rotX,
-                    rotY,
-                    rotZ,
-                    barrierRotX,
-                    barrierRotY,
-                    barrierRotZ,
-                    barrierScaleX,
-                    barrierScaleY,
-                    barrierScaleZ);
-            }
-
-            _collidersInstance.transform.localPosition = new Vector3(offsetX, offsetY, offsetZ);
-            _collidersInstance.transform.localRotation = Quaternion.Euler(rotX, rotY, rotZ);
-            _collidersInstance.transform.localScale = new Vector3(scaleX, scaleY, scaleZ);
-
-            SyncCustomColliderLayersAndStates(arenaRoot, _collidersInstance.transform);
-            SyncArenaColliderDebugBrushes(_collidersInstance.transform);
-        }
-
-        private static void SyncArenaCollidersFromSceneClone(
-            Transform arenaRoot,
-            Transform customArenaRoot,
-            float scaleX, float scaleY, float scaleZ,
-            float offsetX, float offsetY, float offsetZ,
-            float rotX, float rotY, float rotZ)
-        {
-            if (arenaRoot == null) return;
-
-            bool needsNewInstance = _collidersInstance == null
-                || _collidersInstance.transform.parent != arenaRoot
-                || !string.Equals(_collidersInstance.name, "CustomArenaCollidersFromScene", StringComparison.Ordinal);
-
-            if (needsNewInstance)
-            {
-                if (_collidersInstance != null)
-                    UnityEngine.Object.Destroy(_collidersInstance);
-
-                _collidersInstance = new GameObject("CustomArenaCollidersFromScene");
-                _collidersInstance.transform.SetParent(arenaRoot, false);
-            }
-
-            _collidersInstance.transform.localPosition = new Vector3(offsetX, offsetY, offsetZ);
-            _collidersInstance.transform.localRotation = Quaternion.Euler(rotX, rotY, rotZ);
-            _collidersInstance.transform.localScale = new Vector3(scaleX, scaleY, scaleZ);
-
-            bool rebuild = needsNewInstance || _collidersInstance.GetComponentsInChildren<Collider>(true).Length == 0;
-            if (rebuild)
-            {
-                for (int i = _collidersInstance.transform.childCount - 1; i >= 0; i--)
-                {
-                    var child = _collidersInstance.transform.GetChild(i);
-                    if (child != null)
-                        UnityEngine.Object.Destroy(child.gameObject);
-                }
-
-                int created = 0;
-                foreach (var source in arenaRoot.GetComponentsInChildren<Collider>(true))
-                {
-                    if (source == null) continue;
-                    if (!source.enabled) continue;
-                    if (_collidersInstance != null && (source.transform == _collidersInstance.transform || source.transform.IsChildOf(_collidersInstance.transform)))
-                        continue;
-                    if (customArenaRoot != null && (source.transform == customArenaRoot || source.transform.IsChildOf(customArenaRoot)))
-                        continue;
-                    if (!ShouldHideOriginalArenaCollider(source, arenaRoot))
-                        continue;
-
-                    if (TryCloneCollider(source, arenaRoot, _collidersInstance.transform))
-                        created++;
-                }
-
-                if (created > 0)
-                {
-                    _usingArenaVisualColliderFallback = true;
-                    DisableOriginalArenaColliders(arenaRoot);
-                    SyncCustomColliderLayersAndStates(arenaRoot, _collidersInstance.transform);
-                    SyncArenaColliderDebugBrushes(_collidersInstance.transform);
-
-                    Debug.Log($"[COMPADJUST] Using scene-collider clone fallback ({created} colliders) with arena visual transform.");
-                    _loggedArenaColliderFallback = true;
-                }
-                else
-                {
-                    RestoreOriginalArenaColliders();
-                    _usingArenaVisualColliderFallback = false;
-                    if (!_loggedArenaColliderFallback)
-                    {
-                        CompetitiveAdjustments.ConfigManager.LogWarning("Scene-collider clone fallback found no source colliders to clone.");
-                        _loggedArenaColliderFallback = true;
-                    }
-                }
-            }
-            else if (_usingArenaVisualColliderFallback)
-            {
-                SyncCustomColliderLayersAndStates(arenaRoot, _collidersInstance.transform);
-                SyncArenaColliderDebugBrushes(_collidersInstance.transform);
-            }
-        }
-
-        private static bool TryCloneCollider(Collider source, Transform arenaRoot, Transform cloneRoot)
-        {
-            if (source == null || arenaRoot == null || cloneRoot == null) return false;
-
-            // Fix for any translation done in y to the colliders.
-            source.transform.position = new Vector3(source.transform.position.x, 0, source.transform.position.z);
-
-            var cloneTransform = GetOrCreateCloneTransform(source.transform, arenaRoot, cloneRoot);
-            if (cloneTransform == null) return false;
-
-            var cloneGo = cloneTransform.gameObject;
-            cloneGo.layer = source.gameObject.layer;
-
-            Collider clone = null;
-
-            if (source is BoxCollider sourceBox)
-            {
-                var box = cloneGo.AddComponent<BoxCollider>();
-                box.center = sourceBox.center;
-                box.size = sourceBox.size;
-                clone = box;
-            }
-            else if (source is SphereCollider sourceSphere)
-            {
-                var sphere = cloneGo.AddComponent<SphereCollider>();
-                sphere.center = sourceSphere.center;
-                sphere.radius = sourceSphere.radius;
-                clone = sphere;
-            }
-            else if (source is CapsuleCollider sourceCapsule)
-            {
-                var capsule = cloneGo.AddComponent<CapsuleCollider>();
-                capsule.center = sourceCapsule.center;
-                capsule.radius = sourceCapsule.radius;
-                capsule.height = sourceCapsule.height;
-                capsule.direction = sourceCapsule.direction;
-                clone = capsule;
-            }
-            else if (source is MeshCollider sourceMesh)
-            {
-                var mesh = cloneGo.AddComponent<MeshCollider>();
-                mesh.sharedMesh = sourceMesh.sharedMesh;
-                mesh.convex = sourceMesh.convex;
-                mesh.cookingOptions = sourceMesh.cookingOptions;
-                clone = mesh;
-            }
-
-            if (clone == null)
-            {
-                UnityEngine.Object.Destroy(cloneGo);
-                return false;
-            }
-
-            CopyColliderCommonSettings(source, clone);
-
-            return true;
-        }
-
-        private static int SyncBarrierColliderOverridesFromOriginal(
-            Transform arenaRoot,
-            Transform customCollidersRoot,
-            float scaleX,
-            float scaleY,
-            float scaleZ,
-            float arenaRotX,
-            float arenaRotY,
-            float arenaRotZ,
-            float barrierRotX,
-            float barrierRotY,
-            float barrierRotZ,
-            float barrierScaleX,
-            float barrierScaleY,
-            float barrierScaleZ)
-        {
-            if (arenaRoot == null || customCollidersRoot == null) return 0;
-
-            const string barrierOverrideRootName = "__originalBarrierOverrides";
-            // Parent the barrier override to the RINK ROOT, not the arena instance. The
-            // instance is non-uniformly scaled (height excluded) and rotated; a rounded
-            // perimeter mesh under it would shear. The rink root is unscaled and world
-            // aligned, so here the barrier is cloned 1:1 from the (base-size) vanilla
-            // barrier and then scaled cleanly by the raw config scale in world axes:
-            // world X = ArenaScaleX (width), world Y = ArenaScaleZ (height), world Z =
-            // ArenaScaleY (length). No ArenaBaseScaleCorrection here -- the vanilla barrier
-            // is already base-size, so raw config makes it track the corrected arena.
-            var overrideRoot = arenaRoot.Find(barrierOverrideRootName);
-            if (overrideRoot == null)
-            {
-                var go = new GameObject(barrierOverrideRootName);
-                go.transform.SetParent(arenaRoot, false);
-                overrideRoot = go.transform;
-            }
-            _barrierStandalone = overrideRoot;
-
-            overrideRoot.localPosition = Vector3.zero;
-            overrideRoot.localRotation = Quaternion.Euler(barrierRotX, barrierRotY, barrierRotZ);
-            overrideRoot.localScale = new Vector3(
-                scaleX > 0f ? scaleX : 1f,
-                scaleZ > 0f ? scaleZ : 1f,
-                scaleY > 0f ? scaleY : 1f);
-
-            if (overrideRoot.GetComponentsInChildren<Collider>(true).Length > 0)
-                return 0;
-
-            int cloned = 0;
-            foreach (var source in arenaRoot.GetComponentsInChildren<Collider>(true))
-            {
-                if (source == null) continue;
-                if (source.transform == overrideRoot || source.transform.IsChildOf(overrideRoot))
-                    continue;
-                if (_arenaInstance != null && (source.transform == _arenaInstance.transform || source.transform.IsChildOf(_arenaInstance.transform)))
-                    continue;
-                if (_collidersInstance != null && (source.transform == _collidersInstance.transform || source.transform.IsChildOf(_collidersInstance.transform)))
-                    continue;
-
-                string path = GetRelativeTransformPath(arenaRoot, source.transform);
-                string part = DetermineColliderPartKey((source.name ?? string.Empty) + "/" + path);
-                if (!string.Equals(part, "barrier", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                if (!TryCloneCollider(source, arenaRoot, overrideRoot))
-                    continue;
-
-                cloned++;
-
-                if (source.enabled)
-                {
-                    source.enabled = false;
-                    if (!_disabledOriginalColliders.Contains(source))
-                        _disabledOriginalColliders.Add(source);
-                }
-            }
-
-            // The standalone barrier is not visited by SyncCustomColliderLayersAndStates
-            // (that only walks the arena instance's Colliders child), so set its tag here.
-            // Clones already inherit the source's Boards layer via TryCloneCollider.
-            foreach (var bc in overrideRoot.GetComponentsInChildren<Collider>(true))
-                if (bc != null) { try { bc.gameObject.tag = "Soft Collider"; } catch { } }
-
-            if (cloned > 0)
-                Debug.Log($"[COMPADJUST] Cloned {cloned} original barrier collider(s) into the standalone rink-root barrier for clean non-uniform scaling.");
-
-            return cloned;
-        }
-
-        private static void CopyColliderCommonSettings(Collider source, Collider clone)
-        {
-            if (source == null || clone == null) return;
-
-            clone.enabled = source.enabled;
-            clone.isTrigger = source.isTrigger;
-            clone.sharedMaterial = source.sharedMaterial;
-            clone.contactOffset = source.contactOffset;
-
-            TryCopyColliderProperty(source, clone, "includeLayers");
-            TryCopyColliderProperty(source, clone, "excludeLayers");
-            TryCopyColliderProperty(source, clone, "layerOverridePriority");
-            TryCopyColliderProperty(source, clone, "providesContacts");
-            TryCopyColliderProperty(source, clone, "hasModifiableContacts");
-        }
-
-        private static void TryCopyColliderProperty(Collider source, Collider clone, string propertyName)
-        {
-            try
-            {
-                var property = typeof(Collider).GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance);
-                if (property == null || !property.CanRead || !property.CanWrite)
-                    return;
-
-                var value = property.GetValue(source, null);
-                property.SetValue(clone, value, null);
-            }
-            catch { }
-        }
-
-        private static Transform GetOrCreateCloneTransform(Transform source, Transform arenaRoot, Transform cloneRoot)
-        {
-            if (source == null || arenaRoot == null || cloneRoot == null) return null;
-
-            var chain = new System.Collections.Generic.List<Transform>();
-            var current = source;
-            while (current != null && current != arenaRoot)
-            {
-                chain.Add(current);
-                current = current.parent;
-            }
-
-            if (current != arenaRoot)
-                return null;
-
-            chain.Reverse();
-
-            var parent = cloneRoot;
-            for (int i = 0; i < chain.Count; i++)
-            {
-                var sourceTransform = chain[i];
-                string cloneName = BuildCloneNodeName(sourceTransform);
-                Transform child = parent.Find(cloneName);
-                if (child == null)
-                {
-                    var cloneGo = new GameObject(cloneName);
-                    child = cloneGo.transform;
-                    child.SetParent(parent, false);
-                }
-
-                child.localPosition = sourceTransform.localPosition;
-                child.localRotation = sourceTransform.localRotation;
-                child.localScale = sourceTransform.localScale;
-                child.gameObject.layer = sourceTransform.gameObject.layer;
-
-                parent = child;
-            }
-
-            return parent;
-        }
-
-        private static string BuildCloneNodeName(Transform sourceTransform)
-        {
-            if (sourceTransform == null) return "CloneNode";
-            return $"{sourceTransform.name}__sib{sourceTransform.GetSiblingIndex()}";
         }
 
         // Every tick: copy texture and color properties from the hidden source renderers to
@@ -899,670 +803,19 @@ namespace DashFallMod
             }
         }
 
-        // The game stores _Smoothness=0 in every shared material because gloss is baked
-        // into lightmaps.  These are the values we substitute for dynamic (probe-lit) use.
-        private static float GetDynamicSmoothnessByPart(string part)
-        {
-            switch (part)
-            {
-                case "ice":
-                case "ice_bottom": return 0.88f;
-                case "glass":      return 1.00f;
-                case "barrier":    return 0.45f;
-                default:           return 0.30f;
-            }
-        }
-
-        private static void SyncArenaVisualAppearance(Transform arenaRoot, Transform customArenaRoot)
-        {
-            if (arenaRoot == null || customArenaRoot == null) return;
-
-            // Clear stale pairs — we're about to repopulate for this arena instance.
-            _arenaRendererPairs.Clear();
-
-            int loggedCount = 0;
-
-            foreach (var dst in customArenaRoot.GetComponentsInChildren<Renderer>(true))
-            {
-                if (dst == null) continue;
-
-                // Renderers inside the Colliders sub-tree are invisible collision geometry.
-                // They must not cast or receive shadows — an unsuppressed top/ceiling
-                // collider mesh will project a shadow over the entire arena floor.
-                // Exception: __clipBrush debug visualizers are managed by SyncArenaColliderDebugBrushes.
-                if (_collidersInstance != null && dst.transform.IsChildOf(_collidersInstance.transform))
-                {
-                    if (string.Equals(dst.gameObject.name, "__clipBrush", StringComparison.Ordinal))
-                        continue; // leave debug brushes alone
-                    dst.shadowCastingMode = ShadowCastingMode.Off;
-                    dst.receiveShadows    = false;
-                    dst.enabled           = false;
-                    continue;
-                }
-                // Skip debug clip-brush renderers outside colliders sub-tree too
-                if (string.Equals(dst.gameObject.name, "__clipBrush", StringComparison.Ordinal))
-                    continue;
-
-                string dstPath = GetRelativeTransformPath(customArenaRoot, dst.transform);
-                string dstPart = DetermineArenaPartKey(dst.name + "/" + dstPath);
-
-                // The custom bundle has both Ice Top and Ice Bottom as near-coplanar surfaces.
-                // Keep only the textured base layer to avoid z-fighting artifacts.
-                if (dstPart == "ice_top")
-                {
-                    dst.enabled = false;
-                    continue;
-                }
-
-                var src = FindBestArenaSourceRenderer(arenaRoot, customArenaRoot, dst);
-
-                if (src != null)
-                {
-                    var srcMats = CreateMirroredMaterials(src);
-                    if (srcMats != null && srcMats.Length > 0)
-                    {
-                        // The game bakes ALL smoothness into lightmaps — every shared material
-                        // has _Smoothness=0. Override with per-part values for dynamic rendering.
-                        float overrideSmooth = GetDynamicSmoothnessByPart(dstPart);
-                        foreach (var mat in srcMats)
-                        {
-                            if (mat == null) continue;
-                            if (mat.HasProperty("_Smoothness"))  mat.SetFloat("_Smoothness",  overrideSmooth);
-                            if (mat.HasProperty("_Glossiness")) mat.SetFloat("_Glossiness", overrideSmooth);
-                        }
-                        dst.materials = srcMats;
-                    }
-
-                    // Do NOT copy the game's MaterialPropertyBlock. The base game arena is
-                    // baked and its block may contain smoothness/gloss overrides that were
-                    // tuned for static lightmaps — copying them suppresses gloss entirely
-                    // on our dynamic custom renderers.
-
-                    // Record the dst→src pair for live per-tick texture/color propagation.
-                    _arenaRendererPairs.Add((dst, src));
-
-                    // Copy rendering layer mask so the game's URP lights (directional,
-                    // point, spot) actually illuminate our custom renderers.
-                    dst.renderingLayerMask = src.renderingLayerMask;
-
-                    if (!_loggedArenaRendererMatches && loggedCount < 6)
-                    {
-                        string srcPath = GetRelativeTransformPath(arenaRoot, src.transform);
-                        var firstSrcMat = src.sharedMaterials != null && src.sharedMaterials.Length > 0 ? src.sharedMaterials[0] : null;
-                        string srcMatName = firstSrcMat != null ? firstSrcMat.name : "<none>";
-                        float smoothness = firstSrcMat != null && firstSrcMat.HasProperty("_Smoothness")  ? firstSrcMat.GetFloat("_Smoothness")  :
-                                          (firstSrcMat != null && firstSrcMat.HasProperty("_Glossiness") ? firstSrcMat.GetFloat("_Glossiness") : -1f);
-                        float metallic   = firstSrcMat != null && firstSrcMat.HasProperty("_Metallic")   ? firstSrcMat.GetFloat("_Metallic")   : -1f;
-                        Debug.Log($"[COMPADJUST] Arena renderer match: '{dstPath}' <= '{srcPath}' mat='{srcMatName}' smoothness={smoothness:F3} metallic={metallic:F3}.");
-                        loggedCount++;
-                    }
-                }
-                else
-                {
-                    // No source match: clean the bundle material's shadow/reflection
-                    // keywords AND apply the per-part dynamic smoothness so the
-                    // surface isn't silently rendered flat/dark. Resized-rink glass
-                    // and windows rely on this to pick up environment reflections
-                    // when the vanilla arena has no equivalently-named renderer to
-                    // mirror from (otherwise they keep the bundle's flat default).
-                    float overrideSmooth = GetDynamicSmoothnessByPart(dstPart);
-                    foreach (var mat in dst.materials)
-                    {
-                        if (mat == null) continue;
-                        mat.DisableKeyword("_RECEIVE_SHADOWS_OFF");
-                        mat.DisableKeyword("_SPECULARHIGHLIGHTS_OFF");
-                        mat.DisableKeyword("_ENVIRONMENTREFLECTIONS_OFF");
-                        mat.DisableKeyword("_GLOSSYREFLECTIONS_OFF");
-                        if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", overrideSmooth);
-                        if (mat.HasProperty("_Glossiness")) mat.SetFloat("_Glossiness", overrideSmooth);
-                    }
-                }
-
-                // Always force probe sampling and shadow participation on every custom arena
-                // renderer, regardless of whether a source match was found. The base game's
-                // baked arena uses lightProbeUsage/reflectionProbeUsage = Off (lightmaps).
-                // Keeping those settings kills ambient light and reflections on our dynamic
-                // meshes. BlendProbes ensures we sample the scene's runtime probes.
-                dst.lightProbeUsage      = LightProbeUsage.BlendProbes;
-                dst.reflectionProbeUsage = ReflectionProbeUsage.BlendProbes;
-                dst.shadowCastingMode    = ShadowCastingMode.On;
-                dst.receiveShadows       = true;
-                dst.enabled              = true;
-            }
-
-            if (loggedCount > 0)
-                _loggedArenaRendererMatches = true;
-        }
-
-        private static bool ShouldScaleArenaBoundaryCollider(Collider collider, Transform arenaRoot)
-        {
-            if (collider == null || arenaRoot == null) return false;
-
-            string path = GetRelativeTransformPath(arenaRoot, collider.transform);
-            string text = (collider.name ?? string.Empty) + "/" + path;
-
-            bool hasCollider = text.IndexOf("collider", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasLeft = text.IndexOf("left", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasRight = text.IndexOf("right", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasFront = text.IndexOf("front", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasBack = text.IndexOf("back", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasBorder = text.IndexOf("border", StringComparison.OrdinalIgnoreCase) >= 0
-                || text.IndexOf("boarder", StringComparison.OrdinalIgnoreCase) >= 0
-                || text.IndexOf("boards", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasBarrier = text.IndexOf("barrier", StringComparison.OrdinalIgnoreCase) >= 0;
-
-            if (hasBorder)
-                return true;
-
-            if (hasCollider && hasBarrier)
-                return true;
-
-            if (!hasCollider) return false;
-            return hasLeft || hasRight || hasFront || hasBack;
-        }
-
-        private static void SyncArenaBoundaryColliders(Transform arenaRoot, Transform customArenaRoot, float scaleX, float scaleY, float scaleZ)
-        {
-            if (arenaRoot == null) return;
-
-            for (int i = _scaledArenaBoundaryColliders.Count - 1; i >= 0; i--)
-            {
-                if (_scaledArenaBoundaryColliders[i] == null)
-                    _scaledArenaBoundaryColliders.RemoveAt(i);
-            }
-
-            foreach (var collider in arenaRoot.GetComponentsInChildren<Collider>(true))
-            {
-                if (collider == null) continue;
-                if (customArenaRoot != null && (collider.transform == customArenaRoot || collider.transform.IsChildOf(customArenaRoot)))
-                    continue;
-                if (!ShouldScaleArenaBoundaryCollider(collider, arenaRoot))
-                    continue;
-
-                int id = collider.GetInstanceID();
-
-                if (collider is BoxCollider box)
-                {
-                    if (!_arenaBoxColliderBaseSize.ContainsKey(id))
-                    {
-                        _arenaBoxColliderBaseSize[id] = box.size;
-                        _arenaBoxColliderBaseCenter[id] = box.center;
-                    }
-
-                    var baseSize = _arenaBoxColliderBaseSize[id];
-                    var baseCenter = _arenaBoxColliderBaseCenter[id];
-                    box.size = new Vector3(baseSize.x * scaleX, baseSize.y * scaleY, baseSize.z * scaleZ);
-                    box.center = new Vector3(baseCenter.x * scaleX, baseCenter.y * scaleY, baseCenter.z * scaleZ);
-                }
-                else if (collider is CapsuleCollider capsule)
-                {
-                    if (!_arenaCapsuleColliderBaseRadius.ContainsKey(id))
-                    {
-                        _arenaCapsuleColliderBaseRadius[id] = capsule.radius;
-                        _arenaCapsuleColliderBaseHeight[id] = capsule.height;
-                        _arenaCapsuleColliderBaseCenter[id] = capsule.center;
-                    }
-
-                    float horizontalScale = (Mathf.Abs(scaleX) + Mathf.Abs(scaleZ)) * 0.5f;
-                    capsule.radius = _arenaCapsuleColliderBaseRadius[id] * horizontalScale;
-                    capsule.height = _arenaCapsuleColliderBaseHeight[id] * scaleY;
-                    var baseCenter = _arenaCapsuleColliderBaseCenter[id];
-                    capsule.center = new Vector3(baseCenter.x * scaleX, baseCenter.y * scaleY, baseCenter.z * scaleZ);
-                }
-                else if (collider is SphereCollider sphere)
-                {
-                    if (!_arenaSphereColliderBaseRadius.ContainsKey(id))
-                    {
-                        _arenaSphereColliderBaseRadius[id] = sphere.radius;
-                        _arenaSphereColliderBaseCenter[id] = sphere.center;
-                    }
-
-                    float horizontalScale = (Mathf.Abs(scaleX) + Mathf.Abs(scaleZ)) * 0.5f;
-                    sphere.radius = _arenaSphereColliderBaseRadius[id] * horizontalScale;
-                    var baseCenter = _arenaSphereColliderBaseCenter[id];
-                    sphere.center = new Vector3(baseCenter.x * scaleX, baseCenter.y * scaleY, baseCenter.z * scaleZ);
-                }
-                else if (collider is MeshCollider)
-                {
-                    var tr = collider.transform;
-                    if (!_arenaMeshColliderBaseScale.ContainsKey(id))
-                    {
-                        _arenaMeshColliderBaseScale[id] = tr.localScale;
-                    }
-
-                    var baseScale = _arenaMeshColliderBaseScale[id];
-                    tr.localScale = new Vector3(baseScale.x * scaleX, baseScale.y * scaleY, baseScale.z * scaleZ);
-                }
-
-                if (!_scaledArenaBoundaryColliders.Contains(collider))
-                    _scaledArenaBoundaryColliders.Add(collider);
-            }
-        }
-
-        private static void RestoreArenaBoundaryColliders()
-        {
-            foreach (var collider in _scaledArenaBoundaryColliders)
-            {
-                if (collider == null) continue;
-
-                int id = collider.GetInstanceID();
-                if (collider is BoxCollider box)
-                {
-                    if (_arenaBoxColliderBaseSize.TryGetValue(id, out var size)) box.size = size;
-                    if (_arenaBoxColliderBaseCenter.TryGetValue(id, out var center)) box.center = center;
-                }
-                else if (collider is CapsuleCollider capsule)
-                {
-                    if (_arenaCapsuleColliderBaseRadius.TryGetValue(id, out var radius)) capsule.radius = radius;
-                    if (_arenaCapsuleColliderBaseHeight.TryGetValue(id, out var height)) capsule.height = height;
-                    if (_arenaCapsuleColliderBaseCenter.TryGetValue(id, out var center)) capsule.center = center;
-                }
-                else if (collider is SphereCollider sphere)
-                {
-                    if (_arenaSphereColliderBaseRadius.TryGetValue(id, out var radius)) sphere.radius = radius;
-                    if (_arenaSphereColliderBaseCenter.TryGetValue(id, out var center)) sphere.center = center;
-                }
-                else if (collider is MeshCollider)
-                {
-                    if (_arenaMeshColliderBaseScale.TryGetValue(id, out var scale))
-                        collider.transform.localScale = scale;
-                }
-            }
-
-            _scaledArenaBoundaryColliders.Clear();
-        }
-
-        private static int EnsureCustomColliderComponents(Transform customCollidersRoot)
-        {
-            if (customCollidersRoot == null) return 0;
-
-            int created = 0;
-            int meshCreated = 0;
-            int boxCreated = 0;
-
-            foreach (var meshFilter in customCollidersRoot.GetComponentsInChildren<MeshFilter>(true))
-            {
-                if (meshFilter == null || meshFilter.sharedMesh == null) continue;
-
-                var go = meshFilter.gameObject;
-                if (meshFilter.transform == customCollidersRoot) continue;
-                if (string.Equals(go.name, "__clipBrush", StringComparison.Ordinal)) continue;
-                if (go.name.IndexOf("colliders", StringComparison.OrdinalIgnoreCase) >= 0) continue;
-
-                bool hasChildMeshFilter = false;
-                for (int i = 0; i < meshFilter.transform.childCount; i++)
-                {
-                    var child = meshFilter.transform.GetChild(i);
-                    if (child != null && child.GetComponent<MeshFilter>() != null)
-                    {
-                        hasChildMeshFilter = true;
-                        break;
-                    }
-                }
-                if (hasChildMeshFilter) continue;
-
-                if (go.GetComponent<Collider>() != null) continue;
-
-                string meshPath = GetRelativeTransformPath(customCollidersRoot, meshFilter.transform);
-                string meshPart = DetermineColliderPartKey((go.name ?? string.Empty) + "/" + meshPath);
-
-                if (meshFilter.sharedMesh.isReadable)
-                {
-                    var meshCollider = go.AddComponent<MeshCollider>();
-                    meshCollider.sharedMesh = meshFilter.sharedMesh;
-                    meshCollider.convex = false;
-                    meshCollider.isTrigger = false;
-                    created++;
-                    meshCreated++;
-                    continue;
-                }
-
-                // Non-readable barrier meshes have an AABB that spans the full
-                // rink perimeter, which produces unusable fallback colliders.
-                // Keep original arena barrier colliders enabled instead.
-                if (string.Equals(meshPart, "barrier", StringComparison.OrdinalIgnoreCase))
-                {
-                    Debug.Log($"[COMPADJUST] Skipping non-readable barrier fallback collider at '{meshPath}'. Original barrier colliders remain active.");
-                    continue;
-                }
-
-                var renderer = go.GetComponent<Renderer>();
-                var boxCollider = go.AddComponent<BoxCollider>();
-                var bounds = meshFilter.sharedMesh.bounds;
-                boxCollider.center = bounds.center;
-                boxCollider.size = bounds.size;
-
-                boxCollider.isTrigger = false;
-                created++;
-                boxCreated++;
-            }
-
-            if (created > 0)
-                Debug.Log($"[COMPADJUST] Auto-generated {created} collider components for custom arena colliders ({meshCreated} mesh, {boxCreated} box fallback).");
-
-            return created;
-        }
-
-        private static void DisableOriginalArenaColliders(Transform arenaRoot)
-        {
-            if (arenaRoot == null) return;
-
-            _disabledOriginalColliders.RemoveAll(col => col == null);
-
-            foreach (var col in arenaRoot.GetComponentsInChildren<Collider>(true))
-            {
-                if (col == null) continue;
-                if (_arenaInstance != null && (col.transform == _arenaInstance.transform || col.transform.IsChildOf(_arenaInstance.transform)))
-                    continue;
-                if (_collidersInstance != null && (col.transform == _collidersInstance.transform || col.transform.IsChildOf(_collidersInstance.transform)))
-                    continue;
-                if (_barrierStandalone != null && (col.transform == _barrierStandalone || col.transform.IsChildOf(_barrierStandalone)))
-                    continue;
-                if (!ShouldHideOriginalArenaCollider(col, arenaRoot))
-                    continue;
-                if (!col.enabled)
-                    continue;
-                if (_disabledOriginalColliders.Contains(col))
-                    continue;
-
-                col.enabled = false;
-                _disabledOriginalColliders.Add(col);
-            }
-
-            if (_disabledOriginalColliders.Count > 0)
-                Debug.Log($"[COMPADJUST] Disabled {_disabledOriginalColliders.Count} original arena colliders.");
-            else
-                CompetitiveAdjustments.ConfigManager.LogWarning("No original arena colliders matched disable filter.");
-        }
-
-        // Tear down the standalone rounded-barrier clone (under the rink root). The
-        // original barrier colliders it disabled are re-enabled by RestoreOriginalArenaColliders.
-        private static void DestroyBarrierStandalone()
-        {
-            if (_barrierStandalone != null)
-            {
-                UnityEngine.Object.Destroy(_barrierStandalone.gameObject);
-                _barrierStandalone = null;
-            }
-        }
-
-        private static void RestoreOriginalArenaColliders()
-        {
-            int restored = 0;
-            foreach (var col in _disabledOriginalColliders)
-            {
-                if (col != null)
-                {
-                    col.enabled = true;
-                    restored++;
-                }
-            }
-            _disabledOriginalColliders.Clear();
-            if (restored > 0)
-                Debug.Log($"[COMPADJUST] Restored {restored} original arena colliders.");
-        }
-
-        private static bool ShouldHideOriginalArenaCollider(Collider collider, Transform arenaRoot)
-        {
-            if (collider == null || arenaRoot == null) return false;
-
-            string path = GetRelativeTransformPath(arenaRoot, collider.transform);
-            string text = (collider.name ?? string.Empty) + "/" + path;
-
-            if (text.IndexOf("trigger", StringComparison.OrdinalIgnoreCase) >= 0) return false;
-            if (text.IndexOf("goal", StringComparison.OrdinalIgnoreCase) >= 0) return false;
-            if (text.IndexOf("net", StringComparison.OrdinalIgnoreCase) >= 0) return false;
-            if (text.IndexOf("puck", StringComparison.OrdinalIgnoreCase) >= 0) return false;
-
-            bool hasCollider = text.IndexOf("collider", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasLeft = text.IndexOf("left", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasRight = text.IndexOf("right", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasFront = text.IndexOf("front", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasBack = text.IndexOf("back", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasTop = text.IndexOf("top", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasBottom = text.IndexOf("bottom", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasBarrier = text.IndexOf("barrier", StringComparison.OrdinalIgnoreCase) >= 0
-                || text.IndexOf("board", StringComparison.OrdinalIgnoreCase) >= 0
-                || text.IndexOf("wall", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool hasIce = text.IndexOf("ice", StringComparison.OrdinalIgnoreCase) >= 0
-                || text.IndexOf("floor", StringComparison.OrdinalIgnoreCase) >= 0;
-
-            if (hasIce) return true;
-
-            if (!hasCollider && !hasBarrier)
-                return false;
-
-            // Keep original barrier/board/wall colliders enabled; custom barrier
-            // mesh is non-readable and cannot provide a faithful runtime collider.
-            return hasLeft || hasRight || hasFront || hasBack || hasTop || hasBottom;
-        }
-
-        private static string DetermineColliderPartKey(string colliderNameOrPath)
-        {
-            if (string.IsNullOrEmpty(colliderNameOrPath)) return string.Empty;
-
-            string value = colliderNameOrPath;
-            if (value.IndexOf("barrier", StringComparison.OrdinalIgnoreCase) >= 0) return "barrier";
-            if (value.IndexOf("board", StringComparison.OrdinalIgnoreCase) >= 0) return "barrier";
-            if (value.IndexOf("wall", StringComparison.OrdinalIgnoreCase) >= 0) return "barrier";
-            if (value.IndexOf("ice", StringComparison.OrdinalIgnoreCase) >= 0) return "bottom";
-            if (value.IndexOf("floor", StringComparison.OrdinalIgnoreCase) >= 0) return "bottom";
-            if (value.IndexOf("ground", StringComparison.OrdinalIgnoreCase) >= 0) return "bottom";
-            if (value.IndexOf("left", StringComparison.OrdinalIgnoreCase) >= 0) return "left";
-            if (value.IndexOf("right", StringComparison.OrdinalIgnoreCase) >= 0) return "right";
-            if (value.IndexOf("front", StringComparison.OrdinalIgnoreCase) >= 0) return "front";
-            if (value.IndexOf("back", StringComparison.OrdinalIgnoreCase) >= 0) return "back";
-            if (value.IndexOf("top", StringComparison.OrdinalIgnoreCase) >= 0) return "top";
-            if (value.IndexOf("ceiling", StringComparison.OrdinalIgnoreCase) >= 0) return "top";
-            if (value.IndexOf("bottom", StringComparison.OrdinalIgnoreCase) >= 0) return "bottom";
-            return string.Empty;
-        }
-
-        private static bool IsLikelyBottomCollider(Collider collider, float lowestBoundsMinY)
-        {
-            if (collider == null) return false;
-
-            Bounds bounds = collider.bounds;
-            float horizontalMin = Mathf.Min(bounds.size.x, bounds.size.z);
-            bool isThinOnY = bounds.size.y <= Mathf.Max(0.05f, horizontalMin * 0.35f);
-            bool nearFloor = bounds.min.y <= (lowestBoundsMinY + 0.35f);
-            return isThinOnY && nearFloor;
-        }
-
-        // Resolve the puck-collision board layer by name. The shipped build names it
-        // "Boards"; some b1117 decompiles show "Barrier". Returns -1 if neither exists.
-        private static int ResolveBoardLayer()
-        {
-            int layer = LayerMask.NameToLayer("Boards");
-            if (layer < 0) layer = LayerMask.NameToLayer("Barrier");
-            return layer;
-        }
-
-        private static void SyncCustomColliderLayersAndStates(Transform arenaRoot, Transform customCollidersRoot)
-        {
-            if (arenaRoot == null || customCollidersRoot == null) return;
-
-            int iceLayer = LayerMask.NameToLayer("Ice");
-            // The puck-collision board layer is "Boards" in the shipped build; some
-            // decompiled b1117 trees name it "Barrier". Resolve whichever actually
-            // exists. Do NOT fall back to the arena-root layer here: that is "Default",
-            // which the puck does not collide with, so custom boards would pass through.
-            int boardsLayer = ResolveBoardLayer();
-            int fallbackLayer = arenaRoot.gameObject.layer;
-
-            if (iceLayer < 0)
-            {
-                CompetitiveAdjustments.ConfigManager.LogWarning("Unity layer 'Ice' not found, falling back to arena root layer.");
-                iceLayer = fallbackLayer;
-            }
-            if (boardsLayer < 0)
-            {
-                CompetitiveAdjustments.ConfigManager.LogWarning("Neither 'Boards' nor 'Barrier' layer found; custom boards will not collide with the puck.");
-                boardsLayer = fallbackLayer;
-            }
-
-            var customColliders = customCollidersRoot.GetComponentsInChildren<Collider>(true);
-
-            float lowestBoundsMinY = float.PositiveInfinity;
-            foreach (var collider in customColliders)
-            {
-                if (collider == null) continue;
-                lowestBoundsMinY = Mathf.Min(lowestBoundsMinY, collider.bounds.min.y);
-            }
-
-            int customCount = 0;
-            int mappedLayerCount = 0;
-            int heuristicBottomCount = 0;
-
-            foreach (var target in customColliders)
-            {
-                if (target == null) continue;
-                customCount++;
-
-                string targetPath = GetRelativeTransformPath(customCollidersRoot, target.transform);
-                string targetPart = DetermineColliderPartKey((target.name ?? string.Empty) + "/" + targetPath);
-
-                int assignedLayer;
-                if (string.Equals(targetPart, "bottom", StringComparison.OrdinalIgnoreCase))
-                {
-                    // Ice surface — use Ice layer so the game triggers ice audio/physics.
-                    assignedLayer = iceLayer;
-                }
-                else if (string.Equals(targetPart, "top", StringComparison.OrdinalIgnoreCase))
-                {
-                    // Ceiling/top collider — treat like boards so pucks and players collide.
-                    assignedLayer = boardsLayer;
-                }
-                else if (!string.IsNullOrEmpty(targetPart))
-                {
-                    // left / right / front / back / barrier → Boards layer so the game
-                    // triggers board-hit audio and physics correctly.
-                    assignedLayer = boardsLayer;
-                    // Tag required for StickPositioner.ApplySoftCollision to push the
-                    // player's stick away on contact, matching default board behaviour.
-                    try { target.gameObject.tag = "Soft Collider"; } catch { }
-                }
-                else
-                {
-                    bool looksLikeBottom = !float.IsInfinity(lowestBoundsMinY)
-                        && IsLikelyBottomCollider(target, lowestBoundsMinY);
-                    assignedLayer = looksLikeBottom ? iceLayer : boardsLayer;
-                    if (looksLikeBottom)
-                        heuristicBottomCount++;
-                }
-
-                target.gameObject.layer = assignedLayer;
-                target.isTrigger = false;
-                target.enabled = true;
-                mappedLayerCount++;
-
-                // Give the rebuilt board colliders a bouncy physic material. The
-                // name-scan BoardColliderPatch never matches these custom collider
-                // names, and the unified-prefab path creates them with no
-                // PhysicsMaterial at all, so the resized rink's boards otherwise
-                // deaden the puck instead of rebounding. When soft boards are on we
-                // apply the tuned values (server-authoritative, same as the
-                // name-scan patch); otherwise fall back to the vanilla board
-                // material so the resized rink at least matches stock bounce. Ice
-                // (bottom) colliders stay untouched.
-                if (assignedLayer == boardsLayer)
-                {
-                    bool softBoardsServer = CompetitivePuckTweaks.src.PluginCore.config.EnableSoftBoards
-                        && Unity.Netcode.NetworkManager.Singleton != null
-                        && Unity.Netcode.NetworkManager.Singleton.IsServer;
-
-                    if (softBoardsServer)
-                    {
-                        CompetitivePuckTweaks.src.BoardColliderPatch.ApplySoftBoardPhysics(target);
-                    }
-                    else if (target.sharedMaterial == null)
-                    {
-                        var vanillaBoardMat = GetVanillaBoardPhysicMaterial(arenaRoot);
-                        if (vanillaBoardMat != null)
-                            target.sharedMaterial = vanillaBoardMat;
-                    }
-                }
-
-                // Propagate the layer to all parent GameObjects up to (but not
-                // including) the colliders root so that any game code walking
-                // the hierarchy sees a consistent layer.
-                var parent = target.transform.parent;
-                while (parent != null && parent != customCollidersRoot)
-                {
-                    parent.gameObject.layer = assignedLayer;
-                    parent = parent.parent;
-                }
-
-                if (!_colliderLayersSynced)
-                {
-                    string layerName = LayerMask.LayerToName(assignedLayer);
-                    Debug.Log($"[COMPADJUST] Collider '{target.name}' part='{targetPart}' → layer {assignedLayer} ({layerName})");
-                }
-            }
-
-            if (!_colliderLayersSynced)
-            {
-                Debug.Log($"[COMPADJUST] Custom arena colliders ready: {customCount} colliders, {mappedLayerCount} layer-matched by part.");
-                if (heuristicBottomCount > 0)
-                    Debug.Log($"[COMPADJUST] Assigned {heuristicBottomCount} untagged collider(s) to Ice using geometry fallback.");
-                if (IsArenaColliderDebugEnabled())
-                    LogArenaColliderHeights(customCollidersRoot);
-                _colliderLayersSynced = true;
-            }
-        }
-
-        // Find a representative vanilla board PhysicsMaterial from the original
-        // (now-disabled but still present) arena colliders. Cached after the first
-        // resolve. Returns null if the stock boards carry no explicit material, in
-        // which case bare custom colliders already match vanilla and no copy is
-        // needed. Board-side colliders resolve to part "barrier" via
-        // DetermineColliderPartKey (the board/barrier check runs before the side
-        // checks), so "barrier" covers the common case.
-        private static PhysicsMaterial GetVanillaBoardPhysicMaterial(Transform arenaRoot)
-        {
-            if (_vanillaBoardPhysicMaterialResolved) return _vanillaBoardPhysicMaterial;
-            if (arenaRoot == null) return null;
-
-            foreach (var col in arenaRoot.GetComponentsInChildren<Collider>(true))
-            {
-                if (col == null || col.sharedMaterial == null) continue;
-                if (_arenaInstance != null && (col.transform == _arenaInstance.transform || col.transform.IsChildOf(_arenaInstance.transform))) continue;
-                if (_collidersInstance != null && (col.transform == _collidersInstance.transform || col.transform.IsChildOf(_collidersInstance.transform))) continue;
-
-                string path = GetRelativeTransformPath(arenaRoot, col.transform);
-                string part = DetermineColliderPartKey((col.name ?? string.Empty) + "/" + path);
-                if (part == "left" || part == "right" || part == "front" || part == "back" || part == "top" || part == "barrier")
-                {
-                    _vanillaBoardPhysicMaterial = col.sharedMaterial;
-                    break;
-                }
-            }
-
-            _vanillaBoardPhysicMaterialResolved = true;
-            return _vanillaBoardPhysicMaterial;
-        }
-
         private static void SyncArenaColliderDebugBrushes(Transform collidersRoot)
         {
             if (collidersRoot == null) return;
 
             bool enabled = IsArenaColliderDebugEnabled();
+            // Every collider under the level root, which is what collidersRoot now is.
+            // There is no separate barrier pass any more: the standalone barrier clone
+            // this used to need one for was removed along with the bundled collider
+            // prefab, and the real 'Barrier Collider' is an ordinary child of the rink.
             foreach (var collider in collidersRoot.GetComponentsInChildren<Collider>(true))
             {
                 if (collider == null) continue;
                 SyncArenaColliderDebugBrush(collider, enabled);
-            }
-
-            // The rounded barrier is a standalone object under the rink root, not under
-            // collidersRoot, so brush it separately -- otherwise the clip-brush visual
-            // covers the straight walls but misses the corners.
-            if (_barrierStandalone != null && _barrierStandalone != collidersRoot)
-            {
-                foreach (var collider in _barrierStandalone.GetComponentsInChildren<Collider>(true))
-                {
-                    if (collider == null) continue;
-                    SyncArenaColliderDebugBrush(collider, enabled);
-                }
             }
         }
 
@@ -1687,11 +940,14 @@ namespace DashFallMod
         /// <summary>Called from the UI toggle to re-sync arena collider debug brushes immediately.</summary>
         public static void RefreshArenaColliderBrushes()
         {
-            if (_collidersInstance != null)
+            // Points at the real base-game colliders under 'Level Default'. It used to
+            // visualise the bundled collider prefab, which no longer exists.
+            var levelRoot = FindArenaRoot()?.root;
+            if (levelRoot != null)
             {
-                SyncArenaColliderDebugBrushes(_collidersInstance.transform);
+                SyncArenaColliderDebugBrushes(levelRoot);
                 if (IsArenaColliderDebugEnabled())
-                    LogArenaColliderHeights(_collidersInstance.transform);
+                    LogArenaColliderHeights(levelRoot);
             }
         }
 
@@ -1789,10 +1045,11 @@ namespace DashFallMod
                 if (!exactArena && !exactRink && !containsArena && !containsRink)
                     continue;
 
-                // Skip our own spawned custom arena instances
-                if (string.Equals(name, UnifiedInstanceName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (string.Equals(name, "CustomArenaVisual", StringComparison.OrdinalIgnoreCase))
+                // Never let loaded scenery win the vote. 'PonceArena(Clone)' scores on the
+                // name and carries plenty of rink-shaped renderers, so once a scenery mod
+                // has swapped the building in, the answer can flip from the game's own
+                // 'Rink' to the loaded prefab and take the level root with it.
+                if (IsSceneryLoaderOwned(t))
                     continue;
 
                 float score = 0f;
@@ -1847,69 +1104,6 @@ namespace DashFallMod
             return best;
         }
 
-        private static void HideOriginalArenaRenderers(Transform arenaRoot, Transform customArenaRoot)
-        {
-            int arenaRootId = arenaRoot != null ? arenaRoot.GetInstanceID() : 0;
-
-            _hiddenArenaRenderers.RemoveAll(renderer => renderer == null);
-
-            if (_hiddenArenaRootId != 0 && _hiddenArenaRootId != arenaRootId)
-            {
-                RestoreOriginalArenaRenderers();
-            }
-
-            for (int i = _hiddenArenaRenderers.Count - 1; i >= 0; i--)
-            {
-                var hidden = _hiddenArenaRenderers[i];
-                if (hidden == null)
-                {
-                    _hiddenArenaRenderers.RemoveAt(i);
-                    continue;
-                }
-
-                if (!ShouldHideOriginalArenaRenderer(hidden, arenaRoot))
-                {
-                    hidden.enabled = true;
-                    _hiddenArenaRenderers.RemoveAt(i);
-                }
-            }
-
-            // Scan one level up from the arena root so rink surfaces that are SIBLINGS
-            // of it (e.g. a 'Boards' or 'Arena' mesh next to the 'rink'/ice node in the
-            // Ponce custom-scenery scene) are hidden too, not just the ice directly under
-            // the arena root. ShouldHideOriginalArenaRenderer still decides what is
-            // actually disabled (it excludes crowd/seats/stands/lights/ceiling/scoreboard).
-            Transform scanRoot = arenaRoot.parent != null ? arenaRoot.parent : arenaRoot;
-            foreach (var renderer in scanRoot.GetComponentsInChildren<Renderer>(true))
-            {
-                if (renderer == null) continue;
-                if (customArenaRoot != null && (renderer.transform == customArenaRoot || renderer.transform.IsChildOf(customArenaRoot)))
-                    continue;
-                if (!ShouldHideOriginalArenaRenderer(renderer, scanRoot))
-                    continue;
-
-                if (!_hiddenArenaRenderers.Contains(renderer))
-                    _hiddenArenaRenderers.Add(renderer);
-
-                if (renderer.enabled)
-                    renderer.enabled = false;
-            }
-
-            _hiddenArenaRootId = arenaRootId;
-        }
-
-        private static void RestoreOriginalArenaRenderers()
-        {
-            foreach (var renderer in _hiddenArenaRenderers)
-            {
-                if (renderer != null)
-                    renderer.enabled = true;
-            }
-
-            _hiddenArenaRenderers.Clear();
-            _hiddenArenaRootId = 0;
-        }
-
         // ── Arena network bounds patches ──────────────────────────────────────
         // Applied when EnableArenaTweaks is true; unapplied when it is turned off.
         // Replaces vanilla 16-bit position quantisation with the chunked-sync
@@ -1951,10 +1145,8 @@ namespace DashFallMod
         }
 
         // Vanilla rink half-extent along world X / Z, used to derive required chunk
-        // counts. World X scales with config ArenaScaleX; world Z (rink length) scales
-        // with config ArenaScaleY, because the arena prefab carries a default 90deg X
-        // rotation (ArenaRotX=90) that maps config Y onto world Z. Config ArenaScaleZ is
-        // the vertical axis and is not chunked.
+        // counts. World X scales with ArenaScaleX and world Z (rink length) with
+        // ArenaScaleZ. ArenaScaleY is the vertical axis and is not chunked.
         private const float VanillaArenaHalfExtentX = 50f;
         private const float VanillaArenaHalfExtentZ = 25f;
 
@@ -1965,9 +1157,8 @@ namespace DashFallMod
             var cfg = CompetitiveAdjustments.ConfigManager.Config?.CompAdjust;
 
             float scaleX = useSynced ? _syncedArenaScaleX : (cfg?.ArenaScaleX ?? 1f);
-            // World Z (rink length) is scaled by config ArenaScaleY due to the 90deg arena
-            // rotation; ArenaScaleZ is the vertical axis and does not affect the chunk grid.
-            float scaleZ = useSynced ? _syncedArenaScaleY : (cfg?.ArenaScaleY ?? 1f);
+            // ArenaScaleY is the vertical axis and does not affect the chunk grid.
+            float scaleZ = useSynced ? _syncedArenaScaleZ : (cfg?.ArenaScaleZ ?? 1f);
             if (scaleX <= 0f) scaleX = 1f;
             if (scaleZ <= 0f) scaleZ = 1f;
 

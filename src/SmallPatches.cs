@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using AYellowpaper.SerializedCollections;
 using HarmonyLib;
 using Unity.Netcode;
@@ -87,93 +87,6 @@ namespace CompetitiveCompanion
         }
     }
 
-    [HarmonyPatch(typeof(PlayerBodyV2), "OnNetworkPostSpawn")]
-    public class PlayerBodyPatch
-    {
-        [HarmonyPostfix]
-        public static void Postfix(PlayerBodyV2 __instance, ref float ___slideTurnMultiplier,
-            ref float ___stopDrag, ref float ___balanceRecoveryTime, ref PlayerMesh ___playerMesh)
-        {
-            if (PluginCore.torsoMesh == null) return;
-            if (__instance.name.Contains("Goalie")) return;
-
-            // ── VISUAL ONLY — never touch MeshCollider or mr.enabled ──────────────────
-            // MeshCollider is owned by CompetitivePuckTweaks (server config).
-            // MeshRendererHider handles local player body visibility via camera events.
-            var mf = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshFilter>();
-            if (mf == null) return;
-
-            var df = CompetitiveAdjustments.ConfigManager.CompAdjustEffective;
-            bool showCustomVisual = PluginCore.torsoMesh != null
-                && !(df?.DisableCustomTorsoVisual == true)
-                && (DashFallMod.Client.DashFallConfigLoader.ClientConfig?.ShowCustomTorsoMesh ?? true);
-
-            // Always save the true original before we potentially overwrite it, so
-            // RefreshPlayerTorsoStates can restore it even if this patch runs after Tweaks'.
-            int mfId = mf.GetInstanceID();
-            if (!CompetitivePuckTweaks.src.PluginCore.OriginalTorsoMeshes.ContainsKey(mfId))
-                CompetitivePuckTweaks.src.PluginCore.OriginalTorsoMeshes[mfId] = mf.sharedMesh;
-
-            if (showCustomVisual)
-            {
-                mf.sharedMesh = PluginCore.torsoMesh;
-                mf.transform.localScale = new Vector3(
-                    PluginCore.torsoMeshScale * (df?.CustomTorsoScaleX ?? 1f),
-                    PluginCore.torsoMeshScale * (df?.CustomTorsoScaleY ?? 1f),
-                    PluginCore.torsoMeshScale * (df?.CustomTorsoScaleZ ?? 1f));
-                mf.transform.localPosition = Vector3.zero;
-                mf.transform.localRotation = Quaternion.Euler(0, 180, 0);
-            }
-            // If !showCustomVisual: original mesh from game spawn is already in place — leave it.
-        }
-    }
-
-    [HarmonyPatch(typeof(MeshRendererTexturer), "SetTexture")]
-    public class MeshRendererTexturerPatch
-    {
-        // b1117 reworked MeshRendererTexturer from an instantiated `Material material`
-        // field to a MaterialPropertyBlock, so the old `___material` field injection
-        // no longer resolves and this patch silently failed to apply. Drive the
-        // torso/groin transparency through the renderer's instanced material instead
-        // (which is what `___material` effectively was in b897).
-        [HarmonyPostfix]
-        public static void Postfix(MeshRendererTexturer __instance, MeshRenderer ___meshRenderer)
-        {
-            if (___meshRenderer == null) return;
-            if (!__instance.gameObject.name.Contains("Torso") &&
-                !__instance.gameObject.name.Contains("Groin")) return;
-
-            // Skip goalies — their torso/groin materials must not be modified.
-            var body = __instance.GetComponentInParent<PlayerBodyV2>();
-            if (body == null || body.name.Contains("Goalie")) return;
-
-            Material material = ___meshRenderer.material;
-            if (material == null) return;
-
-            var dfCfg = CompetitiveAdjustments.ConfigManager.CompAdjustEffective;
-            bool customActive = PluginCore.torsoMesh != null
-                                && !(dfCfg?.DisableCustomTorsoVisual == true)
-                                && (DashFallMod.Client.DashFallConfigLoader.ClientConfig?.ShowCustomTorsoMesh ?? true);
-
-            if (customActive)
-            {
-                // Custom torso is active — keep torso and groin fully opaque so they render correctly.
-                material.DisableKeyword("_SURFACE_TYPE_TRANSPARENT");
-                material.SetOverrideTag("RenderType", "Opaque");
-                Color c = material.color;
-                c.a = 1.0f;
-                material.color = c;
-            }
-            else
-            {
-                material.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
-                material.SetOverrideTag("RenderType", "Transparent");
-                Color color = material.color;
-                color.a = 0.1f;
-                material.color = color;
-            }
-        }
-    }
 }
 
 namespace CompetitiveCompanion.src

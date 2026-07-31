@@ -1,4 +1,4 @@
-// DashFall.Config.cs - DashFall's own keybind configuration
+﻿// DashFall.Config.cs - DashFall's own keybind configuration
 
 using System;
 using System.Collections.Generic;
@@ -11,10 +11,40 @@ namespace DashFallMod.Client
     public class DashFallClientConfig
     {
         public bool EnableClientDebug = false;
-        public bool ShowCustomTorsoMesh = false;   // runtime: show/hide custom torso visual
         public bool ShowArenaClipBrushes = false; // debug: visualise arena collider meshes
         public bool ShowPlayerClipBrushes = false; // debug: visualise player collider meshes
         public bool EnableMinimapTweaks = false;    // apply arena-scale minimap rescaling
+        // How the resized rink's geometry is redrawn. "drawmesh" rescales the base
+        // game's own statically batched surfaces; "batchroot" is the experimental
+        // zero-draw-call variant; "off" leaves the visuals frozen at vanilla size while
+        // collision still resizes, which is only useful for isolating a rendering
+        // problem. See src/ArenaProxyVisual.cs.
+        public string ArenaVisualMode = "drawmesh";
+        // Hide the arena crowd instead of moving it with the resized rink. Worth turning
+        // on at large arena scales, where the crowd is stretched by the same factors as
+        // the building. See src/ArenaStrandedScenery.cs.
+        public bool HideArenaCrowd = false;
+        // Stretch a custom arena loaded by Dem's Scenery Loader so the resized rink fits
+        // inside it. On by default, because the alternative is a vanilla-sized building
+        // with the boards sticking out through its walls.
+        // LEAVE THIS ON unless you are debugging. The scenery carries colliders, and the
+        // server scales it too, so turning it off locally puts your collision out of step
+        // with everyone else's. See src/ArenaSceneryLoaderSync.cs.
+        public bool ScaleSceneryLoaderArena = true;
+        // Brightness multiplier for the arena lights after they are moved with a resized
+        // rink. Raise it when a tall ArenaScaleZ leaves the ice reading dark, since the
+        // fixtures end up much further from it. See src/ArenaLightSync.cs.
+        public float ArenaLightIntensityScale = 1f;
+        // Copy the arena's BAKED light fixtures onto realtime lights. On by default,
+        // because proxy-drawn geometry cannot carry baked lightmaps, so without this a
+        // bake-lit arena renders as flat ambient with no shading at all. Turn it off to
+        // go back to ambient only. See src/ArenaLightSync.cs.
+        public bool ReviveBakedArenaLights = true;
+        // Hand the base game's baked lightmaps back to the proxy-drawn geometry. On by
+        // default; turn it off to fall back to light probes and find out in one restart
+        // whether a shading artefact comes from the lightmap or from something else.
+        // See src/ArenaProxyVisual.cs.
+        public bool ProxyRestoreLightmaps = true;
         public float PuckScale = 1f;
         // Per-axis multipliers applied on top of PuckScale (server-synced).
         // Final localScale = PuckScale * (PuckScaleX, PuckScaleY, PuckScaleZ).

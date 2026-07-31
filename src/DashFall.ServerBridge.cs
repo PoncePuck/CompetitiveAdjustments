@@ -1,4 +1,4 @@
-// DashFall.ServerBridge.cs - Server-side message handler for client keybinds
+﻿// DashFall.ServerBridge.cs - Server-side message handler for client keybinds
 // Receives PPKB/Hello and PPKB/Action messages from clients
 
 using System;
@@ -300,10 +300,50 @@ namespace PoncePuck.Keybinds
             }
         }
 
+        /// <summary>
+        /// Layout guard for PPKB/GoalTweaks. Bump it whenever the layout OR THE MEANING
+        /// of any value in it changes.
+        ///
+        /// The payload is positional: a fixed run of values with no field names. That is
+        /// fine until the meaning of a slot changes without the layout changing, which has
+        /// now happened twice in a day (the arena scale axes were renamed to world axes,
+        /// and the rotation triple was removed). Two builds either side of such a change
+        /// agree on how to read every byte and disagree on what the bytes mean, and that
+        /// is far worse than a parse error: the rink comes out scaled on the wrong axes,
+        /// and because the chunked position grid is sized from the rink's length, the two
+        /// ends size it differently and players teleport.
+        ///
+        /// A mismatch now costs the arena resize on that connection, which is a visible
+        /// but harmless "server looks vanilla", instead of a silently wrong world.
+        /// </summary>
+        private const int ArenaSyncWireVersion = unchecked((int)0xCA000002);
+
+        private static int _warnedArenaSyncVersion;
+
+        private static void WarnArenaSyncVersionOnce(int received)
+        {
+            if (_warnedArenaSyncVersion == received) return;
+            _warnedArenaSyncVersion = received;
+
+            Debug.LogWarning(
+                $"[COMPADJUST] Ignoring the server's arena sync: it was sent by an incompatible " +
+                $"CompetitiveAdjustments build (wire 0x{received:X8}, expected 0x{ArenaSyncWireVersion:X8}). " +
+                "The rink will stay vanilla-sized here rather than risk a mismatched arena. " +
+                "Update the mod on BOTH the server and the client.");
+        }
+
         private static void OnGoalTweaksMsg(ulong senderId, FastBufferReader reader)
         {
             try
             {
+                int wireVersion;
+                reader.ReadValueSafe(out wireVersion);
+                if (wireVersion != ArenaSyncWireVersion)
+                {
+                    WarnArenaSyncVersionOnce(wireVersion);
+                    return;
+                }
+
                 bool enabled;
                 float thicknessScale;
                 float scaleX;
@@ -317,9 +357,6 @@ namespace PoncePuck.Keybinds
                 float arenaOffsetX;
                 float arenaOffsetY;
                 float arenaOffsetZ;
-                float arenaRotX;
-                float arenaRotY;
-                float arenaRotZ;
 
                 reader.ReadValueSafe(out enabled);
                 reader.ReadValueSafe(out thicknessScale);
@@ -334,9 +371,6 @@ namespace PoncePuck.Keybinds
                 reader.ReadValueSafe(out arenaOffsetX);
                 reader.ReadValueSafe(out arenaOffsetY);
                 reader.ReadValueSafe(out arenaOffsetZ);
-                reader.ReadValueSafe(out arenaRotX);
-                reader.ReadValueSafe(out arenaRotY);
-                reader.ReadValueSafe(out arenaRotZ);
 
                 DashFallMod.GoalNetTweaks.SetSyncedTweaks(
                     enabled,
@@ -351,10 +385,7 @@ namespace PoncePuck.Keybinds
                     arenaScaleZ,
                     arenaOffsetX,
                     arenaOffsetY,
-                    arenaOffsetZ,
-                    arenaRotX,
-                    arenaRotY,
-                    arenaRotZ);
+                    arenaOffsetZ);
             }
             catch (Exception e)
             {
@@ -468,6 +499,7 @@ namespace PoncePuck.Keybinds
             {
                 using (var writer = new FastBufferWriter(160, Unity.Collections.Allocator.Temp))
                 {
+                    writer.WriteValueSafe(ArenaSyncWireVersion);
                     writer.WriteValueSafe(cfg.EnableGoalNetTweaks);
                     writer.WriteValueSafe(cfg.GoalThicknessScale);
                     writer.WriteValueSafe(cfg.GoalSizeScaleX);
@@ -475,15 +507,16 @@ namespace PoncePuck.Keybinds
                     writer.WriteValueSafe(cfg.GoalSizeScaleZ);
                     writer.WriteValueSafe(cfg.GoalBackOffset);
                     writer.WriteValueSafe(cfg.EnableArenaTweaks);
+                    // WORLD axes, in world order: X width, Y height, Z length. The config
+                    // fields have meant exactly this since ConfigVersion 16; before that
+                    // Y and Z were swapped here too. Anyone changing this order or its
+                    // meaning must bump ArenaSyncWireVersion.
                     writer.WriteValueSafe(cfg.ArenaScaleX);
                     writer.WriteValueSafe(cfg.ArenaScaleY);
                     writer.WriteValueSafe(cfg.ArenaScaleZ);
                     writer.WriteValueSafe(cfg.ArenaOffsetX);
                     writer.WriteValueSafe(cfg.ArenaOffsetY);
                     writer.WriteValueSafe(cfg.ArenaOffsetZ);
-                    writer.WriteValueSafe(cfg.ArenaRotX);
-                    writer.WriteValueSafe(cfg.ArenaRotY);
-                    writer.WriteValueSafe(cfg.ArenaRotZ);
                     _cmm.SendNamedMessage("PPKB/GoalTweaks", clientId, writer);
                 }
             }

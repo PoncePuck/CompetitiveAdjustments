@@ -46,7 +46,13 @@ public sealed class DashFallGameMod
             // Event_Everyone_OnPlayerGameStateChanged (phase/team/role) event.
             EventManager.AddEventListener("Event_Everyone_OnPlayerBodySpawned", OnBodySpawned);
             EventManager.AddEventListener("Event_Everyone_OnPlayerGameStateChanged", OnRoleChanged);
-            
+
+            // Arena state belongs to the LEVEL, not to the players standing on it. This
+            // used to come online only when the first PlayerBodyV2 spawned, which left a
+            // dedicated server with no arena tick and no level-spawn hook until then, so
+            // the rink sat at vanilla size between a level load and the first spawn.
+            GoalNetTweaks.EnsureRunner();
+
             // Initialize client immediately if not headless
             
             if (!isHeadless)
