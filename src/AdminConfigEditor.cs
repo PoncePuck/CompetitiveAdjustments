@@ -27,10 +27,28 @@ namespace CompetitiveAdjustments
     {
         // ---- Identity -------------------------------------------------------
 
-        // True for the listen-server host and for any player the game itself
-        // marks as an admin (AdminLevel > 0), exactly how the other mods detect
-        // admins, so there is no separate allowlist to maintain.  Shared by the
-        // /reload chat gate (SmallPatches) and the editor auth.
+        // True for the listen-server host and for any player the game itself treats
+        // as an admin.  Shared by the /reload chat gate (SmallPatches) and the
+        // editor auth, so there is no separate allowlist to maintain.
+        //
+        // BOTH halves are required, and checking only the first is why admins got no
+        // editor access on a DEDICATED server while it worked fine in practice:
+        //
+        //   AdminLevel > 0        comes from PlayerData.adminLevel, handed over at
+        //                         connection approval by the game's account backend
+        //                         (it sits right next to patreonLevel). It is an
+        //                         account property, not a property of THIS server.
+        //   IsSteamIdAdmin        AdminManager's admin_steam_ids file, which is how a
+        //                         dedicated server operator actually names their
+        //                         admins. Those players have AdminLevel 0.
+        //
+        // A listen host never exercised either one, because it short-circuits on the
+        // host check above, so the gap only ever showed up on dedicated servers.
+        //
+        // This mirrors StandardGameMode.OnChatCommand, which gates every built-in
+        // admin command as `AdminLevel.Value > 0 || IsSteamIdAdmin(SteamId)`. Matching
+        // the game exactly is deliberate: anyone who can already run /kick or /ban
+        // from chat can change the server config, and nobody else can.
         public static bool IsAdmin(ulong clientId)
         {
             var nm = NetworkManager.Singleton;
@@ -42,7 +60,40 @@ namespace CompetitiveAdjustments
             Player player = pm.GetPlayerByClientId(clientId);
             if (player == null) return false;
 
-            return player.AdminLevel.Value > 0;
+            if (player.AdminLevel.Value > 0) return true;
+
+            return IsSteamIdAdmin(player);
+        }
+
+        /// <summary>
+        /// The server operator's own admin list (AdminManager's admin_steam_ids file,
+        /// live-reloaded by its FileSystemWatcher). Reached through ServerManager the
+        /// way the game's own command gate does, with the AdminManager singleton as a
+        /// fallback for a role where ServerManager is not up.
+        /// </summary>
+        private static bool IsSteamIdAdmin(Player player)
+        {
+            try
+            {
+                AdminManager admins = ServerManager.Instance != null
+                    ? ServerManager.Instance.AdminManager
+                    : null;
+                if (admins == null) admins = AdminManager.Instance;
+                if (admins == null) return false;
+
+                string steamId = player.SteamId.Value.ToString();
+                if (string.IsNullOrEmpty(steamId)) return false;
+
+                return admins.IsSteamIdAdmin(steamId);
+            }
+            catch (Exception e)
+            {
+                // Never let a game-API change silently promote or demote anyone; fall
+                // back to "not an admin" and say so, because a silent false here reads
+                // exactly like a correctly-denied non-admin.
+                ConfigManager.LogWarning("Admin steam-id check failed, treating as non-admin: " + e.Message);
+                return false;
+            }
         }
 
         // Full grant check for an editor unlock request.  Order: trusted
