@@ -282,6 +282,7 @@ namespace DashFallMod
             int renderers = 0;
             int skippedRange = 0;
             int identityST = 0;
+            int batchedST = 0;
             string sampleST = null;
 
             for (int i = 0; i < targets.Count; i++)
@@ -339,6 +340,12 @@ namespace DashFallMod
                         if (Mathf.Approximately(st.x, 1f) && Mathf.Approximately(st.y, 1f)
                             && Mathf.Approximately(st.z, 0f) && Mathf.Approximately(st.w, 0f)) identityST++;
                         else if (sampleST == null) sampleST = $"'{mr.name}' idx={mr.lightmapIndex} ST={st}";
+
+                        // How many of those STs we are deliberately ignoring because the
+                        // batcher already applied them. A high count here with the black
+                        // patches gone is the confirmation that this was the cause; a count
+                        // of zero means the patches came from something else.
+                        if (mr.isPartOfStaticBatch) batchedST++;
                     }
 
                     draws.Add(new Draw
@@ -386,7 +393,8 @@ namespace DashFallMod
 
             Debug.Log($"[COMPADJUST] Proxy lighting: {keptLightmap} of {draws.Count} draw(s) kept their baked " +
                       $"lightmap; the rest fall back to light probes. Atlas mapping: {identityST} identity" +
-                      (sampleST != null ? $", first non-identity {sampleST}" : ", all identity"));
+                      (sampleST != null ? $", first non-identity {sampleST}" : ", all identity") +
+                      $"; {batchedST} batched renderer(s) had their ST ignored (UV2 already in atlas space).");
 
             EnsureDrawer();
             group.LightmapDraws = keptLightmap;
@@ -480,7 +488,23 @@ namespace DashFallMod
             block = new MaterialPropertyBlock();
             block.SetTexture("unity_Lightmap", colour);
             if (data.lightmapDir != null) block.SetTexture("unity_LightmapInd", data.lightmapDir);
-            block.SetVector("unity_LightmapST", mr.lightmapScaleOffset);
+
+            // Statically batched geometry carries lightmap UVs that are ALREADY in atlas
+            // space: the batcher folds each source renderer's scale/offset into the
+            // combined mesh's UV2 when it builds it. Applying the renderer's ST on top of
+            // that transforms twice, and the second transform lands the sample somewhere
+            // else in the atlas, usually in the unused padding between charts, which is
+            // black. That is the black patch on the boards.
+            //
+            // It only ever showed on a stretched rink because that is the only time the
+            // proxy runs at all: at an identity delta the game keeps drawing its own
+            // renderers and none of this code is involved. The stretch amount is
+            // irrelevant, the bug is in the restore path.
+            //
+            // Pass the UVs through unchanged for batched renderers, and keep the real ST
+            // for any unbatched one, whose UV2 is still in 0..1 mesh space.
+            Vector4 st = mr.isPartOfStaticBatch ? new Vector4(1f, 1f, 0f, 0f) : mr.lightmapScaleOffset;
+            block.SetVector("unity_LightmapST", st);
             return true;
         }
 
