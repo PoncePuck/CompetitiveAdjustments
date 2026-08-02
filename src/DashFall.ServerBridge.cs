@@ -206,6 +206,24 @@ namespace PoncePuck.Keybinds
             // Debug helper - can be called from console if needed
         }
 
+        // Every PPKB handler is registered on every role (see Runner.Update), because
+        // a host is both ends at once and the registration happens before we know
+        // which role this process will end up in.  That means the four server->client
+        // handlers are also live on a server, where a client can reach them just by
+        // sending their name: NGO dispatches purely on the name hash.
+        //
+        // The transport supplies senderId, so it cannot be forged from the payload.
+        // Only NetworkManager.ServerClientId (0) is ever the authority: a remote
+        // client is always >= 1, while the host's own loopback send is 0 and must
+        // keep working (the admin editor unlock depends on it).  Gating on IsServer
+        // instead would break that loopback, which is why this checks the sender.
+        private static bool FromServer(ulong senderId, string msgName)
+        {
+            if (senderId == NetworkManager.ServerClientId) return true;
+            Debug.LogWarning($"[COMPADJUST] Rejected {msgName} from client {senderId}: server->client message, clients may not send it.");
+            return false;
+        }
+
         private static string Canon(string a)
         {
             if (string.IsNullOrEmpty(a)) return "";
@@ -286,6 +304,7 @@ namespace PoncePuck.Keybinds
         // ---------- Client-side feature message handler ----------
         private static void OnFeaturesMsg(ulong senderId, FastBufferReader reader)
         {
+            if (!FromServer(senderId, "PPKB/Features")) return;
             try
             {
                 ushort featureFlags;
@@ -334,6 +353,11 @@ namespace PoncePuck.Keybinds
 
         private static void OnGoalTweaksMsg(ulong senderId, FastBufferReader reader)
         {
+            // The wire-version check below is a compatibility check, not an
+            // authorization check: the constant ships in the DLL, so anyone can
+            // send it.  Without this guard a client could hand the server arena
+            // scales that SetSyncedTweaks writes straight into the live config.
+            if (!FromServer(senderId, "PPKB/GoalTweaks")) return;
             try
             {
                 int wireVersion;
@@ -777,6 +801,7 @@ namespace PoncePuck.Keybinds
 
         private static void OnAdminAuthResultMsg(ulong senderId, FastBufferReader reader)
         {
+            if (!FromServer(senderId, "PPKB/AdminAuthResult")) return;
             try
             {
                 bool granted;
@@ -796,6 +821,11 @@ namespace PoncePuck.Keybinds
 
         private static void OnConfigFullMsg(ulong senderId, FastBufferReader reader)
         {
+            // Without this, any client could push a whole config document at the
+            // server: LoadFromJson replaces the live Dashfall/CompAdjust/CompTweaks
+            // sections and runs SyncFeatureStates when IsServer, bypassing both the
+            // admin gate and the ClampRuntimeLimits that ApplyServerConfigEdit does.
+            if (!FromServer(senderId, "PPKB/ConfigFull")) return;
             try
             {
                 byte total, index;

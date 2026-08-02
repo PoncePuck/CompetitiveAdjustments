@@ -143,7 +143,16 @@ namespace CompetitivePuckTweaks.src
         [HarmonyPrefix]
         public static bool Prefix(Stick __instance)
         {
-            if (PluginCore.config.BananaMode) return false;
+            // `return true` means "skip our own bookkeeping, let vanilla run", the
+            // same idiom as the UsePhysicsModificationEvents line below.  This used
+            // to `return false`, which in Harmony means "do not run the original at
+            // all", so enabling BananaMode suppressed the whole vanilla despawn:
+            // Event_Everyone_OnStickDespawned never fired (leaving the replay
+            // recorder and minimap holding destroyed Sticks), the PlayerReference
+            // OnValueChanged handler was never unsubscribed, and NGO's own
+            // OnNetworkDespawn bookkeeping never ran.  BananaMode has no other
+            // effect anywhere in the mod, so that leak was all it did.
+            if (PluginCore.config.BananaMode) return true;
             if (!PluginCore.config.UsePhysicsModificationEvents) return true;
             if (__instance == null) return true;
 

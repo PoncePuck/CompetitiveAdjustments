@@ -159,6 +159,14 @@ namespace CompetitivePuckTweaks.src
             // fall. In b897 HasFallen was a plain bool so the unguarded call was
             // harmless. The server write replicates HasFallen to clients as before.
             if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer) return;
+            // The trigger is deliberately wider than vanilla's (we fall from the
+            // intermediate band, before the skater is fully sideways), but the
+            // !HasFallen.Value latch is not optional: OnFall() is not idempotent.
+            // It kills and re-allocates the balance-recovery DOTween on every
+            // call, so without the latch it re-runs every FixedUpdate for as long
+            // as the skater sits in that band, pinning KeepUpright.Balance near 0
+            // instead of letting it ramp back to 1 over balanceRecoveryTime.
+            if (__instance.HasFallen.Value) return;
             if (!__instance.IsUpright && !__instance.IsSideways) __instance.OnFall();
         }
     }

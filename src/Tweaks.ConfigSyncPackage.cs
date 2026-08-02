@@ -13,6 +13,16 @@ namespace CompetitivePuckTweaks.src
         public float HighStickingActivateAngle;
         public float HighStickingMaxAngle;
 
+        // Exact serialized size of the field run below, in bytes.  This payload is
+        // positional with no field names, so a build that adds or removes a field
+        // does not fail to parse against an older peer, it silently reads the wrong
+        // value out of the wrong slot (removing TorsoScaleX/Y/Z once shifted
+        // HighSticking angles onto the old torso floats: 1.0 instead of -20).
+        // A size check catches that skew before a single field is assigned.
+        //
+        // KEEP IN SYNC with NetworkSerialize: 7 floats + 1 uint = 8 * 4.
+        public const int WireSizeBytes = 8 * 4;
+
         public ConfigSyncPackage(CompetitiveAdjustments.CompTweaksConfig c, CompetitiveAdjustments.CompAdjustConfig df = null)
         {
             PuckScale = c.PuckScale;

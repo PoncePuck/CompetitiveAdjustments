@@ -51,6 +51,109 @@ namespace DashFallMod
         public static void Dbg(string msg) =>
             CompetitiveAdjustments.ConfigManager.Dbg(msg);
     }
+
+    /// <summary>
+    /// Widens the goalie butterfly leg pad by ButterflyPadOffset.
+    ///
+    /// Deliberately lives in DashFallMod rather than CompetitiveCompanion.  The
+    /// companion is only constructed when the process is not headless, so a patch
+    /// registered there never applies on a dedicated server: every client would
+    /// move the marker the pad collider follows while the server kept the vanilla
+    /// one, and the server is the side that resolves puck/pad contacts.  Shots
+    /// that visibly hit the pad would go in.  The DashFallMod namespace is patched
+    /// in every role exactly once.
+    /// </summary>
+    [HarmonyPatch(typeof(PlayerLegPad), "Awake")]
+    public class PlayerLegPadPatch
+    {
+        // Vanilla localPosition of every Butterfly marker we have touched, kept
+        // alongside the marker so the offset always applies to an untouched
+        // baseline.  The previous version did `localPosition += offset`, which
+        // compounds the moment it runs twice on the same marker.
+        private static readonly System.Collections.Generic.List<Entry> _entries =
+            new System.Collections.Generic.List<Entry>();
+
+        private struct Entry
+        {
+            public Transform Marker;
+            public Vector3 BasePos;
+        }
+
+        private static bool _loggedButterflyNotFound;
+
+        // One source for both roles.  On a server this is the operator's value;
+        // on a client it is what the server synced, because ReceiveMessage mirrors
+        // LegPadOffset into this same field.  Both sides therefore land on the
+        // same number and the collider matches what the player sees.
+        private static float Offset
+        {
+            get
+            {
+                var ct = CompetitiveAdjustments.ConfigManager.CompTweaksEffective;
+                return ct != null ? ct.ButterflyPadOffset : 0f;
+            }
+        }
+
+        [HarmonyPostfix]
+        public static void Postfix(PlayerLegPad __instance, ref SerializedDictionary<PlayerLegPadState, Transform> ___positions)
+        {
+            if (___positions == null || !___positions.ContainsKey(PlayerLegPadState.Butterfly))
+            {
+                if (!_loggedButterflyNotFound)
+                {
+                    CompetitiveAdjustments.ConfigManager.Log("Leg pad butterfly position NOT found.");
+                    _loggedButterflyNotFound = true;
+                }
+                return;
+            }
+
+            Transform marker = ___positions[PlayerLegPadState.Butterfly];
+            if (marker == null) return;
+
+            Vector3 basePos = Track(marker);
+            Apply(marker, basePos, Offset);
+        }
+
+        private static Vector3 Track(Transform marker)
+        {
+            for (int i = 0; i < _entries.Count; i++)
+                if (ReferenceEquals(_entries[i].Marker, marker)) return _entries[i].BasePos;
+
+            var entry = new Entry { Marker = marker, BasePos = marker.localPosition };
+            _entries.Add(entry);
+            return entry.BasePos;
+        }
+
+        private static void Apply(Transform marker, Vector3 basePos, float offset)
+        {
+            // Sign by side so both pads widen outward instead of both sliding
+            // the same way across the crease.
+            float dir = basePos.x > 0f ? 1f : -1f;
+            marker.localPosition = new Vector3(basePos.x + dir * offset, basePos.y, basePos.z);
+        }
+
+        /// <summary>
+        /// Re-applies the current offset to every live marker.  A server knows its
+        /// value at load, but a client only learns it when the config sync lands,
+        /// which is normally after the pads have already run Awake.  Without this
+        /// the client would sit at offset 0 against a server that is not, which is
+        /// the same collider/visual divergence in the other direction.
+        /// </summary>
+        public static void ReapplyAll()
+        {
+            float offset = Offset;
+            for (int i = _entries.Count - 1; i >= 0; i--)
+            {
+                Transform marker = _entries[i].Marker;
+                if (marker == null)   // Unity null: the pad was destroyed
+                {
+                    _entries.RemoveAt(i);
+                    continue;
+                }
+                Apply(marker, _entries[i].BasePos, offset);
+            }
+        }
+    }
 }
 
 namespace CompetitiveCompanion
@@ -111,44 +214,6 @@ namespace CompetitiveCompanion.src
         }
     }
 
-    [HarmonyPatch(typeof(PlayerLegPad), "Awake")]
-    public class PlayerLegPadPatch
-    {
-        private static bool _loggedButterflyFound;
-        private static bool _loggedButterflyNotFound;
-
-        [HarmonyPostfix]
-        public static void Postfix(PlayerLegPad __instance, ref SerializedDictionary<PlayerLegPadState, Transform> ___positions)
-        {
-            if (___positions.ContainsKey(PlayerLegPadState.Butterfly))
-            {
-                if (!_loggedButterflyFound)
-                {
-                    PluginCore.Log("Leg pad butterfly position found");
-                    _loggedButterflyFound = true;
-                }
-                Transform legPadPosition = ___positions[PlayerLegPadState.Butterfly];
-                if (legPadPosition.localPosition.x > 0)
-                {
-                    legPadPosition.localPosition += new Vector3(PluginCore.config.ButterflyPadOffset, 0, 0);
-                }
-                else
-                {
-                    legPadPosition.localPosition -= new Vector3(PluginCore.config.ButterflyPadOffset, 0, 0);
-                }
-
-                ___positions[PlayerLegPadState.Butterfly] = legPadPosition;
-            }
-            else
-            {
-                if (!_loggedButterflyNotFound)
-                {
-                    PluginCore.Log("Leg pad butterfly position NOT found");
-                    _loggedButterflyNotFound = true;
-                }
-            }
-        }
-    }
 }
 
 namespace CompetitivePuckTweaks.src

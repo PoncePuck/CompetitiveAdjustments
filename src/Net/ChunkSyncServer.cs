@@ -265,24 +265,46 @@ namespace DashFallMod.Net
 
             try
             {
-                int est = 3 + ChunkRegistry.Count * 6 + 64;
+                // A slot mid-transition needs BOTH halves of its state or the
+                // joiner ends up permanently mis-decoding that object.  Sending
+                // only Current with the instant-apply sentinel does not defer the
+                // pending switch, it erases it (ApplyAnnounce clears HasPending on
+                // the sentinel), and nothing ever re-sends it: PromoteAllIfDue
+                // promotes server-side with no broadcast, and the next GatherPrefix
+                // sees target == active and skips.
+                //
+                // Expressing it as two entries keeps the wire format and the client
+                // read loop untouched: entry one sets Current and clears pending,
+                // entry two re-installs the deferred switch on top.
+                int pending = 0;
+                foreach (var kvp in ChunkRegistry.Snapshot())
+                    if (kvp.Value.HasPending) pending++;
+
+                int entries = ChunkRegistry.Count + pending;
+                int est = 3 + entries * 6 + 64;
                 var writer = new FastBufferWriter(est, Allocator.Temp, est * 4);
                 try
                 {
                     writer.WriteValueSafe((byte)1);
-                    writer.WriteValueSafe((ushort)ChunkRegistry.Count);
+                    writer.WriteValueSafe((ushort)entries);
                     foreach (var kvp in ChunkRegistry.Snapshot())
                     {
                         writer.WriteValueSafe(kvp.Key);
                         writer.WriteValueSafe(kvp.Value.Current.X);
                         writer.WriteValueSafe(kvp.Value.Current.Z);
                         writer.WriteValueSafe(ChunkRegistry.NoSwitchTickId);
+
+                        if (!kvp.Value.HasPending) continue;
+                        writer.WriteValueSafe(kvp.Key);
+                        writer.WriteValueSafe(kvp.Value.Pending.X);
+                        writer.WriteValueSafe(kvp.Value.Pending.Z);
+                        writer.WriteValueSafe(kvp.Value.PendingTickId);
                     }
                     cmm.SendNamedMessage(CmmName, clientId, writer, NetworkDelivery.Reliable);
                 }
                 finally { writer.Dispose(); }
                 CompetitiveAdjustments.ConfigManager.Log("ChunkSyncServer: sent bulk snapshot (" + ChunkRegistry.Count
-                          + " slots) to client " + clientId + ".");
+                          + " slots, " + pending + " mid-switch) to client " + clientId + ".");
             }
             catch (Exception ex)
             {

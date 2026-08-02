@@ -33,6 +33,8 @@ namespace DashFallMod
         private static bool _serverConfigLoaded;
 
         private static bool _runnerSpawned;
+        private static GameObject _runnerObject;
+        private static Vector3 _loggedGoalCompensation = Vector3.one;
 
         private static bool _hasSyncedTweaks;
 
@@ -137,6 +139,60 @@ namespace DashFallMod
             }
         }
 
+        // Every synced geometry number funnels through SetSyncedTweaks, so this is
+        // the one place worth sanitizing.  A NaN or infinite localScale does not
+        // just look wrong, it permanently poisons the Transform (and everything
+        // parented to it) for the rest of the process, and no later good value
+        // recovers it.  Bounds are deliberately generous: the job here is to reject
+        // values that break the session, not to second-guess an operator's rink.
+        private const float MinSyncedScale = 0.05f;
+        private const float MaxSyncedScale = 20f;
+        private const float MaxSyncedOffset = 500f;
+
+        // RefreshAll runs at 1 Hz forever, so a value that stays bad would otherwise
+        // reprint its warning every second for the rest of the session.
+        private static readonly HashSet<string> _sanitizeWarned = new HashSet<string>();
+
+        private static void WarnSanitizeOnce(string name, float bad, string replacement)
+        {
+            if (!_sanitizeWarned.Add(name)) return;
+            CompetitiveAdjustments.ConfigManager.LogWarning($"{name} was {bad}; using {replacement} instead.");
+        }
+
+        /// <param name="fromWire">
+        /// True when the value arrived over PPKB/GoalTweaks. Wire values come from a peer
+        /// we do not control and get the full range clamp. The operator's own config gets
+        /// only the NaN/Infinity rejection: those genuinely cannot be applied (a non-finite
+        /// localScale poisons the Transform and every child of it for the rest of the
+        /// process), but a merely large number is a choice we have no business overruling,
+        /// and quietly clamping it is how a rink changes size with no edit behind it.
+        /// </param>
+        private static float ResolveScale(bool fromWire, float v, float fallback, string name)
+        {
+            if (float.IsNaN(v) || float.IsInfinity(v))
+            {
+                WarnSanitizeOnce(name, v, fallback.ToString(CultureInfo.InvariantCulture));
+                return fallback;
+            }
+            if (!fromWire) return v;
+            if (v < MinSyncedScale) { WarnSanitizeOnce(name, v, MinSyncedScale.ToString(CultureInfo.InvariantCulture)); return MinSyncedScale; }
+            if (v > MaxSyncedScale) { WarnSanitizeOnce(name, v, MaxSyncedScale.ToString(CultureInfo.InvariantCulture)); return MaxSyncedScale; }
+            return v;
+        }
+
+        private static float ResolveOffset(bool fromWire, float v, string name)
+        {
+            if (float.IsNaN(v) || float.IsInfinity(v))
+            {
+                WarnSanitizeOnce(name, v, "0");
+                return 0f;
+            }
+            if (!fromWire) return v;
+            if (v < -MaxSyncedOffset) { WarnSanitizeOnce(name, v, (-MaxSyncedOffset).ToString(CultureInfo.InvariantCulture)); return -MaxSyncedOffset; }
+            if (v > MaxSyncedOffset) { WarnSanitizeOnce(name, v, MaxSyncedOffset.ToString(CultureInfo.InvariantCulture)); return MaxSyncedOffset; }
+            return v;
+        }
+
         public static void SetSyncedTweaks(
             bool enabled,
             float thicknessScale,
@@ -152,6 +208,14 @@ namespace DashFallMod
             float arenaOffsetY,
             float arenaOffsetZ)
         {
+            // Deliberately NOT sanitized here. This method also writes the values into
+            // ConfigManager.Config.CompAdjust, and on a listen-server host it runs against
+            // the host's OWN numbers: the host's client sends PPKB/Hello, the server
+            // answers itself, and NGO short-circuits that into a local handler call. So
+            // clamping here silently rewrote the operator's live config, changed their
+            // rink mid-session, and got persisted to disk the next time the admin editor
+            // saved. Sanitizing happens in RefreshAll instead, at the point of use, where
+            // it is also possible to tell an untrusted wire value from the operator's own.
             _hasSyncedTweaks = true;
             _forceNextRefresh = true;
             // The authority just stated the arena, so subscribers get told even if the
@@ -166,8 +230,20 @@ namespace DashFallMod
             _syncedGoalSizeScaleZ = scaleZ;
             _syncedGoalBackOffset = goalBackOffset;
             _syncedEnableArenaTweaks = arenaEnabled;
-            // Mirror into config so the UI server tab and minimap coroutine read the synced values
-            var ca = CompetitiveAdjustments.ConfigManager.Config?.CompAdjust;
+            // Mirror into config so the UI server tab and minimap coroutine read the synced
+            // values. CLIENT ONLY: there the config is just a display mirror of what the
+            // server said, so overwriting it is the point. On a server the config IS the
+            // authority, and this method still runs there because a listen host answers its
+            // own PPKB/Hello through NGO's loopback. Writing back then feeds the server its
+            // own broadcast: harmless when the values match, destructive when they do not,
+            // because the broadcast is built from CompAdjustEffective, which collapses to
+            // all-defaults when EnableCompAdjust is off. That would replace the operator's
+            // saved ArenaScale with 1.0 in the live config, and the next admin-editor save
+            // would persist the loss to disk.
+            var nmRole = NetworkManager.Singleton;
+            var ca = (nmRole != null && nmRole.IsServer)
+                ? null
+                : CompetitiveAdjustments.ConfigManager.Config?.CompAdjust;
             if (ca != null)
             {
                 ca.EnableGoalNetTweaks = enabled;
@@ -317,6 +393,9 @@ namespace DashFallMod
                 var go = new GameObject("GoalNetTweaksRunner");
                 UnityEngine.Object.DontDestroyOnLoad(go);
                 go.AddComponent<Runner>();
+                // Held so ShutdownRunner can destroy exactly this object rather than
+                // going looking for it, which would miss an inactive one.
+                _runnerObject = go;
                 _runnerSpawned = true;
             }
             catch (Exception ex)
@@ -336,6 +415,85 @@ namespace DashFallMod
                 CompetitiveAdjustments.ConfigManager.LogWarning(
                     "Could not subscribe to Event_Everyone_OnLevelSpawned: " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// Undoes EnsureRunner: hands the arena back to vanilla, drops the level-spawn
+        /// hook, and destroys the 1 Hz runner.
+        ///
+        /// The runner is DontDestroyOnLoad, so without this a disabled mod keeps a live
+        /// GameObject rewriting the rink once a second for the rest of the process. On a
+        /// CLIENT that self-corrects, because ServerBridge.Unhook clears the synced
+        /// tweaks and the next tick takes the clientUnsynced teardown branch. On a server
+        /// that branch is unreachable (it is gated on !IsServer), so the rink stayed
+        /// resized, the base renderers stayed hidden, and NetworkBoundsPatch kept the
+        /// chunked position encoding installed under its own Harmony id, which
+        /// DashFallGameMod's UnpatchSelf cannot remove. Every client joining after that
+        /// got no sync and ran vanilla encoding against a server that was not.
+        ///
+        /// Safe to call when the runner was never started.
+        /// </summary>
+        internal static void ShutdownRunner()
+        {
+            // Vanilla geometry first, while the statics this depends on are still intact.
+            //
+            // Goals BEFORE the arena, for two reasons. The goal pass is entirely separate
+            // from SyncArenaVisuals: goal transform scale/position, the 'Goal Post
+            // Collider' capsule radii and the frame part transforms are written by
+            // SyncGoals, and RestoreGoalBaselines is the only thing that puts them back.
+            // Restoring the rink alone left the server simulating oversized, displaced
+            // goals on a vanilla-sized rink, permanently, because the level-spawn
+            // listener that is the other route to RestoreGoalBaselines gets removed
+            // below. And the order matters: SyncArenaVisuals(false) calls
+            // ArenaProxyVisual.Clear(), which re-enables the batched frame renderers, so
+            // restoring afterwards would fight a proxy group that was just disposed.
+            try
+            {
+                RestoreGoalBaselines();
+                _goalBaseScale.Clear();
+                _goalBasePosition.Clear();
+                _capsuleBaseRadius.Clear();
+                _framePartBaseScale.Clear();
+                _framePartBasePosition.Clear();
+                _loggedFrameComposition.Clear();
+            }
+            catch (Exception ex)
+            {
+                CompetitiveAdjustments.ConfigManager.LogWarning("Goal teardown on shutdown failed: " + ex.Message);
+            }
+
+            try
+            {
+                SyncArenaVisuals(false, 1f, 1f, 1f, 0f, 0f, 0f);
+            }
+            catch (Exception ex)
+            {
+                CompetitiveAdjustments.ConfigManager.LogWarning("Arena teardown on shutdown failed: " + ex.Message);
+            }
+
+            try
+            {
+                EventManager.RemoveEventListener("Event_Everyone_OnLevelSpawned", OnLevelSpawnedResetBaselines);
+            }
+            catch (Exception ex)
+            {
+                CompetitiveAdjustments.ConfigManager.LogWarning(
+                    "Could not unsubscribe from Event_Everyone_OnLevelSpawned: " + ex.Message);
+            }
+
+            try
+            {
+                if (_runnerObject != null) UnityEngine.Object.Destroy(_runnerObject);
+            }
+            catch (Exception ex)
+            {
+                CompetitiveAdjustments.ConfigManager.LogWarning("GoalNetTweaks runner teardown failed: " + ex.Message);
+            }
+
+            _runnerObject = null;
+            _runnerSpawned = false;
+            _hasSyncedTweaks = false;
+            _forceNextRefresh = true;
         }
 
         private static void OnLevelSpawnedResetBaselines(Dictionary<string, object> _) => ResetCapturedBaselines();
@@ -492,21 +650,25 @@ namespace DashFallMod
             bool clientUnsynced = nm != null && !nm.IsServer && !_hasSyncedTweaks;
 
             bool enabled         = clientUnsynced ? false : (useSynced ? _syncedEnableGoalNetTweaks       : cfg.EnableGoalNetTweaks);
-            float thicknessScale = Mathf.Max(0.05f, useSynced ? _syncedGoalThicknessScale : cfg.GoalThicknessScale);
-            float scaleX         = Mathf.Max(0.1f,  useSynced ? _syncedGoalSizeScaleX        : cfg.GoalSizeScaleX);
-            float scaleY         = Mathf.Max(0.1f,  useSynced ? _syncedGoalSizeScaleY        : cfg.GoalSizeScaleY);
-            float scaleZ         = Mathf.Max(0.1f,  useSynced ? _syncedGoalSizeScaleZ        : cfg.GoalSizeScaleZ);
-            float goalBackOffset = useSynced ? _syncedGoalBackOffset : cfg.GoalBackOffset;
+            // Mathf.Max does NOT filter NaN: Mathf.Max(0.1f, NaN) returns NaN, because the
+            // comparison it is built on is false for NaN either way. Every one of these
+            // ends up in a Transform, where a single non-finite value is unrecoverable, so
+            // Resolve* runs first and the historical floors stay exactly as they were.
+            float thicknessScale = Mathf.Max(0.05f, ResolveScale(useSynced, useSynced ? _syncedGoalThicknessScale : cfg.GoalThicknessScale, 1f, "GoalThicknessScale"));
+            float scaleX         = Mathf.Max(0.1f,  ResolveScale(useSynced, useSynced ? _syncedGoalSizeScaleX     : cfg.GoalSizeScaleX,     1f, "GoalSizeScaleX"));
+            float scaleY         = Mathf.Max(0.1f,  ResolveScale(useSynced, useSynced ? _syncedGoalSizeScaleY     : cfg.GoalSizeScaleY,     1f, "GoalSizeScaleY"));
+            float scaleZ         = Mathf.Max(0.1f,  ResolveScale(useSynced, useSynced ? _syncedGoalSizeScaleZ     : cfg.GoalSizeScaleZ,     1f, "GoalSizeScaleZ"));
+            float goalBackOffset = ResolveOffset(useSynced, useSynced ? _syncedGoalBackOffset : cfg.GoalBackOffset, "GoalBackOffset");
             // Custom-frame alignment knobs. Host-config driven for live tuning; once the
             // correct values are found they are baked as the ServerConfig defaults so
             // clients (which read the same defaults) get them without extra sync wiring.
             bool arenaEnabled    = clientUnsynced ? false : (useSynced ? _syncedEnableArenaTweaks  : cfg.EnableArenaTweaks);
-            float arenaWidth     = Mathf.Max(0.1f, useSynced ? _syncedArenaScaleX : cfg.ArenaScaleX);   // world X
-            float arenaHeight    = Mathf.Max(0.1f, useSynced ? _syncedArenaScaleY : cfg.ArenaScaleY);   // world Y
-            float arenaLength    = Mathf.Max(0.1f, useSynced ? _syncedArenaScaleZ : cfg.ArenaScaleZ);   // world Z
-            float arenaOffsetX   = useSynced ? _syncedArenaOffsetX : cfg.ArenaOffsetX;
-            float arenaOffsetY   = useSynced ? _syncedArenaOffsetY : cfg.ArenaOffsetY;
-            float arenaOffsetZ   = useSynced ? _syncedArenaOffsetZ : cfg.ArenaOffsetZ;
+            float arenaWidth     = Mathf.Max(0.1f, ResolveScale(useSynced, useSynced ? _syncedArenaScaleX : cfg.ArenaScaleX, 1f, "ArenaScaleX"));   // world X
+            float arenaHeight    = Mathf.Max(0.1f, ResolveScale(useSynced, useSynced ? _syncedArenaScaleY : cfg.ArenaScaleY, 1f, "ArenaScaleY"));   // world Y
+            float arenaLength    = Mathf.Max(0.1f, ResolveScale(useSynced, useSynced ? _syncedArenaScaleZ : cfg.ArenaScaleZ, 1f, "ArenaScaleZ"));   // world Z
+            float arenaOffsetX   = ResolveOffset(useSynced, useSynced ? _syncedArenaOffsetX : cfg.ArenaOffsetX, "ArenaOffsetX");
+            float arenaOffsetY   = ResolveOffset(useSynced, useSynced ? _syncedArenaOffsetY : cfg.ArenaOffsetY, "ArenaOffsetY");
+            float arenaOffsetZ   = ResolveOffset(useSynced, useSynced ? _syncedArenaOffsetZ : cfg.ArenaOffsetZ, "ArenaOffsetZ");
             int currentHash = ComputeRefreshHash(
                 enabled, thicknessScale, scaleX, scaleY, scaleZ, goalBackOffset,
                 arenaEnabled, arenaWidth, arenaHeight, arenaLength,
@@ -559,7 +721,8 @@ namespace DashFallMod
                 try { DashFallMod.Client.DashFallClientRunner.RefreshMinimap(); }
                 catch (Exception ex) { CompetitiveAdjustments.ConfigManager.Dbg("Minimap refresh failed: " + ex.Message); }
 
-                SyncGoals(enabled, thicknessScale, scaleX, scaleY, scaleZ, goalBackOffset);
+                SyncGoals(enabled, thicknessScale, scaleX, scaleY, scaleZ, goalBackOffset,
+                          arenaEnabled, arenaWidth, arenaHeight, arenaLength);
             }
 
             // LAST, once the rink is already at its final size. This used to run FIRST,
@@ -648,10 +811,68 @@ namespace DashFallMod
         /// Idempotent, so a goal that respawned with the level picks its state back up on
         /// the next pass without needing the config to have changed.
         /// </summary>
+        /// <summary>
+        /// Expresses a world-axis scale in a transform's own local axes.
+        ///
+        /// The goals are yawed (the prefab sits at 180 on one end), so "divide local X by
+        /// the arena's world X" is only right when local X still points along world X. For
+        /// a 90 degree yaw, local X points along world Z and the components have to swap.
+        /// Projecting each local axis onto the world axes picks the correct component
+        /// automatically, and for the axis-aligned yaws these goals actually use it is
+        /// exact: one term is 1 and the rest are 0.
+        ///
+        /// A goal rotated off-axis cannot be compensated by a diagonal scale at all (it
+        /// would need a shear), so this degrades to the nearest axis-aligned answer rather
+        /// than pretending otherwise.
+        /// </summary>
+        private static Vector3 WorldScaleInLocalAxes(Quaternion localRotation, Vector3 worldScale)
+        {
+            Vector3 lx = localRotation * Vector3.right;
+            Vector3 ly = localRotation * Vector3.up;
+            Vector3 lz = localRotation * Vector3.forward;
+
+            return new Vector3(
+                Mathf.Abs(lx.x) * worldScale.x + Mathf.Abs(lx.y) * worldScale.y + Mathf.Abs(lx.z) * worldScale.z,
+                Mathf.Abs(ly.x) * worldScale.x + Mathf.Abs(ly.y) * worldScale.y + Mathf.Abs(ly.z) * worldScale.z,
+                Mathf.Abs(lz.x) * worldScale.x + Mathf.Abs(lz.y) * worldScale.y + Mathf.Abs(lz.z) * worldScale.z);
+        }
+
+        /// <param name="arenaEnabled">
+        /// Whether the level root is currently carrying the arena resize. The goals are
+        /// children of that root, so a resized rink multiplies their world size for free.
+        /// Their world POSITION should keep doing that (a bigger rink puts the goals
+        /// further apart, which is the point), but their SIZE should not: a regulation net
+        /// stays a regulation net on a 1.5x sheet. The arena factor is therefore divided
+        /// back out of the goal's local scale, leaving GoalSizeScaleX/Y/Z as the only thing
+        /// that resizes a goal.
+        /// </param>
+        // DO NOT try to force a Cloth rebuild by cycling the net GameObject with
+        // SetActive(false/true). It was tried on 2026-08-02 and it destroys the net:
+        // recreating the actor that way loses the constraint setup, so every vertex
+        // free-simulates and the mesh tears itself into a tangle around the frame. It also
+        // fired on the first sync after load, not just on a live edit, so it broke the
+        // normal case as well as the one it was aimed at.
+        //
+        // The problem it was aimed at is real but minor: Cloth captures its rest state
+        // when the actor is created, and an enabled-cycle reuses that actor, so a goal
+        // scale changed LIVE leaves the solver at the old proportions and the net skews.
+        // It is cosmetic, it only follows an admin edit, and the next level load clears it
+        // because the goals are rebuilt from scratch. Leave it alone unless a rebuild
+        // method is found that provably keeps the constraints.
+
         private static void SyncGoals(
             bool enabled, float thicknessScale,
-            float scaleX, float scaleY, float scaleZ, float goalBackOffset)
+            float scaleX, float scaleY, float scaleZ, float goalBackOffset,
+            bool arenaEnabled, float arenaWidth, float arenaHeight, float arenaLength)
         {
+            // The level root's multiplier over its own vanilla baseline is exactly
+            // (width, height, length): ScaleLevelDefaultRoot writes
+            // Vector3.Scale(baseline, (w,h,l)).
+            bool compensateArena = arenaEnabled
+                && _scaledLevelRoot != null
+                && !ApproxEqual(new Vector3(arenaWidth, arenaHeight, arenaLength), Vector3.one);
+            var arenaWorld = new Vector3(arenaWidth, arenaHeight, arenaLength);
+
             foreach (var goal in UnityEngine.Object.FindObjectsByType<Goal>(FindObjectsSortMode.None))
             {
                 if (goal == null) continue;
@@ -679,6 +900,33 @@ namespace DashFallMod
                 var targetScale = enabled
                     ? new Vector3(baseScale.x * scaleX, baseScale.y * scaleY, baseScale.z * scaleZ)
                     : baseScale;
+
+                // Divide the arena resize back out, so the goal keeps its vanilla world
+                // size (times GoalSizeScale) no matter how big the rink is. Only for goals
+                // actually parented under the root we scaled: a goal somewhere else in the
+                // scene never picked the factor up and must not be shrunk by it.
+                //
+                // This is scale only. localPosition is left alone on purpose, so the parent
+                // scale still carries the goals outward as the rink grows, which is what
+                // keeps them at the ends of the sheet.
+                if (compensateArena && t.root == _scaledLevelRoot)
+                {
+                    Vector3 local = WorldScaleInLocalAxes(t.localRotation, arenaWorld);
+                    if (Mathf.Abs(local.x) > 1e-4f) targetScale.x /= local.x;
+                    if (Mathf.Abs(local.y) > 1e-4f) targetScale.y /= local.y;
+                    if (Mathf.Abs(local.z) > 1e-4f) targetScale.z /= local.z;
+
+                    // Logged on change, because the whole compensation hangs on the goals
+                    // really being parented under the root we scale. If that ever stops
+                    // being true this line stops appearing, which is the difference
+                    // between "the feature is off" and "the feature silently does nothing".
+                    if (!ApproxEqual(_loggedGoalCompensation, local))
+                    {
+                        _loggedGoalCompensation = local;
+                        CompetitiveAdjustments.ConfigManager.Log(
+                            $"Goal size held at vanilla against arena scale {arenaWorld}: dividing goal local scale by {local}.");
+                    }
+                }
 
                 var targetPosition = basePosition;
                 if (enabled && !Mathf.Approximately(goalBackOffset, 0f))

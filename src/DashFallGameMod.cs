@@ -114,6 +114,12 @@ public sealed class DashFallGameMod
             UnityEngine.Object.Destroy(clientRunner.gameObject);
         }
 
+        // Pair for the EnsureRunner() in OnEnable. The arena runner is
+        // DontDestroyOnLoad and owns the level-spawn hook and the chunked position
+        // patches, so leaving it running meant a disabled mod kept resizing the rink
+        // and kept a non-vanilla wire encoding installed on a server.
+        try { GoalNetTweaks.ShutdownRunner(); } catch (Exception e) { ConfigManager.Dbg("GoalNetTweaks.ShutdownRunner failed: " + e.Message); }
+
         ConfigManager.Dbg("Disabled");
         return true;
     }

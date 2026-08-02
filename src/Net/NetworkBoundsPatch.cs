@@ -36,9 +36,10 @@ namespace DashFallMod.Net
         /// other runs patched, every networked position will appear scaled
         /// or offset wrong.
         /// </summary>
-        public static void EnsurePatched()
+        /// <returns>True when the prefixes are installed and chunked sync may run.</returns>
+        public static bool EnsurePatched()
         {
-            if (_patched) return;
+            if (_patched) return true;
 
             try
             {
@@ -51,7 +52,7 @@ namespace DashFallMod.Net
                 if (encode == null || decode == null)
                 {
                     Debug.LogWarning("[COMPADJUST] Could not find SynchronizedObjectManager encode/decode methods -- chunked sync disabled.");
-                    return;
+                    return false;
                 }
 
                 _harmony.Patch(encode,
@@ -61,10 +62,12 @@ namespace DashFallMod.Net
 
                 _patched = true;
                 CompetitiveAdjustments.ConfigManager.Log("NetworkBoundsPatch: full-replacement prefixes installed on EncodeSynchronizedObject / DecodeSynchronizedObjectData.");
+                return true;
             }
             catch (Exception ex)
             {
                 Debug.LogWarning("[COMPADJUST] Failed to apply network bounds patches: " + ex.Message);
+                return false;
             }
         }
 
@@ -76,7 +79,16 @@ namespace DashFallMod.Net
         /// </summary>
         public static void EnableOpenWorldPrecision()
         {
-            EnsurePatched();
+            // Never light up the chunked stack on top of a failed patch.  The
+            // encode/decode prefixes are what make chunk offsets symmetric; with
+            // them missing, turning ChunksActive on means this side applies chunk
+            // offsets the other side knows nothing about.  It also used to latch
+            // the feature on permanently, because Disable() bailed on !_patched.
+            if (!EnsurePatched())
+            {
+                Debug.LogWarning("[COMPADJUST] Chunked network sync NOT activated: encode/decode prefixes are not installed. Positions stay vanilla.");
+                return;
+            }
 
             ChunkRegistry.ActivePrecision = VANILLA_PRECISION;
             ChunkRegistry.ChunksActive = true;
@@ -106,7 +118,11 @@ namespace DashFallMod.Net
         /// <summary>Full teardown -- unpatches Harmony and clears all state.  Idempotent.</summary>
         public static void Disable()
         {
-            if (!_patched) return;
+            // Deliberately NOT gated on _patched alone.  Sub-systems and registry
+            // state can be live while _patched is false (a caller that enabled
+            // them despite a patch failure), and bailing here is what made the
+            // feature impossible to turn back off.  Everything below is idempotent.
+            if (!_patched && _harmony == null && !ChunkRegistry.ChunksActive) return;
 
             SyncObjectChunkPatches.Disable();
             ChunkSyncServer.Disable();

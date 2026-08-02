@@ -159,11 +159,35 @@ namespace CompetitiveCompanion
             PluginCore.config.PuckScaleZ = 1f;
         }
 
+        private static bool _warnedConfigSyncSize;
+
+        private static void WarnConfigSyncSizeOnce(int actualBytes)
+        {
+            if (_warnedConfigSyncSize) return;
+            _warnedConfigSyncSize = true;
+            Debug.LogWarning(
+                $"[{CompetitiveAdjustments.SharedConstants.MOD_NAME}] Ignoring config sync: payload is {actualBytes} bytes, " +
+                $"expected {CompetitivePuckTweaks.src.ConfigSyncPackage.WireSizeBytes}. The server is running a different " +
+                "CompetitiveAdjustments build. Puck scale, leg pad offset and the CompTweaks toggles will stay at local " +
+                "defaults here rather than be set from misread values. Update the mod on BOTH the server and the client.");
+        }
+
         private static void ReceiveMessage(ulong senderId, FastBufferReader messagePayload)
         {
             if (config == null)
             {
                 config = DashFallConfigLoader.ClientConfig ?? new DashFallClientConfig();
+            }
+
+            // Positional payload, no field names: a server on a different build
+            // does not produce a parse error, it produces plausible numbers read
+            // out of the wrong slots.  Refuse the whole message rather than apply
+            // a half-wrong config, and say plainly what the operator has to do.
+            int available = messagePayload.Length - messagePayload.Position;
+            if (available != CompetitivePuckTweaks.src.ConfigSyncPackage.WireSizeBytes)
+            {
+                WarnConfigSyncSizeOnce(available);
+                return;
             }
 
             try
@@ -176,6 +200,14 @@ namespace CompetitiveCompanion
                 config.PuckScaleZ = receivedPackage.PuckScaleZ;
                 config.ButterflyPadOffset = receivedPackage.LegPadOffset;
                 DashFallConfigLoader.SaveClientConfig(config);
+
+                // Mirror into CompTweaks as well: that is the field the leg pad
+                // patch reads on both roles, and it is what keeps the client's pad
+                // collider on the same marker position the server is using.
+                var ctMirror = CompetitiveAdjustments.ConfigManager.Config?.CompTweaks;
+                if (ctMirror != null) ctMirror.ButterflyPadOffset = receivedPackage.LegPadOffset;
+                // Pads that already ran Awake were positioned before this arrived.
+                DashFallMod.PlayerLegPadPatch.ReapplyAll();
 
                 // Unpack CompTweaks bool flags into the central config so the UI can display them
                 CompetitivePuckTweaks.src.ConfigSyncPackage.UnpackBools(

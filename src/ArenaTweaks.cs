@@ -65,13 +65,18 @@ namespace DashFallMod
             float offsetY,
             float offsetZ)
         {
-            var arenaRoot = FindArenaRoot();                                    // 'Rink'
-            Transform levelRoot = arenaRoot != null ? arenaRoot.root : null;    // 'Level Default'
-
             // Only EnableArenaTweaks tears the resize down. The visual mode must never do
             // it: a dedicated server resolves to Off because it renders nothing, and
             // treating that as "disabled" left the server on vanilla-sized collision while
             // every client played a resized rink.
+            //
+            // Checked BEFORE FindArenaRoot, which is the expensive part of this method: a
+            // full-scene FindObjectsByType<Transform> plus a .name read per hit, and
+            // Object.name allocates a fresh managed string every time. This runs off a
+            // PlayerBodyV2.OnNetworkPostSpawn postfix, so a faceoff that respawns twelve
+            // bodies used to pay twelve whole-scene scans in a single frame, even for
+            // users with arena tweaks turned off. The teardown below works from the
+            // cached _scaledLevelRoot and never needed the scan.
             if (!enabled)
             {
                 _proxyWanted = false;
@@ -82,6 +87,9 @@ namespace DashFallMod
                 RestoreAudioEnvironment();
                 return;
             }
+
+            var arenaRoot = FindArenaRoot();                                    // 'Rink'
+            Transform levelRoot = arenaRoot != null ? arenaRoot.root : null;    // 'Level Default'
 
             if (arenaRoot == null || levelRoot == null)
             {
@@ -573,7 +581,22 @@ namespace DashFallMod
                                      $"was already at {marker.BaseScale}, which is exactly this config's output, " +
                                      "so it is a pre-resized root rather than a vanilla one. Treating its baseline " +
                                      "as unit scale instead of compounding the resize.");
-                    marker.OverrideBaseline(Vector3.one, marker.BasePosition);
+                    // Correct BOTH halves of the baseline, not just the scale. A root
+                    // carrying our output scale is carrying our output position too,
+                    // because the same pass wrote both (targetPos = basePos + offset
+                    // below). Passing BasePosition through unchanged stopped the scale
+                    // compounding but started the OFFSET compounding: the root landed
+                    // at vanillaPos + 2*offset, colliders and spawns drifted one whole
+                    // offset away from the proxy-drawn visuals, and because the wrong
+                    // value was then baked into the marker it was permanent for that
+                    // root, including through RestoreLevelDefaultScale.
+                    //
+                    // Residual gap, unchanged by this fix: the detection is scale-based,
+                    // so a config with unit scale but a non-zero offset produces a
+                    // pre-resized root that is indistinguishable from a vanilla one.
+                    // Nothing in the transform can tell those apart; only the marker
+                    // can, and by definition this branch is the case with no marker.
+                    marker.OverrideBaseline(Vector3.one, marker.BasePosition - new Vector3(offsetX, offsetY, offsetZ));
                     DumpLevelRootCandidates(levelRoot);
                 }
                 else
