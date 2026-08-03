@@ -7,13 +7,36 @@ using UnityEngine;
 
 namespace DashFallMod.Client
 {
+    /// <summary>
+    /// Bounds for the client-side blade spin lock, in the same sbyte units the game's
+    /// BladeAngleInput uses.
+    /// </summary>
+    public static class FreeBladeSpinRange
+    {
+        // -128 is a valid sbyte but not a valid bound here: the handler casts the clamped
+        // buffer with (sbyte), and keeping the span symmetric means spinning the blade the
+        // same distance in both directions.
+        public const float Min = -127f;
+        public const float Max = 127f;
+
+        // What the fields used to default to, which is also vanilla's blade range. Kept so
+        // the loader can recognise an untouched old config and widen it; a file carrying
+        // this pair is a file where FreeBlade never worked.
+        public const float LegacyMin = -4f;
+        public const float LegacyMax = 4f;
+    }
+
     [Serializable]
     public class DashFallClientConfig
     {
         public bool EnableClientDebug = false;
         public bool ShowArenaClipBrushes = false; // debug: visualise arena collider meshes
         public bool ShowPlayerClipBrushes = false; // debug: visualise player collider meshes
-        public bool EnableMinimapTweaks = false;    // apply arena-scale minimap rescaling
+        // EnableMinimapTweaks is gone. The minimap is normalised by UIMinimap.Bounds, which
+        // tracks the arena scale, so on a resized rink the vanilla minimap is simply wrong:
+        // the dots sit at the wrong place on the map. There was never a reason to prefer
+        // that, and the toggle only ever produced a broken minimap on a modded server. The
+        // rescale is a no-op on a vanilla rink, so it is now unconditional.
         // How the resized rink's geometry is redrawn. "drawmesh" rescales the base
         // game's own statically batched surfaces; "batchroot" is the experimental
         // zero-draw-call variant; "off" leaves the visuals frozen at vanilla size while
@@ -45,16 +68,36 @@ namespace DashFallMod.Client
         // whether a shading artefact comes from the lightmap or from something else.
         // See src/ArenaProxyVisual.cs.
         public bool ProxyRestoreLightmaps = true;
-        public float PuckScale = 1f;
-        // Per-axis multipliers applied on top of PuckScale (server-synced).
+        // Puck size is SERVER state. These are the runtime slots the sync receive path
+        // writes (Companion.PluginCore.ReceiveMessage) and PuckPatch.GetSyncedPuckScaleVector
+        // reads back; they are not client preferences and have no settings row, because the
+        // server overwrites them on every sync.
         // Final localScale = PuckScale * (PuckScaleX, PuckScaleY, PuckScaleZ).
-        public float PuckScaleX = 1f;
-        public float PuckScaleY = 1f;
-        public float PuckScaleZ = 1f;
-        public float ButterflyPadOffset = 0f;
+        //
+        // [NonSerialized] is load-bearing, not tidiness. ReceiveMessage calls
+        // SaveClientConfig, so while these persisted, the last server's puck shape was
+        // written to disk and read back at the next launch BEFORE any sync arrived, and
+        // applied again when hosting. With the settings rows gone there is no longer any way
+        // to undo that from the UI. Keeping them session-only means an unsynced client is
+        // always a 1.0 puck. ResetPuckScale covers the same ground within a session.
+        [NonSerialized] public float PuckScale = 1f;
+        [NonSerialized] public float PuckScaleX = 1f;
+        [NonSerialized] public float PuckScaleY = 1f;
+        [NonSerialized] public float PuckScaleZ = 1f;
+        // ButterflyPadOffset was here and was write-only: the sync path set it and nothing
+        // ever read it back. The leg pad reads ConfigManager.CompTweaksEffective, which the
+        // same receive path mirrors two lines later, and that is the value the server and
+        // the client agree on.
         public bool FreeBladeSpinLockEnabled = true;
-        public float FreeBladeSpinMin = -4f;
-        public float FreeBladeSpinMax = 4f;
+        // The full sbyte span, which is what FreeBlade opens the blade up to. These used to
+        // default to -4/+4, and that is the "blade locks at max" report: -4/+4 is EXACTLY
+        // vanilla's minimumBladeAngle/maximumBladeAngle, so the client lock silently
+        // re-imposed the vanilla limit on top of the server's widened range and the blade
+        // climbed to 4 and stopped. With the lock on by default, every player hit it.
+        // The neutral value for a lock has to be the full range; narrowing is the opt-in.
+        // See FreeBladeSpinRange.Legacy* for the migration that repairs existing files.
+        public float FreeBladeSpinMin = FreeBladeSpinRange.Min;
+        public float FreeBladeSpinMax = FreeBladeSpinRange.Max;
         public bool EnableSprintShoulderTrail = true;
         public float SprintShoulderTrailTime = 0.45f;
         public float SprintShoulderTrailWidth = 0.08f;
@@ -223,7 +266,9 @@ namespace DashFallMod.Client
                 {
                     var json = File.ReadAllText(ClientConfigPath);
                     var cfg = JsonUtility.FromJson<DashFallClientConfig>(json);
-                    return cfg ?? new DashFallClientConfig();
+                    if (cfg == null) return new DashFallClientConfig();
+                    RepairFreeBladeSpinRange(cfg);
+                    return cfg;
                 }
             }
             catch (Exception e)
@@ -231,6 +276,47 @@ namespace DashFallMod.Client
                 Debug.LogWarning($"[COMPADJUST] Failed to load client config: {e.Message}");
             }
             return new DashFallClientConfig();
+        }
+
+        /// <summary>
+        /// Repairs a blade spin range loaded from disk.
+        ///
+        /// Two cases. A file still carrying the old -4/+4 default is one where the client
+        /// lock exactly reproduced vanilla's blade limit, cancelling FreeBlade and pinning
+        /// the blade at 4; changing the field default alone cannot fix that, because the
+        /// broken pair is already written out. And a crossed or out-of-range pair, which the
+        /// old two-row UI allowed, makes Mathf.Clamp collapse the range and freeze the blade
+        /// outright, so it is ordered rather than trusted.
+        ///
+        /// Widening -4/+4 does override a deliberate choice of exactly the vanilla range,
+        /// which is not distinguishable from the default. That is the right trade: it is the
+        /// value that makes the feature do nothing, and it is one drag of the range slider
+        /// to set again.
+        /// </summary>
+        private static void RepairFreeBladeSpinRange(DashFallClientConfig cfg)
+        {
+            if (Mathf.Approximately(cfg.FreeBladeSpinMin, FreeBladeSpinRange.LegacyMin)
+                && Mathf.Approximately(cfg.FreeBladeSpinMax, FreeBladeSpinRange.LegacyMax))
+            {
+                cfg.FreeBladeSpinMin = FreeBladeSpinRange.Min;
+                cfg.FreeBladeSpinMax = FreeBladeSpinRange.Max;
+                Debug.Log("[COMPADJUST] Free blade spin range was at the old -4/+4 default, which is vanilla's " +
+                          "own blade limit and cancelled FreeBlade. Widened to the full range.");
+                return;
+            }
+
+            float lo = Mathf.Clamp(Mathf.Min(cfg.FreeBladeSpinMin, cfg.FreeBladeSpinMax),
+                                   FreeBladeSpinRange.Min, FreeBladeSpinRange.Max);
+            float hi = Mathf.Clamp(Mathf.Max(cfg.FreeBladeSpinMin, cfg.FreeBladeSpinMax),
+                                   FreeBladeSpinRange.Min, FreeBladeSpinRange.Max);
+
+            if (!Mathf.Approximately(lo, cfg.FreeBladeSpinMin) || !Mathf.Approximately(hi, cfg.FreeBladeSpinMax))
+            {
+                Debug.LogWarning($"[COMPADJUST] Free blade spin range {cfg.FreeBladeSpinMin}..{cfg.FreeBladeSpinMax} " +
+                                 $"is crossed or out of range; using {lo}..{hi}.");
+                cfg.FreeBladeSpinMin = lo;
+                cfg.FreeBladeSpinMax = hi;
+            }
         }
 
         public static void SaveClientConfig(DashFallClientConfig config)

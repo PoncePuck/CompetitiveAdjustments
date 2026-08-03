@@ -198,7 +198,14 @@ namespace CompetitiveCompanion
                 config.PuckScaleX = receivedPackage.PuckScaleX;
                 config.PuckScaleY = receivedPackage.PuckScaleY;
                 config.PuckScaleZ = receivedPackage.PuckScaleZ;
-                config.ButterflyPadOffset = receivedPackage.LegPadOffset;
+                // The pad offset goes straight to the CompTweaks mirror below, which is the
+                // field the leg pad patch actually reads. It used to be copied onto the
+                // client config as well, where nothing ever read it back.
+                //
+                // The puck fields above are [NonSerialized], so this save persists the
+                // player's own preferences and deliberately does NOT persist the server's
+                // puck shape. Writing that to disk meant the next launch started with the
+                // last server's puck before any sync had happened.
                 DashFallConfigLoader.SaveClientConfig(config);
 
                 // Mirror into CompTweaks as well: that is the field the leg pad
