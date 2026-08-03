@@ -1233,12 +1233,59 @@ namespace DashFallMod
         // Expands the AudioReverbZone to cover the enlarged arena so audio
         // dampening still applies correctly with custom arena scale.
 
+        /// <summary>
+        /// Picks the reverb zone that belongs to the rink.
+        ///
+        /// FindObjectsOfTypeAll deliberately returns inactive objects and every loaded
+        /// scene, and the scene.IsValid() filter this used to rely on only removes assets
+        /// and prefabs. On a scene with more than one zone, or with a zone the game keeps
+        /// switched off on purpose, "the first one" was an arbitrary pick that could scale
+        /// the wrong object and leave the real one alone.
+        ///
+        /// Active zones are preferred over inactive ones, and among equals the one nearest
+        /// world origin wins, because the rink is centred there. The choice is logged with
+        /// the count so a wrong pick is visible in the log rather than inferred from the
+        /// audio sounding odd.
+        /// </summary>
+        private static AudioReverbZone ResolveArenaReverbZone()
+        {
+            var candidates = Resources.FindObjectsOfTypeAll<AudioReverbZone>()
+                .Where(z => z != null && z.gameObject.scene.IsValid())
+                .ToList();
+
+            if (candidates.Count == 0) return null;
+
+            AudioReverbZone best = null;
+            bool bestActive = false;
+            float bestDistance = float.MaxValue;
+
+            foreach (var zone in candidates)
+            {
+                bool active = zone.gameObject.activeInHierarchy;
+                float distance = zone.transform.position.sqrMagnitude;
+
+                if (best == null || (active && !bestActive) || (active == bestActive && distance < bestDistance))
+                {
+                    best = zone;
+                    bestActive = active;
+                    bestDistance = distance;
+                }
+            }
+
+            if (candidates.Count > 1)
+            {
+                CompetitiveAdjustments.ConfigManager.Log(
+                    $"Found {candidates.Count} AudioReverbZone(s); using '{DescribeTransformPath(best.transform)}' " +
+                    $"(active={bestActive}, {Mathf.Sqrt(bestDistance):F1} m from origin).");
+            }
+
+            return best;
+        }
+
         private static void HandleAudioEnvironment(
             float width, float height, float length, float offsetX, float offsetY, float offsetZ)
         {
-            if (_cachedReverbZone == null)
-                _cachedReverbZone = Resources.FindObjectsOfTypeAll<AudioReverbZone>()
-                    .FirstOrDefault(o => o.gameObject.scene.IsValid());
+            if (_cachedReverbZone == null) _cachedReverbZone = ResolveArenaReverbZone();
 
             var reverbZone = _cachedReverbZone;
             if (reverbZone == null) return;
