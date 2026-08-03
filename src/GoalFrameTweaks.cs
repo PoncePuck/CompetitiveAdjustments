@@ -1,5 +1,6 @@
 ﻿// GoalFrameTweaks.cs - make the base-game goal frame follow the goal, no imported mesh.
 
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -38,6 +39,279 @@ namespace DashFallMod
         private static readonly Dictionary<int, Vector3> _framePartBaseScale = new Dictionary<int, Vector3>();
         private static readonly Dictionary<int, Vector3> _framePartBasePosition = new Dictionary<int, Vector3>();
         private static readonly Dictionary<int, int> _loggedFrameComposition = new Dictionary<int, int>();
+
+        // ── Pivot-to-front measurement ───────────────────────────────────────────
+        // The goal's PIVOT rides the resized level root, but SyncGoals holds the goal at
+        // vanilla world SIZE, so the pivot-to-front vector does not scale while the painted
+        // goal line does. Correcting that needs the vanilla offset from the pivot to the
+        // plane of the posts, and it has to be a per-goal measurement rather than a
+        // constant so a custom-scenery goal with a different frame depth still lands right.
+        //
+        // A regulation net is about 1.83 m wide and 1.12 m deep, pivot to post plane about
+        // 1.15 m. The scene combined mesh that a batched MeshFilter points at is roughly
+        // 67 x 13 x 105, so these windows separate "a goal" from "the whole rink" with an
+        // order of magnitude to spare, and a measurement that lands outside them is thrown
+        // away rather than trusted.
+        private const float MinGoalFrontOffset      = 0.05f;
+        private const float MaxGoalFrontOffset      = 3f;
+        private const float MaxGoalFrameSpanX       = 8f;
+        private const float MaxGoalFrameSpanZ       = 5f;
+        private const float MaxGoalFrameCentreDrift = 3f;
+
+        /// <summary>
+        /// Half-width of the window the batched world-bounds cross-check allows, matching
+        /// the 0.5 m ArenaProxyVisual.VerifyWorldSpaceAssumption uses on these same
+        /// renderers. Applied as containment rather than centre distance, so a
+        /// multi-material renderer whose first slice legitimately sits off the full
+        /// renderer's centre is not rejected for it.
+        /// </summary>
+        private const float BatchedBoundsMargin = 0.5f;
+
+        private const int GoalFrameLayerUnresolved = -2;
+        private static int _goalFrameLayer = GoalFrameLayerUnresolved;
+        private static readonly HashSet<int> _loggedFrontOffsetFailure = new HashSet<int>();
+
+        /// <summary>
+        /// Signed world-Z offset from a goal's VANILLA WORLD pivot to the front-most plane
+        /// of its frame, measured once from bake-time geometry and cached on the goal's own
+        /// ArenaBaselineMarker.
+        ///
+        /// Returns false when it cannot be measured, and the caller must then leave the goal
+        /// exactly where today's code puts it: a guessed offset moves the net to a wrong
+        /// place, which is worse than the misalignment it was meant to fix. A failure is
+        /// deliberately NOT cached, so the next pass retries for free once the scene is
+        /// fully built.
+        /// </summary>
+        internal static bool TryGetGoalFrontOffsetZ(Goal goal, ArenaBaselineMarker marker, out float frontOffsetZ)
+        {
+            frontOffsetZ = 0f;
+            if (goal == null || marker == null) return false;
+            if (marker.TryGetGoalFrontOffsetZ(out frontOffsetZ)) return true;
+
+            if (!TryMeasureGoalFrontOffsetZ(goal, marker, out frontOffsetZ))
+            {
+                frontOffsetZ = 0f;
+                if (_loggedFrontOffsetFailure.Add(goal.transform.GetInstanceID()))
+                {
+                    CompetitiveAdjustments.ConfigManager.LogWarning(
+                        $"Could not measure the front plane of '{goal.name}'s frame, so the goal keeps its " +
+                        "vanilla pivot placement. On a resized rink the mouth of the net may sit off the " +
+                        "painted goal line.");
+                }
+                return false;
+            }
+
+            marker.SetGoalFrontOffsetZ(frontOffsetZ);
+            CompetitiveAdjustments.ConfigManager.Log(
+                $"Goal '{goal.name}' pivot-to-front offset measured at {frontOffsetZ:F4} m on world Z.");
+            return true;
+        }
+
+        /// <summary>
+        /// The goal's world matrix as its frame was BAKED, rebuilt from vanilla baselines
+        /// rather than read live.
+        ///
+        /// It has to be rebuilt because SyncGoals runs after ScaleLevelDefaultRoot, so by
+        /// the time anything here is measured the live chain already carries the arena
+        /// resize and, on a later pass, our own pin. This mod writes exactly two kinds of
+        /// transform above a frame renderer, the level root and the goal roots, and both
+        /// carry an ArenaBaselineMarker. Substituting the marker wherever there is one and
+        /// reading the live local TRS everywhere else therefore reproduces the untouched
+        /// scene exactly, at any arena scale and after any number of pins.
+        ///
+        /// Doing it this way is also what lets the offset be a true WORLD quantity without
+        /// assuming the level root sits at the origin with unit scale. It does here (logged:
+        /// baseline scale (1,1,1), pos (0,0,0)), but comparing a world-space bounds against
+        /// a parent-LOCAL pivot would silently return root-local units the moment that
+        /// stopped being true, and every sanity window below would still pass.
+        ///
+        /// The goal's own rotation is read live because we never write it.
+        /// </summary>
+        private static Matrix4x4 BakeTimeWorldMatrix(Transform goalRoot, ArenaBaselineMarker goalMarker)
+        {
+            Matrix4x4 m = Matrix4x4.TRS(goalMarker.BasePosition, goalRoot.localRotation, goalMarker.BaseScale);
+
+            for (Transform ancestor = goalRoot.parent; ancestor != null; ancestor = ancestor.parent)
+            {
+                var marker = ancestor.GetComponent<ArenaBaselineMarker>();
+                Vector3 position = marker != null ? marker.BasePosition : ancestor.localPosition;
+                Vector3 scale    = marker != null ? marker.BaseScale    : ancestor.localScale;
+                m = Matrix4x4.TRS(position, ancestor.localRotation, scale) * m;
+            }
+
+            return m;
+        }
+
+        private static bool TryMeasureGoalFrontOffsetZ(Goal goal, ArenaBaselineMarker marker, out float frontOffsetZ)
+        {
+            frontOffsetZ = 0f;
+
+            Transform goalRoot = goal.transform;
+            Matrix4x4 bakedWorld = BakeTimeWorldMatrix(goalRoot, marker);
+            Vector3 pivotWorld = bakedWorld.GetColumn(3);
+
+            // A goal sitting on the centre line has no determinable mouth direction. Reject
+            // rather than guess it from the rotation: a wrong sign here moves the net the
+            // wrong way by twice the error.
+            if (Mathf.Abs(pivotWorld.z) < 0.001f) return false;
+
+            if (_goalFrameLayer == GoalFrameLayerUnresolved)
+            {
+                // Resolved by name and logged, so the layer index cannot rot into a comment
+                // that lies. b1117 has it at 18.
+                _goalFrameLayer = LayerMask.NameToLayer("Goal Frame");
+                CompetitiveAdjustments.ConfigManager.Log($"'Goal Frame' physics layer resolved to {_goalFrameLayer}.");
+            }
+
+            Transform netRoot = goal.NetCloth != null ? goal.NetCloth.transform : null;
+
+            bool have = false;
+            Bounds frame = default;
+
+            // Pass 0 takes the dedicated 'Goal Frame' layer. Pass 1 is the fallback for a
+            // scene that does not use it, and it matches on the object name rather than
+            // unioning every renderer under the goal: a union of unknowns can stretch past
+            // the post plane while still clearing every window below. The b1117 batched
+            // renderer is literally named 'Goal Frame' (see the composition log), so the two
+            // passes target the same object by two independent signals.
+            for (int pass = 0; pass < 2 && !have; pass++)
+            {
+                if (pass == 0 && _goalFrameLayer < 0) continue;
+
+                foreach (var renderer in goalRoot.GetComponentsInChildren<MeshRenderer>(true))
+                {
+                    if (renderer == null) continue;
+
+                    Transform t = renderer.transform;
+                    if (t == goalRoot) continue;
+                    if (netRoot != null && (t == netRoot || t.IsChildOf(netRoot))) continue;
+
+                    // Our own collider debug brushes, which SyncArenaColliderDebugBrush
+                    // parents under EVERY collider in the level root and gives the
+                    // collider's own layer. They are stand-in cubes sized to a collider, not
+                    // frame geometry, and a goal collider on the frame layer would hand pass
+                    // 0 a box that inflates the union. Worse than the usual false positive,
+                    // because the resulting offset is then cached on the marker for the rest
+                    // of the session. LogArenaColliderHeights skips them by the same name.
+                    if (string.Equals(renderer.gameObject.name, "__clipBrush", StringComparison.Ordinal)) continue;
+
+                    bool accept = pass == 0
+                        ? renderer.gameObject.layer == _goalFrameLayer
+                        : renderer.name != null && renderer.name.IndexOf("frame", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (!accept) continue;
+
+                    if (!TryGetBakeTimeWorldBounds(renderer, goalRoot, bakedWorld, out Bounds bounds)) continue;
+
+                    if (!have) { frame = bounds; have = true; }
+                    else frame.Encapsulate(bounds);
+                }
+            }
+
+            if (!have) return false;
+
+            Vector3 size = frame.size;
+            if (size.x > MaxGoalFrameSpanX || size.z > MaxGoalFrameSpanZ) return false;
+            if (Mathf.Abs(frame.center.z - pivotWorld.z) > MaxGoalFrameCentreDrift) return false;
+
+            // Both goals face centre ice, so the front is whichever extreme is nearer z = 0.
+            float offset = (pivotWorld.z > 0f ? frame.min.z : frame.max.z) - pivotWorld.z;
+
+            if (Mathf.Sign(offset) == Mathf.Sign(pivotWorld.z)) return false;   // mouth must face centre ice
+
+            float magnitude = Mathf.Abs(offset);
+            if (magnitude < MinGoalFrontOffset || magnitude > MaxGoalFrontOffset) return false;
+
+            frontOffsetZ = offset;
+            return true;
+        }
+
+        /// <summary>
+        /// One frame renderer's AABB in BAKE-TIME WORLD space.
+        ///
+        /// Batched: the vertices live in the scene combined mesh already in world space and
+        /// the transform is ignored at draw time, which is the whole reason this file exists.
+        /// So Renderer.bounds IS the bake-time world AABB, and nothing we write to any
+        /// transform can move it. ArenaProxyVisual.ResolveWorldBounds treats it as exactly
+        /// that on these same renderers. The immutable slice metadata is used as the
+        /// world-space assertion, not as the value.
+        ///
+        /// MeshFilter.sharedMesh.bounds must NOT be used on a batched renderer: batching
+        /// repoints the filter at the whole combined mesh. That is the same trap that keeps
+        /// the rod-aspect test above permanently dead, which is why the composition log
+        /// reports "0 rod-shaped" for a frame that visibly has posts.
+        ///
+        /// Unbatched: mesh-local bounds pushed through the bake-time world matrix and the
+        /// chain up to the goal root, with the thickness pass's captured baselines
+        /// substituted for any node it has written.
+        /// </summary>
+        private static bool TryGetBakeTimeWorldBounds(
+            MeshRenderer renderer, Transform goalRoot, Matrix4x4 bakedWorld, out Bounds bounds)
+        {
+            bounds = default;
+
+            var filter = renderer.GetComponent<MeshFilter>();
+            var mesh = filter != null ? filter.sharedMesh : null;
+            if (mesh == null) return false;
+
+            if (renderer.isPartOfStaticBatch)
+            {
+                // "Bounds are the bake-time world AABB" holds only while the vertices are
+                // baked in WORLD space. A renderer carrying a static batch root has them
+                // baked in that root's space instead, so its bounds follow the root, and
+                // ArenaVisualMode 'batchroot' points exactly these renderers at a root that
+                // carries the whole arena delta. Refusing to measure costs the pin on that
+                // one client-local mode; measuring anyway would cache an offset polluted by
+                // the arena scale we are trying to correct for.
+                if (ArenaProxyVisual.HasStaticBatchRoot(renderer)) return false;
+
+                bounds = renderer.bounds;
+                if (bounds.size.sqrMagnitude <= 1e-8f) return false;
+
+                int first = renderer.subMeshStartIndex;
+                if (first < 0 || first >= mesh.subMeshCount) return false;
+
+                Vector3 sliceCentre;
+                try { sliceCentre = mesh.GetSubMesh(first).bounds.center; }
+                catch { return false; }
+
+                Bounds check = bounds;
+                check.Expand(2f * BatchedBoundsMargin);   // Expand() takes total size, so this is 0.5 m per side
+                return check.Contains(sliceCentre);
+            }
+
+            Matrix4x4 relative = Matrix4x4.identity;
+            for (Transform t = renderer.transform; t != null && t != goalRoot; t = t.parent)
+                relative = BaselineLocalTRS(t) * relative;
+
+            bounds = TransformBounds(bakedWorld * relative, mesh.bounds);
+            return bounds.size.sqrMagnitude > 1e-8f;
+        }
+
+        /// <summary>
+        /// A frame part's local TRS as it was before the thickness pass touched it. Only rod
+        /// parts are ever written, and only their scale and position, so anything absent
+        /// from those dictionaries is still carrying its authored value.
+        /// </summary>
+        private static Matrix4x4 BaselineLocalTRS(Transform t)
+        {
+            int id = t.GetInstanceID();
+            Vector3 position = _framePartBasePosition.TryGetValue(id, out Vector3 p) ? p : t.localPosition;
+            Vector3 scale    = _framePartBaseScale.TryGetValue(id, out Vector3 s)    ? s : t.localScale;
+            return Matrix4x4.TRS(position, t.localRotation, scale);
+        }
+
+        /// <summary>Local-space bounds through an arbitrary matrix, as an axis-aligned box.</summary>
+        private static Bounds TransformBounds(Matrix4x4 m, Bounds local)
+        {
+            Vector3 centre = m.MultiplyPoint3x4(local.center);
+            Vector3 e = local.extents;
+            var extents = new Vector3(
+                Mathf.Abs(m.m00) * e.x + Mathf.Abs(m.m01) * e.y + Mathf.Abs(m.m02) * e.z,
+                Mathf.Abs(m.m10) * e.x + Mathf.Abs(m.m11) * e.y + Mathf.Abs(m.m12) * e.z,
+                Mathf.Abs(m.m20) * e.x + Mathf.Abs(m.m21) * e.y + Mathf.Abs(m.m22) * e.z);
+
+            return new Bounds(centre, extents * 2f);
+        }
 
         /// <summary>
         /// Drives the base game's own goal frame to match the goal's current transform,

@@ -37,8 +37,38 @@ namespace DashFallMod
         [SerializeField] private Vector3 _baseScale = Vector3.one;
         [SerializeField] private Vector3 _basePosition = Vector3.zero;
 
+        [SerializeField] private bool _hasGoalFrontOffsetZ;
+        [SerializeField] private float _goalFrontOffsetZ;
+
         internal Vector3 BaseScale => _baseScale;
         internal Vector3 BasePosition => _basePosition;
+
+        /// <summary>
+        /// Signed WORLD-Z distance from this goal's VANILLA world pivot to the front-most
+        /// plane of its frame, the plane the posts stand on. Negative for the goal at +Z and
+        /// positive for the goal at -Z, because both mouths face centre ice.
+        ///
+        /// It is a WORLD quantity, measured against the goal's rebuilt bake-time world
+        /// matrix rather than against BasePosition, which is parent-local and only agrees
+        /// with world while the level root sits at origin with unit scale.
+        ///
+        /// It lives here for the third reason in the class doc above: a goal cloned while we
+        /// had it pinned off its vanilla position is indistinguishable from a vanilla one by
+        /// inspection, so a re-measurement would fold our own displacement into the
+        /// "vanilla" offset. A clone carries the marker and never gets re-measured. Measured
+        /// FROM the baseline, never written back into it.
+        /// </summary>
+        internal bool TryGetGoalFrontOffsetZ(out float value)
+        {
+            value = _goalFrontOffsetZ;
+            return _hasGoalFrontOffsetZ;
+        }
+
+        internal void SetGoalFrontOffsetZ(float value)
+        {
+            _goalFrontOffsetZ = value;
+            _hasGoalFrontOffsetZ = true;
+        }
 
         /// <summary>
         /// Reads the object's vanilla transform, recording it on first sight. Returns the

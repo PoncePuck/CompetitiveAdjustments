@@ -647,6 +647,14 @@ namespace DashFallMod
             return _batchRootProperty;
         }
 
+        /// <summary>
+        /// True when a renderer's batched vertices are baked in some root's space rather
+        /// than world space, which makes Renderer.bounds follow that root instead of
+        /// standing still. Anything reading batched bounds as a fixed world quantity has to
+        /// check this first; 'batchroot' mode sets exactly this property.
+        /// </summary>
+        internal static bool HasStaticBatchRoot(Renderer renderer) => GetBatchRoot(renderer) != null;
+
         private static Transform GetBatchRoot(Renderer renderer)
         {
             var prop = BatchRootProperty();

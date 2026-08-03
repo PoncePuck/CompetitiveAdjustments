@@ -456,6 +456,7 @@ namespace DashFallMod
                 _framePartBaseScale.Clear();
                 _framePartBasePosition.Clear();
                 _loggedFrameComposition.Clear();
+                ResetGoalFrontPinLogState();
             }
             catch (Exception ex)
             {
@@ -532,6 +533,7 @@ namespace DashFallMod
             _framePartBaseScale.Clear();
             _framePartBasePosition.Clear();
             _loggedFrameComposition.Clear();
+            ResetGoalFrontPinLogState();
 
             ResetLevelRootBaseline();
 
@@ -837,6 +839,166 @@ namespace DashFallMod
                 Mathf.Abs(lz.x) * worldScale.x + Mathf.Abs(lz.y) * worldScale.y + Mathf.Abs(lz.z) * worldScale.z);
         }
 
+        /// <summary>
+        /// The inverse question to WorldScaleInLocalAxes: given a scale authored in a
+        /// transform's LOCAL axes, as GoalSizeScaleX/Y/Z are, what factor does it apply
+        /// along each WORLD axis?
+        ///
+        /// The goal-line correction is derived in world units while the goal's size knobs
+        /// are local, and the two goals differ by a 180 degree yaw, so the two have to be
+        /// related properly. For the axis-aligned yaws these goals actually use this is
+        /// exact and reduces to the identity map; the general form keeps a 90 degree yaw
+        /// honest instead of silently reading depth off the width knob.
+        /// </summary>
+        private static Vector3 LocalScaleInWorldAxes(Quaternion localRotation, Vector3 localScale)
+        {
+            Vector3 lx = localRotation * Vector3.right;
+            Vector3 ly = localRotation * Vector3.up;
+            Vector3 lz = localRotation * Vector3.forward;
+
+            return new Vector3(
+                Mathf.Abs(lx.x) * localScale.x + Mathf.Abs(ly.x) * localScale.y + Mathf.Abs(lz.x) * localScale.z,
+                Mathf.Abs(lx.y) * localScale.x + Mathf.Abs(ly.y) * localScale.y + Mathf.Abs(lz.y) * localScale.z,
+                Mathf.Abs(lx.z) * localScale.x + Mathf.Abs(ly.z) * localScale.y + Mathf.Abs(lz.z) * localScale.z);
+        }
+
+        private static readonly Dictionary<int, int> _loggedGoalFrontPin = new Dictionary<int, int>();
+
+        /// <summary>
+        /// Re-reported whenever the numbers behind the pin change, because the difference
+        /// between "the pin ran and moved the net 0.58 m" and "the pin silently measured
+        /// nothing" is invisible in game on a rink you have not seen at vanilla scale.
+        /// </summary>
+        private static void LogGoalFrontPinOnce(
+            int rootId, string name, float frontOffsetZ, float sZ, float gZ, float worldShiftZ, float localShiftZ)
+        {
+            int signature;
+            unchecked { signature = frontOffsetZ.GetHashCode() * 397 ^ sZ.GetHashCode() * 31 ^ gZ.GetHashCode(); }
+            if (_loggedGoalFrontPin.TryGetValue(rootId, out int previous) && previous == signature) return;
+            _loggedGoalFrontPin[rootId] = signature;
+
+            CompetitiveAdjustments.ConfigManager.Log(
+                $"Goal '{name}' front pinned to the goal line: f={frontOffsetZ:F4} arenaZ={sZ:F3} goalDepth={gZ:F3}" +
+                $" -> world shift {worldShiftZ:F4} m, local shift {localShiftZ:F4} m.");
+        }
+
+        private static readonly HashSet<int> _loggedGoalPinSkipped = new HashSet<int>();
+
+        /// <summary>
+        /// Says so when the pin was wanted but could not be expressed, so the case reads
+        /// differently in the log from "the pin ran" and from "the pin was never needed".
+        /// </summary>
+        private static void LogGoalPinSkippedOnce(int rootId, string name, Transform parent)
+        {
+            if (!_loggedGoalPinSkipped.Add(rootId)) return;
+
+            CompetitiveAdjustments.ConfigManager.LogWarning(
+                $"Goal '{name}' could not be pinned to the goal line: parent '{(parent != null ? parent.name : "none")}' " +
+                $"has a degenerate world scale {(parent != null ? parent.lossyScale.ToString() : "n/a")}, so there is no " +
+                "usable world-to-local map. The goal keeps its vanilla pivot placement.");
+        }
+
+        private static bool _warnedLevelRootBaselineOffset;
+
+        /// <summary>
+        /// The pin's derivation cancels ArenaOffset exactly, but not the level root's own
+        /// vanilla POSITION: the painted ice is proxy-drawn as world*scale + offset, about
+        /// world origin, while the colliders follow the hierarchy and scale about the root.
+        /// Those two maps differ by basePos*(scale - 1), so on a scene where the root's
+        /// vanilla position is non-zero the paint and the collision already disagree with
+        /// each other and no single goal position is flush with both.
+        ///
+        /// It is (0,0,0) on this game, which is why the pin is correct as written. This says
+        /// so out loud if a scene ever arrives where it is not, rather than leaving a silent
+        /// assumption to be rediscovered from a misaligned net.
+        /// </summary>
+        private static void WarnLevelRootBaselineOffsetOnce()
+        {
+            if (_warnedLevelRootBaselineOffset) return;
+            if (Mathf.Abs(_levelRootBasePos.x) < 0.001f
+                && Mathf.Abs(_levelRootBasePos.y) < 0.001f
+                && Mathf.Abs(_levelRootBasePos.z) < 0.001f) return;
+
+            _warnedLevelRootBaselineOffset = true;
+            CompetitiveAdjustments.ConfigManager.LogWarning(
+                $"'Level Default' has a non-zero vanilla position {_levelRootBasePos}. The painted ice is " +
+                "proxy-drawn about world origin while colliders follow the hierarchy, so paint and collision " +
+                "already differ by that position times (scale - 1) on this scene. The goal is pinned to the " +
+                "paint; expect a residual gap against the collision geometry.");
+        }
+
+        /// <summary>
+        /// Drops the pin's log-suppression state alongside the transform baselines.
+        ///
+        /// Only the log state. The measured offset itself lives on each goal's
+        /// ArenaBaselineMarker and is vanilla-relative, so it must survive exactly as
+        /// BasePosition does, and _goalFrameLayer is a process-wide constant.
+        /// </summary>
+        private static void ResetGoalFrontPinLogState()
+        {
+            _loggedGoalFrontPin.Clear();
+            _loggedGoalPinSkipped.Clear();
+            _loggedFrontOffsetFailure.Clear();
+            _loggedGoalTriggerParentage.Clear();
+            _warnedLevelRootBaselineOffset = false;
+        }
+
+        private static readonly HashSet<int> _loggedGoalTriggerParentage = new HashSet<int>();
+
+        /// <summary>
+        /// Reports where the scoring volume sits relative to the goal, once per goal.
+        ///
+        /// Puck's GoalTrigger holds a private serialized Goal reference and resolves nothing
+        /// at runtime, so parentage is scene data that cannot be read off the assembly, and
+        /// the pin's justification is precisely that the drawn net and the scoring volume
+        /// agree. If the trigger is a CHILD it translates rigidly with the pin and keeps its
+        /// exact vanilla relationship to the post plane, which is the intent. If it is not,
+        /// it rides the level root instead and its volume is stretched by the arena scale
+        /// with nothing compensating it, which would need its own fix rather than a silent
+        /// translation here. One log line answers it on the first run.
+        /// </summary>
+        private static void LogGoalTriggerParentageOnce(Goal goal)
+        {
+            if (goal == null || _loggedGoalTriggerParentage.Contains(goal.transform.GetInstanceID())) return;
+
+            try
+            {
+                Transform goalRoot = goal.transform;
+                int reported = 0;
+
+                // Inactive included: a trigger disabled at the moment we look is exactly the
+                // case where silence would be misread as "no trigger exists".
+                foreach (var trigger in UnityEngine.Object.FindObjectsByType<GoalTrigger>(
+                             FindObjectsInactive.Include, FindObjectsSortMode.None))
+                {
+                    if (trigger == null) continue;
+
+                    Transform tt = trigger.transform;
+                    bool child = tt == goalRoot || tt.IsChildOf(goalRoot);
+                    if (!child && Vector3.Distance(tt.position, goalRoot.position) > 5f) continue;
+
+                    reported++;
+                    var collider = trigger.GetComponent<Collider>();
+                    CompetitiveAdjustments.ConfigManager.Log(
+                        $"Goal trigger '{tt.name}' is {(child ? "a CHILD of" : "NOT a child of")} goal '{goal.name}': " +
+                        $"world {tt.position} (post-pin), root '{tt.root.name}', bounds " +
+                        (collider != null ? collider.bounds.ToString() : "none") + ".");
+                }
+
+                if (reported == 0)
+                {
+                    CompetitiveAdjustments.ConfigManager.Log(
+                        $"No GoalTrigger found on or within 5 m of goal '{goal.name}'. Scoring does not ride this " +
+                        "goal's transform, so the goal-line pin does not move it.");
+                }
+
+                // Only after something was actually said, so a scan that ran too early
+                // retries on the next pass instead of latching silence.
+                _loggedGoalTriggerParentage.Add(goalRoot.GetInstanceID());
+            }
+            catch { }
+        }
+
         /// <param name="arenaEnabled">
         /// Whether the level root is currently carrying the arena resize. The goals are
         /// children of that root, so a resized rink multiplies their world size for free.
@@ -928,13 +1090,87 @@ namespace DashFallMod
                     }
                 }
 
-                var targetPosition = basePosition;
+                // ── Pin the mouth of the net to the painted goal line ─────────────
+                // The line is baked into the ice, which the transform resize cannot move at
+                // all, so it is redrawn by the proxy as world*scale + offset. A front plane
+                // at vanilla world Z F therefore lands at F*s.
+                //
+                // The pivot lands at p*s, but the pivot-to-front vector f does NOT scale,
+                // because the block above deliberately holds the goal at vanilla world size
+                // times GoalSizeScale. So the mouth ends up at p*s + f*g while the paint is
+                // at (p + f)*s, and the gap is exactly f*(s - g) world units. That is the
+                // whole bug: the goal SPAWN position tracks the rink correctly and the front
+                // of the frame does not.
+                //
+                // ArenaOffset translates the paint and the goal alike and cancels out. The
+                // level root's vanilla POSITION does not cancel, because the paint scales
+                // about world origin while the colliders scale about the root; it is
+                // (0,0,0) on this game, and WarnLevelRootBaselineOffsetOnce says so out loud
+                // rather than letting the assumption sit silent.
+                Vector3 flushLocal = Vector3.zero;
+                {
+                    bool onScaledRoot = compensateArena && t.root == _scaledLevelRoot;
+                    float sZ = onScaledRoot ? arenaLength : 1f;
+                    float gZ = enabled
+                        ? LocalScaleInWorldAxes(t.localRotation, new Vector3(scaleX, scaleY, scaleZ)).z
+                        : 1f;
+
+                    // Exactly zero when the rink and the goal are both at vanilla depth,
+                    // which is the safety property that matters: on default config the
+                    // measurement is never even attempted and targetPosition below is
+                    // bit-identical to what it was before this block existed.
+                    if (!Mathf.Approximately(sZ, gZ)
+                        && TryGetGoalFrontOffsetZ(goal, goalMarker, out float frontOffsetZ))
+                    {
+                        if (onScaledRoot) WarnLevelRootBaselineOffsetOnce();
+
+                        var worldShift = new Vector3(0f, 0f, frontOffsetZ * (sZ - gZ));
+
+                        // localPosition is parent space. InverseTransformVector rather than a
+                        // scalar divide, so an intermediate parent between the goal and the
+                        // level root (which the t.root test above permits) is handled too.
+                        Transform parent = t.parent;
+                        bool applied = true;
+                        if (parent == null)
+                        {
+                            flushLocal = worldShift;
+                        }
+                        else
+                        {
+                            Vector3 parentScale = parent.lossyScale;
+                            if (Mathf.Abs(parentScale.x) > 1e-4f
+                                && Mathf.Abs(parentScale.y) > 1e-4f
+                                && Mathf.Abs(parentScale.z) > 1e-4f)
+                            {
+                                flushLocal = parent.InverseTransformVector(worldShift);
+                            }
+                            else
+                            {
+                                // Degenerate parent scale: no usable world-to-local map, so
+                                // the goal stays where it is rather than being divided by
+                                // something near zero.
+                                applied = false;
+                            }
+                        }
+
+                        if (applied)
+                            LogGoalFrontPinOnce(rootId, goal.name, frontOffsetZ, sZ, gZ, worldShift.z, flushLocal.z);
+                        else
+                            LogGoalPinSkippedOnce(rootId, goal.name, parent);
+                    }
+                }
+
+                // The pin first, so flush becomes the new zero point, then GoalBackOffset on
+                // top as a deliberate deviation from it. The knob keeps its meaning.
+                var targetPosition = basePosition + flushLocal;
                 if (enabled && !Mathf.Approximately(goalBackOffset, 0f))
                 {
                     var pushDir = new Vector3(basePosition.x, 0f, basePosition.z);
                     if (pushDir.sqrMagnitude < 0.0001f)
                     {
-                        pushDir = new Vector3(t.localPosition.x, 0f, t.localPosition.z);
+                        // The pin is already in t.localPosition from the previous pass, so it
+                        // has to come back out here or this fallback feeds on its own output.
+                        pushDir = new Vector3(t.localPosition.x - flushLocal.x, 0f, t.localPosition.z - flushLocal.z);
                     }
 
                     if (pushDir.sqrMagnitude < 0.0001f)
@@ -984,6 +1220,9 @@ namespace DashFallMod
                 // The base frame is statically batched, so it needs the same proxy
                 // treatment as the rink; see GoalFrameTweaks.cs.
                 SyncBaseGoalFrame(goal, ResolveArenaVisualMode(), enabled, thicknessScale);
+
+                // The one thing the pin depends on that cannot be read from the assembly.
+                LogGoalTriggerParentageOnce(goal);
             }
         }
 
