@@ -145,12 +145,15 @@ namespace DashFallMod
         {
             // Goalie stance + velocity-extend per-body and broadcast bookkeeping first.
             // These are keyed by the body's InstanceID / the body's NetworkObjectId, not
-            // the player's, so they need nothing but the body, and PlayerBody.Player can
-            // already be null by the time we get here: the "PlayerDespawned" replay event
-            // despawns the replay Player NetworkObject while its body is still spawned.
-            // Sitting below the early return, they leaked on that path; with replay bodies
-            // now carrying real stance and extension state it would leak once per goalie
-            // per replay.
+            // the player's, so the body alone is enough and there is no reason to run them
+            // under the null-Player early return below.
+            //
+            // No known path reaches here with a null Player: the "PlayerDespawned" replay
+            // event despawns the replay Player, but Player.OnNetworkDespawn despawns the
+            // body from inside itself via Server_DespawnCharacter, and PlayerBody.Player is
+            // only ever cleared in HandlePlayerReference, which that path does not call. So
+            // this ordering fixes no live leak, it just stops one from existing if that
+            // ever changes, now that replay bodies carry real stance and extension state.
             try { Stances.OnBodyDespawned(__instance); } catch { }
             try { GoalieDashExtend.OnBodyDespawned(__instance); } catch { }
 

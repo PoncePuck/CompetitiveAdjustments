@@ -29,6 +29,10 @@ namespace DashFallMod
         // ── Arena network bounds + audio environment state ────────────────────
         private static AudioReverbZone _cachedReverbZone;
         private static float   _originalReverbMaxDistance = -1f;
+        private static float   _originalReverbMinDistance = -1f;
+        private static Vector3 _originalReverbPosition;
+        private static bool    _originalReverbActive;
+        private static int     _reverbBaselineZoneId;
         private static bool    _loggedVanillaServerSkip;
 
         // Vanilla board PhysicsMaterial, captured lazily from the original arena
@@ -103,7 +107,7 @@ namespace DashFallMod
             _loggedArenaRootMissing = false;
 
             ApplyNetworkBoundsPatches();
-            HandleAudioEnvironment();
+            HandleAudioEnvironment(width, height, length, offsetX, offsetY, offsetZ);
 
             // (1) Resize the REAL base game (colliders + goals + spawn markers). Not a
             // rendering step, so it runs on a dedicated server too. Skipping it there put
@@ -335,6 +339,14 @@ namespace DashFallMod
 
                     if (!mr.transform.IsChildOf(levelRoot))
                     {
+                        // The crowd is owned by CrowdSeating, which seats each member on its
+                        // own CrowdPosition marker. It must never reach the delta-based
+                        // follower: a member is instantiated AT its already-scaled marker, so
+                        // the delta would be applied a second time and throw the crowd out
+                        // over the ice. Excluded by parentage rather than by name, because
+                        // the name hints are what put the crowd on this path to begin with.
+                        if (IsCrowdOwned(mr.transform)) continue;
+
                         if (TryResolveSceneryContainer(mr.transform, out Transform container))
                         {
                             if (strandedUnitIds.Add(container.GetInstanceID()))
@@ -423,32 +435,50 @@ namespace DashFallMod
         /// crowd is pooled: members are created and destroyed continuously, so a list of
         /// members captured at rebuild time is stale within seconds. Following the
         /// container means new members are picked up the frame they appear.
+        ///
+        /// The OUTERMOST match wins, not the first one found walking up, and that is not a
+        /// detail. A crowd member is called "Crowd Member(Clone)", which contains the hint
+        /// "crowd", so stopping at the first match returned the member itself as the
+        /// container: 145 containers instead of one "Spectator Manager". SceneryFollower
+        /// then moved each container's CHILDREN, which for a member are its body parts, so
+        /// every spectator was taken apart and its pieces scattered by the arena delta while
+        /// the member's own transform never moved. That is the giant, spread-out crowd
+        /// hanging over the ice. Continuing the walk puts the container back at the manager,
+        /// where the children are whole members and each one moves as a unit.
         /// </summary>
         private static bool TryResolveSceneryContainer(Transform t, out Transform container)
         {
             container = null;
             if (t == null) return false;
 
-            Transform child = t;
+            // Never move anything the server owns the position of. Checked once, up front,
+            // against the renderer itself: the walk below no longer stops at its first match,
+            // so doing it per match would test a different subtree each time.
+            if (t.GetComponentInParent<Unity.Netcode.NetworkObject>(true) != null) return false;
+
             for (Transform current = t; current != null; current = current.parent)
             {
                 if (current.name.StartsWith("CompAdjust", StringComparison.Ordinal)) return false;
                 if (string.Equals(current.name, UnifiedInstanceName, StringComparison.Ordinal)) return false;
 
-                if (MatchesSceneryContainer(current.name))
-                {
-                    // Never move anything the server owns the position of.
-                    if (child.GetComponentInParent<Unity.Netcode.NetworkObject>(true) != null) return false;
-                    if (current == t) return false;
-
-                    container = current;
-                    return true;
-                }
-
-                child = current;
+                // Remembered rather than returned, so an enclosing manager outranks an
+                // individual unit inside it.
+                if (current != t && MatchesSceneryContainer(current.name)) container = current;
             }
 
-            return false;
+            return container != null;
+        }
+
+        /// <summary>
+        /// True for anything under the CrowdManager, whose members CrowdSeating owns.
+        /// Falls back to false when the manager does not exist, which leaves the old
+        /// name-based path in charge rather than silently dropping scenery.
+        /// </summary>
+        private static bool IsCrowdOwned(Transform t)
+        {
+            Transform manager = CrowdSeatingManagerTransform;
+            if (manager == null || t == null) return false;
+            return t == manager || t.IsChildOf(manager);
         }
 
         private static bool MatchesSceneryContainer(string name)
@@ -1203,9 +1233,9 @@ namespace DashFallMod
         // Expands the AudioReverbZone to cover the enlarged arena so audio
         // dampening still applies correctly with custom arena scale.
 
-        private static void HandleAudioEnvironment()
+        private static void HandleAudioEnvironment(
+            float width, float height, float length, float offsetX, float offsetY, float offsetZ)
         {
-            const float MAX_DISTANCE = 500f;
             if (_cachedReverbZone == null)
                 _cachedReverbZone = Resources.FindObjectsOfTypeAll<AudioReverbZone>()
                     .FirstOrDefault(o => o.gameObject.scene.IsValid());
@@ -1213,27 +1243,100 @@ namespace DashFallMod
             var reverbZone = _cachedReverbZone;
             if (reverbZone == null) return;
 
-            if (_originalReverbMaxDistance < 0f)
-                _originalReverbMaxDistance = reverbZone.maxDistance;
-
-            if (!Mathf.Approximately(reverbZone.maxDistance, MAX_DISTANCE))
+            // Keyed to the ZONE, not to a bare "have we captured yet" flag. A scene reload
+            // destroys the zone and the line above resolves a new one, but the old sentinel
+            // said "already captured", so the new zone kept the previous zone's numbers as
+            // its vanilla baseline. Re-capturing per instance is what makes a reload safe.
+            int zoneId = reverbZone.GetInstanceID();
+            if (_reverbBaselineZoneId != zoneId)
             {
-                reverbZone.gameObject.SetActive(true);
-                reverbZone.transform.position = Vector3.zero;
-                reverbZone.maxDistance = MAX_DISTANCE;
-                CompetitiveAdjustments.ConfigManager.Log($"AudioReverbZone adjusted for expanded arena (maxDistance={MAX_DISTANCE}).");
+                _reverbBaselineZoneId = zoneId;
+                _originalReverbMaxDistance = reverbZone.maxDistance;
+                _originalReverbMinDistance = reverbZone.minDistance;
+                _originalReverbPosition = reverbZone.transform.position;
+                _originalReverbActive = reverbZone.gameObject.activeSelf;
             }
+
+            // Both radii scale, by the LARGEST horizontal factor. An AudioReverbZone is a
+            // sphere, so a rink stretched on one axis has to be covered by the long one or
+            // the far corners fall outside the zone and go dry.
+            //
+            // Height is left out deliberately: it scales the roof, not the distance from
+            // centre ice to the boards, and folding it in made a tall arena bleed reverb far
+            // past the building.
+            //
+            // This used to be a flat 500 m on both a grown and a shrunk rink. That is the
+            // reported bug: the range did not track the arena at all. On a shrunk rink it
+            // covered several buildings' worth of space, so the dampening that should come
+            // in past the boards never arrived, and the vanilla ratio between the two radii
+            // was destroyed because only maxDistance was written.
+            float factor = Mathf.Max(Mathf.Abs(width), Mathf.Abs(length));
+
+            float targetMax = _originalReverbMaxDistance * factor;
+            float targetMin = _originalReverbMinDistance * factor;
+
+            // The zone rides the rink, so it has to follow ArenaOffset like everything else.
+            // Forcing it to the origin left the reverb centred on a rink that had moved.
+            Vector3 targetPosition = _originalReverbPosition + new Vector3(offsetX, offsetY, offsetZ);
+
+            // The setters are extern InternalCall, so whether the native side clamps min
+            // against max is not knowable from the managed assembly. Write the widening one
+            // first in either direction and the question stops mattering: no intermediate
+            // state ever has min above max, so nothing can be clamped away.
+            bool growing = targetMax >= reverbZone.maxDistance;
+
+            if (Mathf.Approximately(reverbZone.maxDistance, targetMax)
+                && Mathf.Approximately(reverbZone.minDistance, targetMin)
+                && reverbZone.transform.position == targetPosition
+                && reverbZone.gameObject.activeSelf)
+                return;
+
+            reverbZone.gameObject.SetActive(true);
+            reverbZone.transform.position = targetPosition;
+
+            if (growing) { reverbZone.maxDistance = targetMax; reverbZone.minDistance = targetMin; }
+            else         { reverbZone.minDistance = targetMin; reverbZone.maxDistance = targetMax; }
+
+            CompetitiveAdjustments.ConfigManager.Log(
+                $"AudioReverbZone scaled to the arena (x{factor:F2}): " +
+                $"min {_originalReverbMinDistance:F0} -> {reverbZone.minDistance:F0} m, " +
+                $"max {_originalReverbMaxDistance:F0} -> {reverbZone.maxDistance:F0} m, " +
+                $"centre {targetPosition}.");
         }
 
         private static void RestoreAudioEnvironment()
         {
             if (_cachedReverbZone != null && _originalReverbMaxDistance >= 0f)
             {
-                _cachedReverbZone.maxDistance = _originalReverbMaxDistance;
-                CompetitiveAdjustments.ConfigManager.Log($"AudioReverbZone restored to {_originalReverbMaxDistance:F0} m.");
+                // Same widen-first rule as the apply path, and it has to be decided the same
+                // way. Hardcoding max-then-min is only correct when restoring from a SHRUNK
+                // arena; coming back from a grown one that order narrows first and can be
+                // clamped away.
+                if (_originalReverbMaxDistance >= _cachedReverbZone.maxDistance)
+                {
+                    _cachedReverbZone.maxDistance = _originalReverbMaxDistance;
+                    _cachedReverbZone.minDistance = _originalReverbMinDistance;
+                }
+                else
+                {
+                    _cachedReverbZone.minDistance = _originalReverbMinDistance;
+                    _cachedReverbZone.maxDistance = _originalReverbMaxDistance;
+                }
+
+                // The apply path moves and force-enables the zone, so teardown has to undo
+                // both or the reverb stays centred on a rink that is no longer resized.
+                _cachedReverbZone.transform.position = _originalReverbPosition;
+                if (_cachedReverbZone.gameObject.activeSelf != _originalReverbActive)
+                    _cachedReverbZone.gameObject.SetActive(_originalReverbActive);
+
+                CompetitiveAdjustments.ConfigManager.Log(
+                    $"AudioReverbZone restored to min {_originalReverbMinDistance:F0} m, " +
+                    $"max {_originalReverbMaxDistance:F0} m, centre {_originalReverbPosition}.");
             }
             _cachedReverbZone = null;
             _originalReverbMaxDistance = -1f;
+            _originalReverbMinDistance = -1f;
+            _reverbBaselineZoneId = 0;
         }
     }
 

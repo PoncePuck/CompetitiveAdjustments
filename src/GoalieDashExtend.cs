@@ -287,7 +287,13 @@ namespace DashFallMod
         /// apart against a 0.05s interval, so every tick passes anyway.
         /// </summary>
         public static void ServerBroadcastExtension(ulong bodyNetId, float left, float right)
-            => NotifyClientsExtension(bodyNetId, left, right);
+        {
+            // Gated here because NotifyClientsExtension is not. Every live caller sits
+            // behind an _enabled check already, so this is the one path that could keep
+            // sending for a feature an admin turned off mid-replay.
+            if (!_enabled) return;
+            NotifyClientsExtension(bodyNetId, left, right);
+        }
 
         /// <summary>
         /// Listen-server local apply, mirroring what OnVelocityExtendMessage does for a

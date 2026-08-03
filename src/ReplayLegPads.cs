@@ -48,6 +48,20 @@ namespace DashFallMod
     {
         internal const string EventName = "CA/LegPads";
 
+        // Both paths run at the recorder's tick rate, and recording runs for the whole
+        // match on a dedicated server, so an unlatched warning here is 15 lines a second
+        // for as long as the fault lasts. Latched the same way SmallPatches latches its
+        // missing-butterfly warning.
+        private static bool _loggedRecordFailure;
+        private static bool _loggedApplyFailure;
+
+        private static void WarnOnce(ref bool latch, string what, Exception e)
+        {
+            if (latch) return;
+            latch = true;
+            Debug.LogWarning("[CA/Replay] " + what + " (further occurrences suppressed): " + e.Message);
+        }
+
         /// <summary>
         /// ReplayRecorder.Update calls Server_Tick() and only then Tick++, so a postfix
         /// appends into the same tick bucket vanilla just filled, immediately after that
@@ -59,14 +73,22 @@ namespace DashFallMod
         {
             if (!GoalieDashExtend.Enabled && !Stances.Enabled) return;
 
-            try
-            {
-                var pm = PlayerManager.Instance;
-                if (pm == null) return;
+            var pm = PlayerManager.Instance;
+            if (pm == null) return;
 
-                // GetSpawnedPlayers defaults to includeReplay:false, so a replay running
-                // during a goal celebration cannot record its own ghosts back into the map.
-                foreach (var p in pm.GetSpawnedPlayers())
+            System.Collections.Generic.List<Player> players;
+            try { players = pm.GetSpawnedPlayers(); }
+            catch (Exception e) { WarnOnce(ref _loggedRecordFailure, "leg pad record failed", e); return; }
+
+            // GetSpawnedPlayers defaults to includeReplay:false, so a replay running
+            // during a goal celebration cannot record its own ghosts back into the map.
+            foreach (var p in players)
+            {
+                // Per player rather than around the loop. A player torn down between
+                // GetSpawnedPlayers returning and this body running would otherwise cost
+                // every later goalie its record for this tick, and their ghosts would hold
+                // the previous pose for a frame on playback.
+                try
                 {
                     if (p == null) continue;
                     if (p.Role != PlayerRole.Goalie) continue;
@@ -86,8 +108,8 @@ namespace DashFallMod
                         StanceRight = st.extendRight
                     });
                 }
+                catch (Exception e) { WarnOnce(ref _loggedRecordFailure, "leg pad record failed", e); }
             }
-            catch (Exception e) { Debug.LogWarning("[CA/Replay] leg pad record failed: " + e.Message); }
         }
 
         /// <summary>
@@ -136,7 +158,7 @@ namespace DashFallMod
                     Stances.ClientApplyStance(body, d.StanceLeft, d.StanceRight);
                 }
             }
-            catch (Exception e) { Debug.LogWarning("[CA/Replay] leg pad apply failed: " + e.Message); }
+            catch (Exception e) { WarnOnce(ref _loggedApplyFailure, "leg pad apply failed", e); }
         }
     }
 }

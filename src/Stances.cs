@@ -209,7 +209,13 @@ namespace DashFallMod
         /// should not re-send at the replay tick rate.
         /// </summary>
         public static void ServerBroadcastStance(ulong bodyNetId, bool left, bool right)
-            => NotifyClients(bodyNetId, left, right);
+        {
+            // Gated here because NotifyClients is not, and the recorder guard passes as
+            // soon as either feature is on. Without this, running velocity extend with
+            // stances off sends a heartbeat per goalie ghost for the whole replay.
+            if (!_enabled) return;
+            NotifyClients(bodyNetId, left, right);
+        }
 
         /// <summary>
         /// Listen-server local apply, mirroring the write OnStanceMessage does for a
