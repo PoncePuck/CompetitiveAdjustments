@@ -29,8 +29,17 @@ namespace DashFallMod.Client
         private bool _versionDismissed;        // user dismissed the popup; don't show again
         private bool _versionCheckLoggedSkip;  // logged the "Steam unavailable" reason once
         private bool _versionShowRequested;    // a trigger (enable / server join / test) asked to show
-        private bool _versionStartupChecked;   // ran the one-shot post-launch check
-        private float _versionStartupCheckAt;  // when the post-launch check is due
+        private bool _versionStartupChecked;   // armed the initial delay
+        private float _nextVersionCheckAt;     // when the next Steam query is due
+
+        /// <summary>Grace period before the first query, so Steam and the UI root can settle.</summary>
+        private const float VersionFirstCheckDelay = 5f;
+
+        /// <summary>
+        /// Gap between repeat queries. A minute is far below the time it takes anyone to
+        /// notice a stale build, and the query stops entirely once out-of-date latches.
+        /// </summary>
+        private const float VersionRecheckInterval = 60f;
         private ulong _workshopFileId;         // derived published file id (0 = not a workshop install)
         private UITK.VisualElement _versionBackdrop;
 
@@ -42,15 +51,35 @@ namespace DashFallMod.Client
         /// </summary>
         private void TickVersionPopup()
         {
-            // "Enabled the mod": one-shot check a few seconds after the runner starts. Steam
-            // needs a moment to settle its item state and the UI root needs to come up.
-            if (!_versionStartupChecked)
+            // First check runs a few seconds in: Steam needs a moment to settle its item
+            // state and the UI root needs to come up. After that it REPEATS.
+            //
+            // Repeating is the whole point, not belt and braces. The situation this feature
+            // exists for, spelled out at the top of this file, is the Workshop item being
+            // updated WHILE THE GAME IS RUNNING, and that is precisely the case a single
+            // check at launch cannot see: NeedsUpdate flips to true minutes after the one
+            // check already ran and returned false. Before this, the only other trigger was
+            // joining a modded server, so a player already in a server when the update
+            // published was never told, and a player who never joins one never found out
+            // at all.
+            //
+            // The poll is cheap and self-limiting. SteamUGC.GetItemState is a local read of
+            // client state with no callback and no network round trip, it runs once a minute
+            // rather than per frame, and CheckOutOfDate returns immediately once _modOutOfDate
+            // latches, so a client that IS out of date stops querying entirely.
+            if (!_modOutOfDate && Time.unscaledTime >= _nextVersionCheckAt)
             {
-                if (_versionStartupCheckAt <= 0f) _versionStartupCheckAt = Time.unscaledTime + 5f;
-                else if (Time.unscaledTime >= _versionStartupCheckAt)
+                _nextVersionCheckAt = Time.unscaledTime
+                    + (_versionStartupChecked ? VersionRecheckInterval : VersionFirstCheckDelay);
+
+                if (_versionStartupChecked)
                 {
-                    _versionStartupChecked = true;
                     if (CheckOutOfDate()) RequestVersionPopup();
+                }
+                else
+                {
+                    // The very first tick only arms the delay; nothing is asked of Steam yet.
+                    _versionStartupChecked = true;
                 }
             }
 
