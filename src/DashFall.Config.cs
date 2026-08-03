@@ -13,22 +13,37 @@ namespace DashFallMod.Client
     /// </summary>
     public static class FreeBladeSpinRange
     {
-        // -128 is a valid sbyte but not a valid bound here: the handler casts the clamped
-        // buffer with (sbyte), and keeping the span symmetric means spinning the blade the
-        // same distance in both directions.
-        public const float Min = -127f;
-        public const float Max = 127f;
+        // How far the slider can be dragged. -128 is a valid sbyte but not a valid bound
+        // here: the handler casts the clamped buffer with (sbyte), and a symmetric span
+        // means the blade spins the same distance either way.
+        public const float LimitMin = -127f;
+        public const float LimitMax = 127f;
 
-        // What the fields used to default to, which is also vanilla's blade range. Kept so
-        // the loader can recognise an untouched old config and widen it; a file carrying
-        // this pair is a file where FreeBlade never worked.
-        public const float LegacyMin = -4f;
-        public const float LegacyMax = 4f;
+        // Vanilla's own minimumBladeAngle/maximumBladeAngle, and the default range for the
+        // lock. Safe as a default only because the lock now ships OFF: the pair is exactly
+        // the limit FreeBlade removes, so a lock enabled at this range is a lock that hands
+        // the vanilla limit straight back and stops the blade at 4.
+        public const float DefaultMin = -4f;
+        public const float DefaultMax = 4f;
     }
 
     [Serializable]
     public class DashFallClientConfig
     {
+        /// <summary>
+        /// Schema version, used only to run one-time repairs on files written by older
+        /// builds. It deliberately defaults to 0 rather than the current version: a file
+        /// written before this field existed has no such key, and JsonUtility leaves a
+        /// missing field at its initializer, so anything but 0 would make every old file
+        /// claim to be current and skip the repair it needs.
+        ///
+        /// A migration must never be inferred from the values alone. Turning the blade lock
+        /// off because it sits at the vanilla range would fire again every launch and
+        /// silently undo a player who genuinely wants that setting; the stamp is what makes
+        /// it one time.
+        /// </summary>
+        public int ClientConfigVersion = 0;
+
         public bool EnableClientDebug = false;
         public bool ShowArenaClipBrushes = false; // debug: visualise arena collider meshes
         public bool ShowPlayerClipBrushes = false; // debug: visualise player collider meshes
@@ -88,16 +103,16 @@ namespace DashFallMod.Client
         // ever read it back. The leg pad reads ConfigManager.CompTweaksEffective, which the
         // same receive path mirrors two lines later, and that is the value the server and
         // the client agree on.
-        public bool FreeBladeSpinLockEnabled = true;
-        // The full sbyte span, which is what FreeBlade opens the blade up to. These used to
-        // default to -4/+4, and that is the "blade locks at max" report: -4/+4 is EXACTLY
-        // vanilla's minimumBladeAngle/maximumBladeAngle, so the client lock silently
-        // re-imposed the vanilla limit on top of the server's widened range and the blade
-        // climbed to 4 and stopped. With the lock on by default, every player hit it.
-        // The neutral value for a lock has to be the full range; narrowing is the opt-in.
-        // See FreeBladeSpinRange.Legacy* for the migration that repairs existing files.
-        public float FreeBladeSpinMin = FreeBladeSpinRange.Min;
-        public float FreeBladeSpinMax = FreeBladeSpinRange.Max;
+        // OFF by default, and that is the "blade locks at max" fix. The lock shipped ON at
+        // a -4/+4 range, which is EXACTLY vanilla's minimumBladeAngle/maximumBladeAngle, so
+        // it re-imposed the very limit FreeBlade removes: the blade climbed to 4 and
+        // stopped, and every player hit it because nothing had to be switched on for it to
+        // happen. A lock that constrains a feature has to be opt-in, so FreeBlade now works
+        // fully out of the box and this narrows it only when asked.
+        // ClientConfigVersion 1 turns it off for the files that already carry the old pair.
+        public bool FreeBladeSpinLockEnabled = false;
+        public float FreeBladeSpinMin = FreeBladeSpinRange.DefaultMin;
+        public float FreeBladeSpinMax = FreeBladeSpinRange.DefaultMax;
         public bool EnableSprintShoulderTrail = true;
         public float SprintShoulderTrailTime = 0.45f;
         public float SprintShoulderTrailWidth = 0.08f;
@@ -266,8 +281,8 @@ namespace DashFallMod.Client
                 {
                     var json = File.ReadAllText(ClientConfigPath);
                     var cfg = JsonUtility.FromJson<DashFallClientConfig>(json);
-                    if (cfg == null) return new DashFallClientConfig();
-                    RepairFreeBladeSpinRange(cfg);
+                    if (cfg == null) return NewClientConfig();
+                    MigrateClientConfig(cfg);
                     return cfg;
                 }
             }
@@ -275,40 +290,53 @@ namespace DashFallMod.Client
             {
                 Debug.LogWarning($"[COMPADJUST] Failed to load client config: {e.Message}");
             }
-            return new DashFallClientConfig();
+            return NewClientConfig();
         }
 
         /// <summary>
-        /// Repairs a blade spin range loaded from disk.
-        ///
-        /// Two cases. A file still carrying the old -4/+4 default is one where the client
-        /// lock exactly reproduced vanilla's blade limit, cancelling FreeBlade and pinning
-        /// the blade at 4; changing the field default alone cannot fix that, because the
-        /// broken pair is already written out. And a crossed or out-of-range pair, which the
-        /// old two-row UI allowed, makes Mathf.Clamp collapse the range and freeze the blade
-        /// outright, so it is ordered rather than trusted.
-        ///
-        /// Widening -4/+4 does override a deliberate choice of exactly the vanilla range,
-        /// which is not distinguishable from the default. That is the right trade: it is the
-        /// value that makes the feature do nothing, and it is one drag of the range slider
-        /// to set again.
+        /// A fresh config, stamped as current. Without the stamp a brand new install would
+        /// be born at version 0 and run every back-compat migration against defaults that
+        /// never needed them.
         /// </summary>
-        private static void RepairFreeBladeSpinRange(DashFallClientConfig cfg)
+        private static DashFallClientConfig NewClientConfig()
+            => new DashFallClientConfig { ClientConfigVersion = CurrentClientConfigVersion };
+
+        /// <summary>Current client config schema version. Bump when adding a migration below.</summary>
+        private const int CurrentClientConfigVersion = 1;
+
+        /// <summary>
+        /// One-time repairs for configs written by older builds, plus the ordering guard
+        /// that runs every load.
+        /// </summary>
+        private static void MigrateClientConfig(DashFallClientConfig cfg)
         {
-            if (Mathf.Approximately(cfg.FreeBladeSpinMin, FreeBladeSpinRange.LegacyMin)
-                && Mathf.Approximately(cfg.FreeBladeSpinMax, FreeBladeSpinRange.LegacyMax))
+            if (cfg.ClientConfigVersion < 1)
             {
-                cfg.FreeBladeSpinMin = FreeBladeSpinRange.Min;
-                cfg.FreeBladeSpinMax = FreeBladeSpinRange.Max;
-                Debug.Log("[COMPADJUST] Free blade spin range was at the old -4/+4 default, which is vanilla's " +
-                          "own blade limit and cancelled FreeBlade. Widened to the full range.");
-                return;
+                // v1: the blade spin lock used to ship ON at -4/+4, which is vanilla's own
+                // blade limit, so it cancelled FreeBlade and stopped the blade at 4. Every
+                // file written by an older build carries that pair, and flipping the field
+                // default cannot reach them. Only the enabled flag is touched: the range is
+                // a perfectly good preset once the lock is something you choose to turn on.
+                if (cfg.FreeBladeSpinLockEnabled
+                    && Mathf.Approximately(cfg.FreeBladeSpinMin, FreeBladeSpinRange.DefaultMin)
+                    && Mathf.Approximately(cfg.FreeBladeSpinMax, FreeBladeSpinRange.DefaultMax))
+                {
+                    cfg.FreeBladeSpinLockEnabled = false;
+                    Debug.Log("[COMPADJUST] Free blade spin lock was on at the old -4/+4 default, which is " +
+                              "vanilla's own blade limit and cancelled FreeBlade. Turned off; turn it back on " +
+                              "in settings if you want the blade constrained.");
+                }
             }
 
+            cfg.ClientConfigVersion = CurrentClientConfigVersion;
+
+            // Not versioned: a crossed or out-of-range pair can only come from a hand-edited
+            // file, and Mathf.Clamp with min above max does not fail, it collapses the range
+            // and freezes the blade. Cheap enough to assert on every load.
             float lo = Mathf.Clamp(Mathf.Min(cfg.FreeBladeSpinMin, cfg.FreeBladeSpinMax),
-                                   FreeBladeSpinRange.Min, FreeBladeSpinRange.Max);
+                                   FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax);
             float hi = Mathf.Clamp(Mathf.Max(cfg.FreeBladeSpinMin, cfg.FreeBladeSpinMax),
-                                   FreeBladeSpinRange.Min, FreeBladeSpinRange.Max);
+                                   FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax);
 
             if (!Mathf.Approximately(lo, cfg.FreeBladeSpinMin) || !Mathf.Approximately(hi, cfg.FreeBladeSpinMax))
             {

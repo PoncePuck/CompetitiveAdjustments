@@ -229,13 +229,14 @@ namespace CompetitiveCompanion
     // own range for the game's fields, which FreeBlade has already widened to +/-127.
     // Nothing here wraps, despite what these section headers said for a long time.
     //
-    // THE "BLADE LOCKS AT MAX" BUG. The lock's bounds defaulted to -4/+4, which is exactly
-    // vanilla's own minimumBladeAngle/maximumBladeAngle, so with the lock on by default the
-    // client handed back precisely the limit FreeBlade had just removed. The blade climbed
-    // to 4 and stopped, and nothing in the UI suggested the client was the one stopping it.
-    // The default is now the full range (see FreeBladeSpinRange), existing configs carrying
-    // the old pair are widened on load, and the bounds are ordered here as well so no config
-    // and no future editor can collapse the range and freeze the blade.
+    // THE "BLADE LOCKS AT MAX" BUG. The lock shipped ON with bounds of -4/+4, which is
+    // exactly vanilla's own minimumBladeAngle/maximumBladeAngle, so the client handed back
+    // precisely the limit FreeBlade had just removed. The blade climbed to 4 and stopped,
+    // and nothing in the UI suggested the client was the one stopping it. The lock is now
+    // OFF by default, so FreeBlade works out of the box and this only narrows it when asked;
+    // a config carrying the old on-at-vanilla-range pair is switched off once on load
+    // (ClientConfigVersion 1). The bounds are ordered here as well, so no hand-edited file
+    // can collapse the range and freeze the blade a different way.
 
     internal static class BladeSpinLock
     {

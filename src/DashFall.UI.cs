@@ -985,7 +985,7 @@ namespace DashFallMod.Client
             // while disagreeing with every other client in the meantime; the config fields
             // remain as the sync slots they always were.
 
-            _actionsSection.Add(MakeToggleRow("FREE BLADE SPIN LOCK", "Lock blade spin to the range below (off = full free spin)", clientConfig.FreeBladeSpinLockEnabled, (val) =>
+            _actionsSection.Add(MakeToggleRow("FREE BLADE SPIN LOCK", "Off means full free spin. On constrains the blade to the range below", clientConfig.FreeBladeSpinLockEnabled, (val) =>
             {
                 clientConfig.FreeBladeSpinLockEnabled = val;
                 DashFallConfigLoader.SaveClientConfig(clientConfig);
@@ -996,8 +996,9 @@ namespace DashFallMod.Client
             // value, and the blade froze there. A range control cannot express that state.
             _actionsSection.Add(MakeRangeSliderRow(
                 "FREE BLADE SPIN RANGE",
-                "Lower and upper bound for the blade spin lock (client-side)",
-                clientConfig.FreeBladeSpinMin, clientConfig.FreeBladeSpinMax, -127f, 127f,
+                "Lower and upper bound, used only while the lock above is on",
+                clientConfig.FreeBladeSpinMin, clientConfig.FreeBladeSpinMax,
+                FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax,
                 (lo, hi) =>
                 {
                     clientConfig.FreeBladeSpinMin = lo;
@@ -1344,8 +1345,10 @@ namespace DashFallMod.Client
             var slider = new UITK.MinMaxSlider(startLo, startHi, limitMin, limitMax);
             slider.style.flexGrow = 1;
             slider.style.flexBasis = 0;
-            slider.style.marginLeft = 6;
-            slider.style.marginRight = 6;
+            // Wider than the single sliders' 6, because each handle overhangs its end of the
+            // track by half its width and would otherwise touch the number fields.
+            slider.style.marginLeft = RangeThumbSize / 2f + 2f;
+            slider.style.marginRight = RangeThumbSize / 2f + 2f;
             StyleMinMaxSliderControl(slider);
 
             bool syncing = false;
@@ -1433,61 +1436,117 @@ namespace DashFallMod.Client
             return field;
         }
 
+        // Geometry for the range slider, shared so the thumb offsets stay derived from the
+        // rail rather than hand-tuned against it.
+        private const float RangeRowHeight = 26f;
+        private const float RangeRailHeight = 4f;
+        private const float RangeThumbSize = 16f;
+        private const float RangeRailTop = (RangeRowHeight - RangeRailHeight) / 2f;              // 11
+        private const float RangeThumbTop = -(RangeThumbSize - RangeRailHeight) / 2f;            // -6
+
         /// <summary>
-        /// MinMaxSlider styled to match StyleSliderControl. It has a tracker, a dragger for
-        /// the selected span, and two end handles, and Unity has renamed these classes
-        /// between versions, so every known spelling is probed exactly as the single-value
-        /// slider does.
+        /// MinMaxSlider styled to match the single-value sliders: a 4px translucent rail,
+        /// the selected span filled on top of it, and a round white handle at each end.
+        ///
+        /// The part names are the five the shipped runtime theme actually defines
+        /// (unity-min-max-slider__input/tracker/dragger/min-thumb/max-thumb). The __input
+        /// container matters and was the thing making this look wrong: it is the box the
+        /// other three are positioned inside, so leaving it at its default height left the
+        /// rail measuring against something other than the 26px row and the handles sitting
+        /// off the rail.
+        ///
+        /// The two thumbs are children of the DRAGGER, not of the input, so they inherit the
+        /// dragger's box. That is why the dragger cannot simply be made handle-height: it
+        /// would drag the thumbs with it. The dragger is kept at rail height and the thumbs
+        /// are pulled back out to centre with an explicit negative top, and anchored half
+        /// their width past each edge so they sit centred on the ends of the span.
         /// </summary>
         private static void StyleMinMaxSliderControl(UITK.MinMaxSlider s)
         {
-            s.style.height = 26;
+            s.style.height = RangeRowHeight;
 
-            var tracker = s.Q<UITK.VisualElement>(className: "unity-min-max-slider__tracker")
-                       ?? s.Q<UITK.VisualElement>(className: "unity-base-slider__tracker")
-                       ?? s.Q<UITK.VisualElement>(className: "unity-tracker");
+            var input = s.Q<UITK.VisualElement>(className: "unity-min-max-slider__input")
+                     ?? s.Q<UITK.VisualElement>(className: "unity-base-field__input");
+            if (input != null)
+            {
+                input.style.height = RangeRowHeight;
+                input.style.flexGrow = 1;
+                input.style.marginLeft = 0;
+                input.style.marginRight = 0;
+                input.style.paddingLeft = 0;
+                input.style.paddingRight = 0;
+                // The handles overhang the span by half their width at each end, and the
+                // input is their clipping box.
+                input.style.overflow = UITK.Overflow.Visible;
+            }
+
+            var tracker = s.Q<UITK.VisualElement>(className: "unity-min-max-slider__tracker");
             if (tracker != null)
             {
-                tracker.style.height = 4;
-                tracker.style.marginTop = 11;
+                tracker.style.position = UITK.Position.Absolute;
+                tracker.style.left = 0;
+                tracker.style.right = 0;
+                tracker.style.top = RangeRailTop;
+                tracker.style.height = RangeRailHeight;
+                tracker.style.marginTop = 0;
                 tracker.style.backgroundColor = new UITK.StyleColor(new Color(1f, 1f, 1f, 0.35f));
-                tracker.style.borderTopLeftRadius = 2;
-                tracker.style.borderTopRightRadius = 2;
-                tracker.style.borderBottomLeftRadius = 2;
-                tracker.style.borderBottomRightRadius = 2;
+                SetUniformRadius(tracker, RangeRailHeight / 2f);
+                SetNoBorder(tracker);
             }
 
-            // The span between the two handles. Tinted rather than white so the selected
-            // range reads as a filled bar and the handles stay the brightest thing on it.
-            var dragger = s.Q<UITK.VisualElement>(className: "unity-min-max-slider__dragger")
-                       ?? s.Q<UITK.VisualElement>(className: "unity-dragger");
+            // The selected span. Left/right are owned by the drag logic and must not be
+            // touched here, only the vertical box and the paint.
+            var dragger = s.Q<UITK.VisualElement>(className: "unity-min-max-slider__dragger");
             if (dragger != null)
             {
-                dragger.style.height = 8;
-                dragger.style.marginTop = 9;
-                dragger.style.backgroundColor = new UITK.StyleColor(new Color(1f, 1f, 1f, 0.6f));
-                dragger.style.borderTopLeftRadius = 4;
-                dragger.style.borderTopRightRadius = 4;
-                dragger.style.borderBottomLeftRadius = 4;
-                dragger.style.borderBottomRightRadius = 4;
+                dragger.style.top = RangeRailTop;
+                dragger.style.height = RangeRailHeight;
+                dragger.style.marginTop = 0;
+                dragger.style.backgroundColor = new UITK.StyleColor(Color.white);
+                SetUniformRadius(dragger, RangeRailHeight / 2f);
+                SetNoBorder(dragger);
+                dragger.style.overflow = UITK.Overflow.Visible;
             }
 
-            StyleRangeHandle(s.Q<UITK.VisualElement>(className: "unity-min-max-slider__min-thumb")
-                          ?? s.Q<UITK.VisualElement>(className: "unity-min-max-slider__dragger-min"));
-            StyleRangeHandle(s.Q<UITK.VisualElement>(className: "unity-min-max-slider__max-thumb")
-                          ?? s.Q<UITK.VisualElement>(className: "unity-min-max-slider__dragger-max"));
+            StyleRangeHandle(s.Q<UITK.VisualElement>(className: "unity-min-max-slider__min-thumb"), isMin: true);
+            StyleRangeHandle(s.Q<UITK.VisualElement>(className: "unity-min-max-slider__max-thumb"), isMin: false);
         }
 
-        private static void StyleRangeHandle(UITK.VisualElement handle)
+        private static void StyleRangeHandle(UITK.VisualElement handle, bool isMin)
         {
             if (handle == null) return;
-            handle.style.width = 16;
-            handle.style.height = 16;
+
+            handle.style.position = UITK.Position.Absolute;
+            handle.style.width = RangeThumbSize;
+            handle.style.height = RangeThumbSize;
+            handle.style.top = RangeThumbTop;
+
+            // Centred on its end of the span rather than butted against it, so the pair
+            // reads as two grab points on one bar.
+            if (isMin) handle.style.left = -RangeThumbSize / 2f;
+            else handle.style.right = -RangeThumbSize / 2f;
+
             handle.style.backgroundColor = new UITK.StyleColor(Color.white);
-            handle.style.borderTopLeftRadius = 8;
-            handle.style.borderTopRightRadius = 8;
-            handle.style.borderBottomLeftRadius = 8;
-            handle.style.borderBottomRightRadius = 8;
+            SetUniformRadius(handle, RangeThumbSize / 2f);
+            SetNoBorder(handle);
+        }
+
+        private static void SetUniformRadius(UITK.VisualElement element, float radius)
+        {
+            element.style.borderTopLeftRadius = radius;
+            element.style.borderTopRightRadius = radius;
+            element.style.borderBottomLeftRadius = radius;
+            element.style.borderBottomRightRadius = radius;
+        }
+
+        // The theme gives these parts a border that reads as a grey outline against the
+        // row background once they are recoloured white.
+        private static void SetNoBorder(UITK.VisualElement element)
+        {
+            element.style.borderTopWidth = 0;
+            element.style.borderBottomWidth = 0;
+            element.style.borderLeftWidth = 0;
+            element.style.borderRightWidth = 0;
         }
 
         // PlayerQoL slider look: thin translucent white rail with a large round

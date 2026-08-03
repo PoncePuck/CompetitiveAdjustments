@@ -140,7 +140,7 @@ JSON line comments (`// ...`) are stripped on load.
 
 Per-user file owned by `DashFallMod.Client.DashFallConfigLoader`. The toggle UI lives in the in-game ModMenu and writes back on every change. Notable client-side options:
 
-- `FreeBladeSpinLockEnabled`, `FreeBladeSpinMin`, `FreeBladeSpinMax`. Narrow the blade spin to a custom range, set from one two-handed slider in the settings UI. The range defaults to the full +/-127, so the lock does nothing until you narrow it. It used to default to +/-4, which is vanilla's own blade limit, so it cancelled FreeBlade and the blade stopped dead at 4; a config still carrying that pair is widened on load.
+- `FreeBladeSpinLockEnabled`, `FreeBladeSpinMin`, `FreeBladeSpinMax`. Off by default, so FreeBlade spins freely. Turn it on to constrain the blade to the range set by the two-handled slider, which defaults to +/-4 and can be dragged out to +/-127. The lock used to ship on at +/-4, which is vanilla's own blade limit, so it cancelled FreeBlade and the blade stopped dead at 4; `ClientConfigVersion` 1 switches that off once for files that carry it.
 - `EnableSprintShoulderTrail` plus the trail time, width, colour and opacity fields. Colour and opacity are edited together in one picker row.
 - `EnableClientDebug`. Turns on debug logging and reveals the debug-only rows below it (`ShowArenaClipBrushes`, `ShowPlayerClipBrushes`, the version-popup preview). Turning it off also retracts any clip brushes that were showing.
 
