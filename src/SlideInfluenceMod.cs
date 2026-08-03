@@ -63,7 +63,27 @@ namespace DashFallMod
             
             var player = __instance.Player;
             if (player == null) return;
-            
+
+            // Replay bodies are RigidbodyConstraints.FreezeAll and are moved by
+            // transform.DOMove, so UpdateVelocityExtend can only ever read zero velocity,
+            // and vanilla skips HandleInputs for them so Stances never seeds _stanceState.
+            // Left to run, the server would call NotifyClientsExtension(netId, 0, 0) at
+            // 50 Hz on top of the 15 Hz pose ReplayLegPads replays, and because
+            // `unchanged` is false right after a non-zero send that clear is NOT
+            // suppressed, so the pads would flicker instead of holding the recorded pose.
+            // The recorded pose reaches the same client dictionaries through the CMM
+            // channels instead.
+            if (player.IsReplay.Value)
+            {
+                // A host renders its own replay; a dedicated server has nothing to draw.
+                if (NetworkManager.Singleton.IsClient)
+                {
+                    Stances.ClientUpdateLegs(__instance);
+                    GoalieDashExtend.ClientUpdateLegs(__instance);
+                }
+                return;
+            }
+
             var id = player.NetworkObjectId;
             bool isSliding = __instance.IsSliding.Value;
             

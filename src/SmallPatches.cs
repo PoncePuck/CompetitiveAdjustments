@@ -116,8 +116,21 @@ namespace DashFallMod
 
         private static Vector3 Track(Transform marker)
         {
-            for (int i = 0; i < _entries.Count; i++)
+            // Prune as we scan.  The list otherwise only shrinks inside ReapplyAll, which
+            // fires on a config sync and nothing else, while every replay spawns two fresh
+            // pads per recorded goalie.  A match with many goal replays would accumulate
+            // dead Transform wrappers and make every Track call walk all of them.
+            for (int i = _entries.Count - 1; i >= 0; i--)
+            {
+                if (_entries[i].Marker == null)   // Unity null: the pad was destroyed
+                {
+                    _entries.RemoveAt(i);
+                    continue;
+                }
+                // Keep ReferenceEquals for the identity match.  A plain == would let two
+                // destroyed wrappers compare equal and hand a fresh pad a stale baseline.
                 if (ReferenceEquals(_entries[i].Marker, marker)) return _entries[i].BasePos;
+            }
 
             var entry = new Entry { Marker = marker, BasePos = marker.localPosition };
             _entries.Add(entry);

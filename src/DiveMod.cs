@@ -143,6 +143,17 @@ namespace DashFallMod
         [HarmonyPostfix]
         public static void Postfix(PlayerBodyV2 __instance)
         {
+            // Goalie stance + velocity-extend per-body and broadcast bookkeeping first.
+            // These are keyed by the body's InstanceID / the body's NetworkObjectId, not
+            // the player's, so they need nothing but the body, and PlayerBody.Player can
+            // already be null by the time we get here: the "PlayerDespawned" replay event
+            // despawns the replay Player NetworkObject while its body is still spawned.
+            // Sitting below the early return, they leaked on that path; with replay bodies
+            // now carrying real stance and extension state it would leak once per goalie
+            // per replay.
+            try { Stances.OnBodyDespawned(__instance); } catch { }
+            try { GoalieDashExtend.OnBodyDespawned(__instance); } catch { }
+
             var player = __instance.Player;
             if (player == null) return;
             var id = player.NetworkObjectId;
@@ -162,12 +173,6 @@ namespace DashFallMod
             DashMod.LastStandingDashAt.Remove(id);
             DashMod.LastJumpAt.Remove(id);
             DashMod.LastDashAt.Remove(id);
-
-            // Goalie stance + velocity-extend per-body and broadcast bookkeeping.
-            // These are keyed by the body's InstanceID / the body's NetworkObjectId,
-            // not the player's, so they are not covered by the player-id removals above.
-            try { Stances.OnBodyDespawned(__instance); } catch { }
-            try { GoalieDashExtend.OnBodyDespawned(__instance); } catch { }
         }
     }
 }
