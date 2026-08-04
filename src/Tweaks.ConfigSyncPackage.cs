@@ -1,4 +1,4 @@
-using Unity.Netcode;
+﻿using Unity.Netcode;
 
 namespace CompetitivePuckTweaks.src
 {
@@ -10,11 +10,18 @@ namespace CompetitivePuckTweaks.src
         public float PuckScaleZ;
         public float LegPadOffset;
         public uint BoolFlags;
-        public float TorsoScaleX;
-        public float TorsoScaleY;
-        public float TorsoScaleZ;
         public float HighStickingActivateAngle;
         public float HighStickingMaxAngle;
+
+        // Exact serialized size of the field run below, in bytes.  This payload is
+        // positional with no field names, so a build that adds or removes a field
+        // does not fail to parse against an older peer, it silently reads the wrong
+        // value out of the wrong slot (removing TorsoScaleX/Y/Z once shifted
+        // HighSticking angles onto the old torso floats: 1.0 instead of -20).
+        // A size check catches that skew before a single field is assigned.
+        //
+        // KEEP IN SYNC with NetworkSerialize: 7 floats + 1 uint = 8 * 4.
+        public const int WireSizeBytes = 8 * 4;
 
         public ConfigSyncPackage(CompetitiveAdjustments.CompTweaksConfig c, CompetitiveAdjustments.CompAdjustConfig df = null)
         {
@@ -24,9 +31,6 @@ namespace CompetitivePuckTweaks.src
             PuckScaleZ = c.PuckScaleZ;
             LegPadOffset = c.ButterflyPadOffset;
             BoolFlags = PackBools(c, df);
-            TorsoScaleX = df?.CustomTorsoScaleX ?? 1f;
-            TorsoScaleY = df?.CustomTorsoScaleY ?? 1f;
-            TorsoScaleZ = df?.CustomTorsoScaleZ ?? 1f;
             HighStickingActivateAngle = df?.HighStickingActivateAngle ?? -20f;
             HighStickingMaxAngle     = df?.HighStickingMaxAngle     ?? -80f;
         }
@@ -39,9 +43,6 @@ namespace CompetitivePuckTweaks.src
             serializer.SerializeValue(ref PuckScaleZ);
             serializer.SerializeValue(ref LegPadOffset);
             serializer.SerializeValue(ref BoolFlags);
-            serializer.SerializeValue(ref TorsoScaleX);
-            serializer.SerializeValue(ref TorsoScaleY);
-            serializer.SerializeValue(ref TorsoScaleZ);
             serializer.SerializeValue(ref HighStickingActivateAngle);
             serializer.SerializeValue(ref HighStickingMaxAngle);
         }
@@ -65,8 +66,6 @@ namespace CompetitivePuckTweaks.src
             if (c.EnableSoftBoards)            b |= 1u << 13;
             if (c.EnableJohnBoardBounceTweak)  b |= 1u << 14;
             if (c.BananaMode)                  b |= 1u << 15;
-            if (df?.EnableCustomSkaterTorsoModel == true) b |= 1u << 16;
-            if (df?.DisableCustomTorsoVisual   == true) b |= 1u << 17;
             if (df?.FreeBladeEnabled           == true) b |= 1u << 18;
             if (df?.HighStickingEnabled        == true) b |= 1u << 19;
             if (df?.BallMode                  == true) b |= 1u << 20;
@@ -97,11 +96,6 @@ namespace CompetitivePuckTweaks.src
         public static void UnpackDashfall(ConfigSyncPackage pkg, CompetitiveAdjustments.CompAdjustConfig df)
         {
             if (df == null) return;
-            df.EnableCustomSkaterTorsoModel = (pkg.BoolFlags & (1u << 16)) != 0;
-            df.DisableCustomTorsoVisual     = (pkg.BoolFlags & (1u << 17)) != 0;
-            df.CustomTorsoScaleX            = pkg.TorsoScaleX;
-            df.CustomTorsoScaleY            = pkg.TorsoScaleY;
-            df.CustomTorsoScaleZ            = pkg.TorsoScaleZ;
             df.FreeBladeEnabled             = (pkg.BoolFlags & (1u << 18)) != 0;
             df.HighStickingEnabled          = (pkg.BoolFlags & (1u << 19)) != 0;
             df.HighStickingActivateAngle    = pkg.HighStickingActivateAngle;

@@ -217,57 +217,81 @@ namespace CompetitiveCompanion
         }
     }
 
-    // ── 5. Blade angle UP with wrapping ─────────────────────────────────────
+    // ── 5/6. Blade angle UP and DOWN under the client spin lock ─────────────
+    //
+    // These replace vanilla's OnBladeAngle{Up,Down}ActionPerformed, which are:
+    //
+    //     bladeAngleBuffer += context.ReadValue<float>();          // '-=' going down
+    //     bladeAngleBuffer = Mathf.Clamp(bladeAngleBuffer, minimumBladeAngle, maximumBladeAngle);
+    //     BladeAngleInput.ClientValue = (sbyte)bladeAngleBuffer;
+    //
+    // The only difference is which bounds the clamp uses: the mod substitutes the player's
+    // own range for the game's fields, which FreeBlade has already widened to +/-127.
+    // Nothing here wraps, despite what these section headers said for a long time.
+    //
+    // THE "BLADE LOCKS AT MAX" BUG. The lock shipped ON with bounds of -4/+4, which is
+    // exactly vanilla's own minimumBladeAngle/maximumBladeAngle, so the client handed back
+    // precisely the limit FreeBlade had just removed. The blade climbed to 4 and stopped,
+    // and nothing in the UI suggested the client was the one stopping it. The lock is now
+    // OFF by default, so FreeBlade works out of the box and this only narrows it when asked;
+    // a config carrying the old on-at-vanilla-range pair is switched off once on load
+    // (ClientConfigVersion 1). The bounds are ordered here as well, so no hand-edited file
+    // can collapse the range and freeze the blade a different way.
+
+    internal static class BladeSpinLock
+    {
+        /// <summary>
+        /// Shared body for both directions. <paramref name="delta"/> is the already-signed
+        /// step. Returns true to fall through to vanilla.
+        /// </summary>
+        internal static bool Apply(PlayerInput input, float delta)
+        {
+            var cfg = DashFallMod.ConfigManager.CompAdjustEffective;
+            if (!cfg.FreeBladeEnabled) return true;
+
+            if (GlobalStateManager.UIState.IsMouseRequired) return false;
+            if (input.Player?.Stick == null) return false;
+
+            var clientCfg = DashFallMod.Client.DashFallConfigLoader.ClientConfig;
+            if (clientCfg == null || !clientCfg.FreeBladeSpinLockEnabled) return true;
+
+            // Ordered rather than trusted. Mathf.Clamp(v, min, max) with min > max does not
+            // throw or return v: it pins to min when v < min and otherwise to max, so a
+            // crossed range makes the blade sit on one bound or flip between the two, which
+            // is the same "stuck" symptom from a different cause. The range slider in the
+            // settings UI cannot produce a crossed pair, but a hand-edited file can.
+            float lo = Mathf.Min(clientCfg.FreeBladeSpinMin, clientCfg.FreeBladeSpinMax);
+            float hi = Mathf.Max(clientCfg.FreeBladeSpinMin, clientCfg.FreeBladeSpinMax);
+
+            // Never ask for an angle the game itself would reject. FreeBlade widens these to
+            // +/-127; intersecting keeps the client honest if that ever stops being true, and
+            // guarantees the cast below stays inside sbyte.
+            lo = Mathf.Max(lo, StickAngleRefs.minBladeRef(input));
+            hi = Mathf.Min(hi, StickAngleRefs.maxBladeRef(input));
+            if (lo > hi) return true;   // no usable range at all, let vanilla have it
+
+            float buf = StickAngleRefs.bladeAngleBufferRef(input);
+            buf = Mathf.Clamp(buf + delta, lo, hi);
+
+            StickAngleRefs.bladeAngleBufferRef(input) = buf;
+            input.BladeAngleInput.ClientValue = (sbyte)buf;
+            return false;
+        }
+    }
 
     [HarmonyPatch(typeof(PlayerInput), "OnBladeAngleUpActionPerformed")]
     public static class BladeAngleUpSpinPatch
     {
         [HarmonyPrefix]
         public static bool Prefix(PlayerInput __instance, InputAction.CallbackContext context)
-        {
-            var cfg = DashFallMod.ConfigManager.CompAdjustEffective;
-            if (!cfg.FreeBladeEnabled) return true;
-
-            if (GlobalStateManager.UIState.IsMouseRequired) return false;
-            if (__instance.Player?.Stick == null) return false;
-
-            var clientCfg = DashFallMod.Client.DashFallConfigLoader.ClientConfig;
-            if (clientCfg == null || !clientCfg.FreeBladeSpinLockEnabled) return true;
-
-            float buf = StickAngleRefs.bladeAngleBufferRef(__instance);
-            buf += context.ReadValue<float>();
-            buf = Mathf.Clamp(buf, clientCfg.FreeBladeSpinMin, clientCfg.FreeBladeSpinMax);
-
-            StickAngleRefs.bladeAngleBufferRef(__instance) = buf;
-            __instance.BladeAngleInput.ClientValue = (sbyte)buf;
-            return false;
-        }
+            => BladeSpinLock.Apply(__instance, context.ReadValue<float>());
     }
-
-    // ── 6. Blade angle DOWN with wrapping ────────────────────────────────────
 
     [HarmonyPatch(typeof(PlayerInput), "OnBladeAngleDownActionPerformed")]
     public static class BladeAngleDownSpinPatch
     {
         [HarmonyPrefix]
         public static bool Prefix(PlayerInput __instance, InputAction.CallbackContext context)
-        {
-            var cfg = DashFallMod.ConfigManager.CompAdjustEffective;
-            if (!cfg.FreeBladeEnabled) return true;
-
-            if (GlobalStateManager.UIState.IsMouseRequired) return false;
-            if (__instance.Player?.Stick == null) return false;
-
-            var clientCfg = DashFallMod.Client.DashFallConfigLoader.ClientConfig;
-            if (clientCfg == null || !clientCfg.FreeBladeSpinLockEnabled) return true;
-
-            float buf = StickAngleRefs.bladeAngleBufferRef(__instance);
-            buf -= context.ReadValue<float>();
-            buf = Mathf.Clamp(buf, clientCfg.FreeBladeSpinMin, clientCfg.FreeBladeSpinMax);
-
-            StickAngleRefs.bladeAngleBufferRef(__instance) = buf;
-            __instance.BladeAngleInput.ClientValue = (sbyte)buf;
-            return false;
-        }
+            => BladeSpinLock.Apply(__instance, -context.ReadValue<float>());
     }
 }

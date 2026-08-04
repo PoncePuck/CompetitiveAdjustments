@@ -201,6 +201,32 @@ namespace DashFallMod
             catch (Exception e) { Debug.LogWarning("[Stances] OnStanceMessage decode failed: " + e.Message); }
         }
 
+        /// <summary>
+        /// Replay playback entry point. Deliberately routes through the unmodified live
+        /// dedupe and heartbeat: a replay body has a fresh NetworkObjectId so
+        /// _lastBroadcast has no entry and the first send always passes, and after that
+        /// the dedupe is exactly what we want, since a stance held across a whole replay
+        /// should not re-send at the replay tick rate.
+        /// </summary>
+        public static void ServerBroadcastStance(ulong bodyNetId, bool left, bool right)
+        {
+            // Gated here because NotifyClients is not, and the recorder guard passes as
+            // soon as either feature is on. Without this, running velocity extend with
+            // stances off sends a heartbeat per goalie ghost for the whole replay.
+            if (!_enabled) return;
+            NotifyClients(bodyNetId, left, right);
+        }
+
+        /// <summary>
+        /// Listen-server local apply, mirroring the write OnStanceMessage does for a
+        /// remote client. SendNamedMessageToAll skips the host's own client.
+        /// </summary>
+        public static void ClientApplyStance(PlayerBodyV2 body, bool left, bool right)
+        {
+            if (!_enabled || body == null) return;
+            _stanceState[body.GetInstanceID()] = (left, right);
+        }
+
         // =====================================================
         // HandleInputs Integration (server-side)
         // =====================================================

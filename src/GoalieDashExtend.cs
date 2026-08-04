@@ -254,7 +254,57 @@ namespace DashFallMod
         {
             return (a < 0.01f) != (b < 0.01f) || (a > 0.99f) != (b > 0.99f);
         }
-        
+
+        /// <summary>
+        /// Read the per-leg extensions exactly as the broadcast block in
+        /// UpdateVelocityExtend would send them, including the yield to Stances, so the
+        /// value recorded into a replay tick matches the value that went out live on the
+        /// same tick. Used by the replay recorder postfix in ReplayLegPads.cs.
+        /// </summary>
+        public static void TryGetBodyExtensions(PlayerBodyV2 body, out float left, out float right)
+        {
+            left = 0f;
+            right = 0f;
+            if (!_enabled || body == null) return;
+
+            foreach (var (pad, isLeft) in GetLegPads(body))
+            {
+                if (pad == null) continue;
+                int padId = pad.GetInstanceID();
+                // Same reason as the live broadcast: a stance-owned leg can still hold a
+                // stale non-zero _currentExtension from a prior slide, and recording it
+                // would flare the idle leg on playback.
+                if (Stances.IsControlledByStance(padId)) continue;
+                if (!_currentExtension.TryGetValue(padId, out float ext)) continue;
+                if (isLeft) left = ext; else right = ext;
+            }
+        }
+
+        /// <summary>
+        /// Replay playback entry point. Deliberately routes through the unmodified live
+        /// throttle: a replay body has a fresh NetworkObjectId so _sendState has no entry
+        /// and the first send always passes, and thereafter replay ticks are 0.0667s
+        /// apart against a 0.05s interval, so every tick passes anyway.
+        /// </summary>
+        public static void ServerBroadcastExtension(ulong bodyNetId, float left, float right)
+        {
+            // Gated here because NotifyClientsExtension is not. Every live caller sits
+            // behind an _enabled check already, so this is the one path that could keep
+            // sending for a feature an admin turned off mid-replay.
+            if (!_enabled) return;
+            NotifyClientsExtension(bodyNetId, left, right);
+        }
+
+        /// <summary>
+        /// Listen-server local apply, mirroring what OnVelocityExtendMessage does for a
+        /// remote client. SendNamedMessageToAll skips the host's own client.
+        /// </summary>
+        public static void ClientApplyExtension(PlayerBodyV2 body, float left, float right)
+        {
+            if (!_enabled || body == null) return;
+            ApplyExtensionTargets(body, left, right);
+        }
+
         /// <summary>
         /// Get or cache the leg pads for a body
         /// </summary>

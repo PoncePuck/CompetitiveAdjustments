@@ -11,7 +11,6 @@
   <ItemGroup>
     <Compile Remove="Puck\**\*.cs" />
     <Compile Remove="decompiled_puck_game\**\*.cs" />
-    <Compile Remove="CompAssets\**\*.cs" />
   </ItemGroup>
 
   <!-- Embed player state icons as resources -->
@@ -156,11 +155,6 @@
     </Reference>
   </ItemGroup>
 
-  <PropertyGroup>
-    <FrameBundleSrc>$(MSBuildProjectDirectory)\CompAssets\BundleOutput\CompAssets</FrameBundleSrc>
-    <FrameBundleDest>$(DeployDir)\assets\compassets</FrameBundleDest>
-  </PropertyGroup>
-
   <Target Name="CopyToPuckPlugins" AfterTargets="Build">
     <MakeDir Directories="$(DeployDir)" />
     <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll"
@@ -168,35 +162,19 @@
           OverwriteReadOnlyFiles="true" />
     <Message Importance="high" Text="Copied $(AssemblyName).dll → $(DeployDir)" />
 
-      <!-- Copy all local bundles placed under this project's assets/ folder. -->
-      <MakeDir Directories="$(DeployDir)\assets" Condition="Exists('$(MSBuildProjectDirectory)\assets')" />
-      <ItemGroup>
-    <LocalAssetBundles Include="$(MSBuildProjectDirectory)\assets\*" Condition="Exists('$(MSBuildProjectDirectory)\assets')" />
-      </ItemGroup>
-      <Copy SourceFiles="@(LocalAssetBundles)"
-        DestinationFolder="$(DeployDir)\assets"
-        SkipUnchangedFiles="true"
-        OverwriteReadOnlyFiles="true"
-        Condition="'@(LocalAssetBundles)' != ''" />
-      <Message Importance="high"
-       Text="Copied local asset bundles from $(MSBuildProjectDirectory)\assets → $(DeployDir)\assets"
-       Condition="'@(LocalAssetBundles)' != ''" />
-      <Message Importance="high"
-       Text="No local asset bundles found at $(MSBuildProjectDirectory)\assets"
-       Condition="'@(LocalAssetBundles)' == ''" />
-
-    <!-- Copy compassets bundle from the CompAssets Unity project if it has been built -->
-    <MakeDir Directories="$(DeployDir)\assets" Condition="Exists('$(FrameBundleSrc)')" />
-    <Copy SourceFiles="$(FrameBundleSrc)"
-          DestinationFiles="$(FrameBundleDest)"
+    <!-- Dedicated server copy. DeployDir2 was declared but never used by any task, so a
+         local dedicated server kept running whatever DLL it was last given by hand. That
+         is how a server ends up on the far side of a wire-format change from its clients.
+         Conditioned on the folder existing so it is a no-op on machines without one. -->
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll"
+          DestinationFolder="$(DeployDir2)"
           OverwriteReadOnlyFiles="true"
-          Condition="Exists('$(FrameBundleSrc)')" />
-    <Message Importance="high"
-             Text="Copied compassets bundle → $(FrameBundleDest)"
-             Condition="Exists('$(FrameBundleSrc)')" />
-    <Message Importance="high"
-             Text="Skipping compassets bundle copy — build it first via Assets &gt; Build CompAssets Bundle in Unity"
-             Condition="!Exists('$(FrameBundleSrc)')" />
+          Condition="Exists('$(DeployDir2)')" />
+    <Message Importance="high" Text="Copied $(AssemblyName).dll → $(DeployDir2)"
+             Condition="Exists('$(DeployDir2)')" />
+    <Message Importance="high" Text="Server deploy skipped, no folder at $(DeployDir2)"
+             Condition="!Exists('$(DeployDir2)')" />
+
   </Target>
 
 </Project>

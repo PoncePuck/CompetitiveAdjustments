@@ -225,7 +225,10 @@ namespace DashFallMod.Net
                     reader.ReadValueSafe(out ushort count);
                     for (int i = 0; i < count; i++)
                         ReadSingle(reader);
-                    CompetitiveAdjustments.ConfigManager.Log("ChunkSyncClient: applied bulk snapshot (" + count + " slots).");
+                    // "entries", not "slots": the server sends a slot that is mid-switch as
+                    // two entries (Current, then the deferred Pending), so this count is
+                    // >= the slot count and reading it as slots overstates the table.
+                    CompetitiveAdjustments.ConfigManager.Log("ChunkSyncClient: applied bulk snapshot (" + count + " entries).");
                 }
                 else
                 {

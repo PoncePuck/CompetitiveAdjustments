@@ -143,6 +143,20 @@ namespace DashFallMod
         [HarmonyPostfix]
         public static void Postfix(PlayerBodyV2 __instance)
         {
+            // Goalie stance + velocity-extend per-body and broadcast bookkeeping first.
+            // These are keyed by the body's InstanceID / the body's NetworkObjectId, not
+            // the player's, so the body alone is enough and there is no reason to run them
+            // under the null-Player early return below.
+            //
+            // No known path reaches here with a null Player: the "PlayerDespawned" replay
+            // event despawns the replay Player, but Player.OnNetworkDespawn despawns the
+            // body from inside itself via Server_DespawnCharacter, and PlayerBody.Player is
+            // only ever cleared in HandlePlayerReference, which that path does not call. So
+            // this ordering fixes no live leak, it just stops one from existing if that
+            // ever changes, now that replay bodies carry real stance and extension state.
+            try { Stances.OnBodyDespawned(__instance); } catch { }
+            try { GoalieDashExtend.OnBodyDespawned(__instance); } catch { }
+
             var player = __instance.Player;
             if (player == null) return;
             var id = player.NetworkObjectId;
@@ -162,12 +176,6 @@ namespace DashFallMod
             DashMod.LastStandingDashAt.Remove(id);
             DashMod.LastJumpAt.Remove(id);
             DashMod.LastDashAt.Remove(id);
-
-            // Goalie stance + velocity-extend per-body and broadcast bookkeeping.
-            // These are keyed by the body's InstanceID / the body's NetworkObjectId,
-            // not the player's, so they are not covered by the player-id removals above.
-            try { Stances.OnBodyDespawned(__instance); } catch { }
-            try { GoalieDashExtend.OnBodyDespawned(__instance); } catch { }
         }
     }
 }

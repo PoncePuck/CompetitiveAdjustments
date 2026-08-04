@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using AYellowpaper.SerializedCollections;
 using HarmonyLib;
 using Unity.Netcode;
@@ -51,6 +51,122 @@ namespace DashFallMod
         public static void Dbg(string msg) =>
             CompetitiveAdjustments.ConfigManager.Dbg(msg);
     }
+
+    /// <summary>
+    /// Widens the goalie butterfly leg pad by ButterflyPadOffset.
+    ///
+    /// Deliberately lives in DashFallMod rather than CompetitiveCompanion.  The
+    /// companion is only constructed when the process is not headless, so a patch
+    /// registered there never applies on a dedicated server: every client would
+    /// move the marker the pad collider follows while the server kept the vanilla
+    /// one, and the server is the side that resolves puck/pad contacts.  Shots
+    /// that visibly hit the pad would go in.  The DashFallMod namespace is patched
+    /// in every role exactly once.
+    /// </summary>
+    [HarmonyPatch(typeof(PlayerLegPad), "Awake")]
+    public class PlayerLegPadPatch
+    {
+        // Vanilla localPosition of every Butterfly marker we have touched, kept
+        // alongside the marker so the offset always applies to an untouched
+        // baseline.  The previous version did `localPosition += offset`, which
+        // compounds the moment it runs twice on the same marker.
+        private static readonly System.Collections.Generic.List<Entry> _entries =
+            new System.Collections.Generic.List<Entry>();
+
+        private struct Entry
+        {
+            public Transform Marker;
+            public Vector3 BasePos;
+        }
+
+        private static bool _loggedButterflyNotFound;
+
+        // One source for both roles.  On a server this is the operator's value;
+        // on a client it is what the server synced, because ReceiveMessage mirrors
+        // LegPadOffset into this same field.  Both sides therefore land on the
+        // same number and the collider matches what the player sees.
+        private static float Offset
+        {
+            get
+            {
+                var ct = CompetitiveAdjustments.ConfigManager.CompTweaksEffective;
+                return ct != null ? ct.ButterflyPadOffset : 0f;
+            }
+        }
+
+        [HarmonyPostfix]
+        public static void Postfix(PlayerLegPad __instance, ref SerializedDictionary<PlayerLegPadState, Transform> ___positions)
+        {
+            if (___positions == null || !___positions.ContainsKey(PlayerLegPadState.Butterfly))
+            {
+                if (!_loggedButterflyNotFound)
+                {
+                    CompetitiveAdjustments.ConfigManager.Log("Leg pad butterfly position NOT found.");
+                    _loggedButterflyNotFound = true;
+                }
+                return;
+            }
+
+            Transform marker = ___positions[PlayerLegPadState.Butterfly];
+            if (marker == null) return;
+
+            Vector3 basePos = Track(marker);
+            Apply(marker, basePos, Offset);
+        }
+
+        private static Vector3 Track(Transform marker)
+        {
+            // Prune as we scan.  The list otherwise only shrinks inside ReapplyAll, which
+            // fires on a config sync and nothing else, while every replay spawns two fresh
+            // pads per recorded goalie.  A match with many goal replays would accumulate
+            // dead Transform wrappers and make every Track call walk all of them.
+            for (int i = _entries.Count - 1; i >= 0; i--)
+            {
+                if (_entries[i].Marker == null)   // Unity null: the pad was destroyed
+                {
+                    _entries.RemoveAt(i);
+                    continue;
+                }
+                // Keep ReferenceEquals for the identity match.  A plain == would let two
+                // destroyed wrappers compare equal and hand a fresh pad a stale baseline.
+                if (ReferenceEquals(_entries[i].Marker, marker)) return _entries[i].BasePos;
+            }
+
+            var entry = new Entry { Marker = marker, BasePos = marker.localPosition };
+            _entries.Add(entry);
+            return entry.BasePos;
+        }
+
+        private static void Apply(Transform marker, Vector3 basePos, float offset)
+        {
+            // Sign by side so both pads widen outward instead of both sliding
+            // the same way across the crease.
+            float dir = basePos.x > 0f ? 1f : -1f;
+            marker.localPosition = new Vector3(basePos.x + dir * offset, basePos.y, basePos.z);
+        }
+
+        /// <summary>
+        /// Re-applies the current offset to every live marker.  A server knows its
+        /// value at load, but a client only learns it when the config sync lands,
+        /// which is normally after the pads have already run Awake.  Without this
+        /// the client would sit at offset 0 against a server that is not, which is
+        /// the same collider/visual divergence in the other direction.
+        /// </summary>
+        public static void ReapplyAll()
+        {
+            float offset = Offset;
+            for (int i = _entries.Count - 1; i >= 0; i--)
+            {
+                Transform marker = _entries[i].Marker;
+                if (marker == null)   // Unity null: the pad was destroyed
+                {
+                    _entries.RemoveAt(i);
+                    continue;
+                }
+                Apply(marker, _entries[i].BasePos, offset);
+            }
+        }
+    }
 }
 
 namespace CompetitiveCompanion
@@ -87,93 +203,6 @@ namespace CompetitiveCompanion
         }
     }
 
-    [HarmonyPatch(typeof(PlayerBodyV2), "OnNetworkPostSpawn")]
-    public class PlayerBodyPatch
-    {
-        [HarmonyPostfix]
-        public static void Postfix(PlayerBodyV2 __instance, ref float ___slideTurnMultiplier,
-            ref float ___stopDrag, ref float ___balanceRecoveryTime, ref PlayerMesh ___playerMesh)
-        {
-            if (PluginCore.torsoMesh == null) return;
-            if (__instance.name.Contains("Goalie")) return;
-
-            // ── VISUAL ONLY — never touch MeshCollider or mr.enabled ──────────────────
-            // MeshCollider is owned by CompetitivePuckTweaks (server config).
-            // MeshRendererHider handles local player body visibility via camera events.
-            var mf = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshFilter>();
-            if (mf == null) return;
-
-            var df = CompetitiveAdjustments.ConfigManager.CompAdjustEffective;
-            bool showCustomVisual = PluginCore.torsoMesh != null
-                && !(df?.DisableCustomTorsoVisual == true)
-                && (DashFallMod.Client.DashFallConfigLoader.ClientConfig?.ShowCustomTorsoMesh ?? true);
-
-            // Always save the true original before we potentially overwrite it, so
-            // RefreshPlayerTorsoStates can restore it even if this patch runs after Tweaks'.
-            int mfId = mf.GetInstanceID();
-            if (!CompetitivePuckTweaks.src.PluginCore.OriginalTorsoMeshes.ContainsKey(mfId))
-                CompetitivePuckTweaks.src.PluginCore.OriginalTorsoMeshes[mfId] = mf.sharedMesh;
-
-            if (showCustomVisual)
-            {
-                mf.sharedMesh = PluginCore.torsoMesh;
-                mf.transform.localScale = new Vector3(
-                    PluginCore.torsoMeshScale * (df?.CustomTorsoScaleX ?? 1f),
-                    PluginCore.torsoMeshScale * (df?.CustomTorsoScaleY ?? 1f),
-                    PluginCore.torsoMeshScale * (df?.CustomTorsoScaleZ ?? 1f));
-                mf.transform.localPosition = Vector3.zero;
-                mf.transform.localRotation = Quaternion.Euler(0, 180, 0);
-            }
-            // If !showCustomVisual: original mesh from game spawn is already in place — leave it.
-        }
-    }
-
-    [HarmonyPatch(typeof(MeshRendererTexturer), "SetTexture")]
-    public class MeshRendererTexturerPatch
-    {
-        // b1117 reworked MeshRendererTexturer from an instantiated `Material material`
-        // field to a MaterialPropertyBlock, so the old `___material` field injection
-        // no longer resolves and this patch silently failed to apply. Drive the
-        // torso/groin transparency through the renderer's instanced material instead
-        // (which is what `___material` effectively was in b897).
-        [HarmonyPostfix]
-        public static void Postfix(MeshRendererTexturer __instance, MeshRenderer ___meshRenderer)
-        {
-            if (___meshRenderer == null) return;
-            if (!__instance.gameObject.name.Contains("Torso") &&
-                !__instance.gameObject.name.Contains("Groin")) return;
-
-            // Skip goalies — their torso/groin materials must not be modified.
-            var body = __instance.GetComponentInParent<PlayerBodyV2>();
-            if (body == null || body.name.Contains("Goalie")) return;
-
-            Material material = ___meshRenderer.material;
-            if (material == null) return;
-
-            var dfCfg = CompetitiveAdjustments.ConfigManager.CompAdjustEffective;
-            bool customActive = PluginCore.torsoMesh != null
-                                && !(dfCfg?.DisableCustomTorsoVisual == true)
-                                && (DashFallMod.Client.DashFallConfigLoader.ClientConfig?.ShowCustomTorsoMesh ?? true);
-
-            if (customActive)
-            {
-                // Custom torso is active — keep torso and groin fully opaque so they render correctly.
-                material.DisableKeyword("_SURFACE_TYPE_TRANSPARENT");
-                material.SetOverrideTag("RenderType", "Opaque");
-                Color c = material.color;
-                c.a = 1.0f;
-                material.color = c;
-            }
-            else
-            {
-                material.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
-                material.SetOverrideTag("RenderType", "Transparent");
-                Color color = material.color;
-                color.a = 0.1f;
-                material.color = color;
-            }
-        }
-    }
 }
 
 namespace CompetitiveCompanion.src
@@ -198,44 +227,6 @@ namespace CompetitiveCompanion.src
         }
     }
 
-    [HarmonyPatch(typeof(PlayerLegPad), "Awake")]
-    public class PlayerLegPadPatch
-    {
-        private static bool _loggedButterflyFound;
-        private static bool _loggedButterflyNotFound;
-
-        [HarmonyPostfix]
-        public static void Postfix(PlayerLegPad __instance, ref SerializedDictionary<PlayerLegPadState, Transform> ___positions)
-        {
-            if (___positions.ContainsKey(PlayerLegPadState.Butterfly))
-            {
-                if (!_loggedButterflyFound)
-                {
-                    PluginCore.Log("Leg pad butterfly position found");
-                    _loggedButterflyFound = true;
-                }
-                Transform legPadPosition = ___positions[PlayerLegPadState.Butterfly];
-                if (legPadPosition.localPosition.x > 0)
-                {
-                    legPadPosition.localPosition += new Vector3(PluginCore.config.ButterflyPadOffset, 0, 0);
-                }
-                else
-                {
-                    legPadPosition.localPosition -= new Vector3(PluginCore.config.ButterflyPadOffset, 0, 0);
-                }
-
-                ___positions[PlayerLegPadState.Butterfly] = legPadPosition;
-            }
-            else
-            {
-                if (!_loggedButterflyNotFound)
-                {
-                    PluginCore.Log("Leg pad butterfly position NOT found");
-                    _loggedButterflyNotFound = true;
-                }
-            }
-        }
-    }
 }
 
 namespace CompetitivePuckTweaks.src

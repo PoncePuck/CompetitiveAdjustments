@@ -1,4 +1,4 @@
-// DashFall.UI.cs - Full UI Panel with keybind editing (copied from PlayerInput style)
+﻿// DashFall.UI.cs - Full UI Panel with keybind editing (copied from PlayerInput style)
 
 using System;
 using System.Collections;
@@ -978,75 +978,33 @@ namespace DashFallMod.Client
 
             var clientConfig = DashFallConfigLoader.ClientConfig;
 
-            _actionsSection.Add(MakeToggleRow("CUSTOM TORSO MESH", "Show custom skater torso mesh", clientConfig.ShowCustomTorsoMesh, (val) =>
-            {
-                clientConfig.ShowCustomTorsoMesh = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-                CompetitivePuckTweaks.src.PluginCore.RefreshTorsoVisualsForClient();
-            }));
+            // MINIMAP TWEAKS, PUCK SCALE (+X/Y/Z) and BUTTERFLY PAD OFFSET used to sit here.
+            // The minimap rescale is unconditional now, because the vanilla minimap is
+            // simply wrong on a resized rink. The puck and pad values are server state that
+            // the sync path overwrites, so a local edit held only until the next packet
+            // while disagreeing with every other client in the meantime; the config fields
+            // remain as the sync slots they always were.
 
-            _actionsSection.Add(MakeToggleRow("MINIMAP TWEAKS", "Apply arena-scale minimap rescaling (disable if you prefer default minimap)", clientConfig.EnableMinimapTweaks, (val) =>
-            {
-                clientConfig.EnableMinimapTweaks = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-                DashFallClientRunner.RefreshMinimap();
-            }));
-
-            _actionsSection.Add(MakeFloatRow("PUCK SCALE", "Companion visual puck scale, uniform master multiplier (server-synced)", clientConfig.PuckScale, 0.5f, 2f, (val) =>
-            {
-                clientConfig.PuckScale = val;
-                MirrorPuckScaleToCompanion(clientConfig);
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-                ApplyLocalPuckScale();
-            }));
-
-            _actionsSection.Add(MakeFloatRow("PUCK SCALE X", "Per-axis puck width (left/right of the disc face), multiplies PUCK SCALE", clientConfig.PuckScaleX, 0.25f, 3f, (val) =>
-            {
-                clientConfig.PuckScaleX = val;
-                MirrorPuckScaleToCompanion(clientConfig);
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-                ApplyLocalPuckScale();
-            }));
-
-            _actionsSection.Add(MakeFloatRow("PUCK SCALE Y", "Per-axis puck thickness (height), multiplies PUCK SCALE", clientConfig.PuckScaleY, 0.25f, 3f, (val) =>
-            {
-                clientConfig.PuckScaleY = val;
-                MirrorPuckScaleToCompanion(clientConfig);
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-                ApplyLocalPuckScale();
-            }));
-
-            _actionsSection.Add(MakeFloatRow("PUCK SCALE Z", "Per-axis puck depth (forward/back of the disc face), multiplies PUCK SCALE", clientConfig.PuckScaleZ, 0.25f, 3f, (val) =>
-            {
-                clientConfig.PuckScaleZ = val;
-                MirrorPuckScaleToCompanion(clientConfig);
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-                ApplyLocalPuckScale();
-            }));
-
-            _actionsSection.Add(MakeFloatRow("BUTTERFLY PAD OFFSET", "Companion leg pad offset (server-synced)", clientConfig.ButterflyPadOffset, 0f, 0.25f, (val) =>
-            {
-                clientConfig.ButterflyPadOffset = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-            }));
-
-            _actionsSection.Add(MakeToggleRow("FREE BLADE SPIN LOCK", "Lock blade spin to client min/max (off = vanilla range)", clientConfig.FreeBladeSpinLockEnabled, (val) =>
+            _actionsSection.Add(MakeToggleRow("FREE BLADE SPIN LOCK", "On (default) keeps the vanilla blade range. Turn OFF for full free spin", clientConfig.FreeBladeSpinLockEnabled, (val) =>
             {
                 clientConfig.FreeBladeSpinLockEnabled = val;
                 DashFallConfigLoader.SaveClientConfig(clientConfig);
             }));
 
-            _actionsSection.Add(MakeFloatRow("FREE BLADE SPIN MIN", "Lower bound for free spin stick lock (client-side)", clientConfig.FreeBladeSpinMin, -127f, 127f, (val) =>
-            {
-                clientConfig.FreeBladeSpinMin = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-            }));
-
-            _actionsSection.Add(MakeFloatRow("FREE BLADE SPIN MAX", "Upper bound for free spin stick lock (client-side)", clientConfig.FreeBladeSpinMax, -127f, 127f, (val) =>
-            {
-                clientConfig.FreeBladeSpinMax = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-            }));
+            // One row, two draggers. Two independent float rows let the user push MIN above
+            // MAX, which produced an empty range that Mathf.Clamp resolves to a single
+            // value, and the blade froze there. A range control cannot express that state.
+            _actionsSection.Add(MakeRangeSliderRow(
+                "FREE BLADE SPIN RANGE",
+                "Lower and upper bound, used only while the lock above is on",
+                clientConfig.FreeBladeSpinMin, clientConfig.FreeBladeSpinMax,
+                FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax,
+                (lo, hi) =>
+                {
+                    clientConfig.FreeBladeSpinMin = lo;
+                    clientConfig.FreeBladeSpinMax = hi;
+                    DashFallConfigLoader.SaveClientConfig(clientConfig);
+                }));
 
             // Sprint shoulder trail toggle (client preference)
             _actionsSection.Add(MakeToggleRow("SPRINT SHOULDER TRAIL", "Show white shoulder trails while sprinting", clientConfig.EnableSprintShoulderTrail, (val) =>
@@ -1067,54 +1025,73 @@ namespace DashFallMod.Client
                 DashFallConfigLoader.SaveClientConfig(clientConfig);
             }));
 
-            _actionsSection.Add(MakeHexColorRow("TRAIL START COLOR", "Hex color (#RRGGBB) at trail head", clientConfig.SprintShoulderTrailStartColorHex, (val) =>
-            {
-                clientConfig.SprintShoulderTrailStartColorHex = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-            }));
+            // Colour and opacity are one choice, so they are one control: the swatch shows
+            // the colour at its actual alpha over a checkerboard, and the hex field stays as
+            // the typeable path for someone matching an exact team colour.
+            _actionsSection.Add(MakeColorPickerRow(
+                "TRAIL START COLOR", "Colour and opacity at the trail head",
+                clientConfig.SprintShoulderTrailStartColorHex, clientConfig.SprintShoulderTrailStartAlpha,
+                (hex, alpha) =>
+                {
+                    clientConfig.SprintShoulderTrailStartColorHex = hex;
+                    clientConfig.SprintShoulderTrailStartAlpha = alpha;
+                    DashFallConfigLoader.SaveClientConfig(clientConfig);
+                }));
 
-            _actionsSection.Add(MakeSliderRow("TRAIL START ALPHA", "Opacity at trail head", clientConfig.SprintShoulderTrailStartAlpha, 0f, 1f, (val) =>
-            {
-                clientConfig.SprintShoulderTrailStartAlpha = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-            }));
+            _actionsSection.Add(MakeColorPickerRow(
+                "TRAIL END COLOR", "Colour and opacity at the trail tail",
+                clientConfig.SprintShoulderTrailEndColorHex, clientConfig.SprintShoulderTrailEndAlpha,
+                (hex, alpha) =>
+                {
+                    clientConfig.SprintShoulderTrailEndColorHex = hex;
+                    clientConfig.SprintShoulderTrailEndAlpha = alpha;
+                    DashFallConfigLoader.SaveClientConfig(clientConfig);
+                }));
 
-            _actionsSection.Add(MakeHexColorRow("TRAIL END COLOR", "Hex color (#RRGGBB) at trail tail", clientConfig.SprintShoulderTrailEndColorHex, (val) =>
-            {
-                clientConfig.SprintShoulderTrailEndColorHex = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-            }));
-
-            _actionsSection.Add(MakeSliderRow("TRAIL END ALPHA", "Opacity at trail tail", clientConfig.SprintShoulderTrailEndAlpha, 0f, 1f, (val) =>
-            {
-                clientConfig.SprintShoulderTrailEndAlpha = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-            }));
-
-            // Debug / clip brush toggles (moved to bottom)
-            _actionsSection.Add(MakeToggleRow("CLIENT DEBUG LOG", "Enable debug logging to console", clientConfig.EnableClientDebug, (val) =>
+            // Debug block at the bottom. CLIENT DEBUG LOG is the gate and is always visible;
+            // everything below it only appears once debug is on, because those toggles paint
+            // collider geometry over the rink and exist for diagnosing this mod, not for
+            // playing with.
+            _actionsSection.Add(MakeToggleRow("CLIENT DEBUG LOG", "Enable debug logging and show the debug tools below", clientConfig.EnableClientDebug, (val) =>
             {
                 clientConfig.EnableClientDebug = val;
+
+                // Turning debug off retracts the visuals it gates. Without this the brushes
+                // stay painted over the rink with no row left to switch them off, and the
+                // only way back is to hand-edit the config file.
+                if (!val && (clientConfig.ShowArenaClipBrushes || clientConfig.ShowPlayerClipBrushes))
+                {
+                    clientConfig.ShowArenaClipBrushes = false;
+                    clientConfig.ShowPlayerClipBrushes = false;
+                    CompetitivePuckTweaks.src.ClientClipBrushes.ApplyArena(false);
+                    CompetitivePuckTweaks.src.ClientClipBrushes.ApplyPlayer(false);
+                }
+
                 DashFallConfigLoader.SaveClientConfig(clientConfig);
+                // MakeToggleRow already calls RefreshActionsUI, which rebuilds this list
+                // against the new flag, so the rows below appear or disappear immediately.
             }));
 
-            _actionsSection.Add(MakeToggleRow("SHOW ARENA CLIP BRUSHES", "Visualise arena/board collider geometry (debug)", clientConfig.ShowArenaClipBrushes, (val) =>
+            if (clientConfig.EnableClientDebug)
             {
-                clientConfig.ShowArenaClipBrushes = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-                CompetitivePuckTweaks.src.ClientClipBrushes.ApplyArena(val);
-            }));
+                _actionsSection.Add(MakeToggleRow("SHOW ARENA CLIP BRUSHES", "Visualise arena/board collider geometry (debug)", clientConfig.ShowArenaClipBrushes, (val) =>
+                {
+                    clientConfig.ShowArenaClipBrushes = val;
+                    DashFallConfigLoader.SaveClientConfig(clientConfig);
+                    CompetitivePuckTweaks.src.ClientClipBrushes.ApplyArena(val);
+                }));
 
-            _actionsSection.Add(MakeToggleRow("SHOW PLAYER CLIP BRUSHES", "Visualise player body collider geometry (debug)", clientConfig.ShowPlayerClipBrushes, (val) =>
-            {
-                clientConfig.ShowPlayerClipBrushes = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-                CompetitivePuckTweaks.src.ClientClipBrushes.ApplyPlayer(val);
-            }));
+                _actionsSection.Add(MakeToggleRow("SHOW PLAYER CLIP BRUSHES", "Visualise player body collider geometry (debug)", clientConfig.ShowPlayerClipBrushes, (val) =>
+                {
+                    clientConfig.ShowPlayerClipBrushes = val;
+                    DashFallConfigLoader.SaveClientConfig(clientConfig);
+                    CompetitivePuckTweaks.src.ClientClipBrushes.ApplyPlayer(val);
+                }));
 
-            // Debug: preview the out-of-date version popup without a real Workshop update.
-            _actionsSection.Add(MakeButtonRow("TEST VERSION POPUP", "Preview the 'mod out of date' popup", "SHOW",
-                () => ForceShowVersionPopupForTest()));
+                // Preview the out-of-date version popup without a real Workshop update.
+                _actionsSection.Add(MakeButtonRow("TEST VERSION POPUP", "Preview the 'mod out of date' popup", "SHOW",
+                    () => ForceShowVersionPopupForTest()));
+            }
 
             // Check if connected to server
             var features = PoncePuck.Keybinds.ServerBridge.ReceivedFeatures;
@@ -1299,7 +1276,28 @@ namespace DashFallMod.Client
             return row;
         }
 
-        private UITK.VisualElement MakeSliderRow(string title, string description, float currentValue, float min, float max, Action<float> onChanged)
+        // MakeSliderRow was the single-value slider row. Its last callers were the trail alpha
+        // rows, which are now part of MakeColorPickerRow. StyleSliderControl survives
+        // because the colour picker's channel sliders use it.
+
+                /// <summary>
+        /// One row carrying BOTH ends of a range on a single track with two draggers.
+        ///
+        /// This replaces the pair of independent float rows that used to set the free blade
+        /// spin bounds. Two separate rows let the user put the lower bound above the upper
+        /// one, and Mathf.Clamp(value, min, max) with min &gt; max collapses to a single
+        /// number, so the blade stopped responding and sat at one angle. A MinMaxSlider
+        /// cannot represent a crossed range at all, so the failure is designed out rather
+        /// than validated against.
+        ///
+        /// The two numeric fields stay editable for exact values, and each one re-asserts
+        /// the ordering on commit so typing cannot recreate what the draggers prevent.
+        /// </summary>
+        private UITK.VisualElement MakeRangeSliderRow(
+            string title, string description,
+            float currentMin, float currentMax,
+            float limitMin, float limitMax,
+            Action<float, float> onChanged)
         {
             var row = new UITK.VisualElement();
             MarkSearchable(row, title);
@@ -1311,8 +1309,7 @@ namespace DashFallMod.Client
             row.style.paddingLeft = 12;
             row.style.paddingRight = 12;
 
-            // PlayerQoL slider row layout: fixed-width label column, then the
-            // editable value field, then the slider filling the rest of the row.
+            // Same 300px label column the other value rows use, so controls line up down the page.
             var textContainer = new UITK.VisualElement();
             textContainer.style.minWidth = 300;
             textContainer.style.maxWidth = 300;
@@ -1337,56 +1334,219 @@ namespace DashFallMod.Client
 
             row.Add(textContainer);
 
-            var input = new TextField();
-            input.value = currentValue.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
-            input.style.minWidth = 65;
-            input.style.maxWidth = 65;
-            input.style.maxHeight = 30;
-            input.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleRight);
-            input.style.marginLeft = 8;
-            input.style.marginRight = 8;
-            input.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
-            input.style.color = Color.white;
-            ForceUIFont(input);
+            // Order the incoming pair rather than trusting it: a config written by the old
+            // two-row UI can already be crossed, and that saved state is exactly the bug.
+            float startLo = Mathf.Clamp(Mathf.Min(currentMin, currentMax), limitMin, limitMax);
+            float startHi = Mathf.Clamp(Mathf.Max(currentMin, currentMax), limitMin, limitMax);
 
-            var slider = new UITK.Slider(min, max);
+            var lowField = MakeRangeNumberField(startLo);
+            var highField = MakeRangeNumberField(startHi);
+
+            var slider = new UITK.MinMaxSlider(startLo, startHi, limitMin, limitMax);
             slider.style.flexGrow = 1;
             slider.style.flexBasis = 0;
-            slider.style.marginLeft = 6;
-            slider.style.marginRight = 6;
-            slider.value = Mathf.Clamp(currentValue, min, max);
-            StyleSliderControl(slider);
+            // Wider than the single sliders' 6, because each handle overhangs its end of the
+            // track by half its width and would otherwise touch the number fields.
+            slider.style.marginLeft = RangeThumbSize / 2f + 2f;
+            slider.style.marginRight = RangeThumbSize / 2f + 2f;
+            StyleMinMaxSliderControl(slider);
 
             bool syncing = false;
+
+            void Commit(float lo, float hi, bool writeSlider)
+            {
+                lo = Mathf.Clamp(lo, limitMin, limitMax);
+                hi = Mathf.Clamp(hi, limitMin, limitMax);
+                if (lo > hi) { float swap = lo; lo = hi; hi = swap; }
+
+                syncing = true;
+                lowField.value = FormatRangeNumber(lo);
+                highField.value = FormatRangeNumber(hi);
+                if (writeSlider) slider.value = new Vector2(lo, hi);
+                syncing = false;
+
+                onChanged?.Invoke(lo, hi);
+            }
+
             slider.RegisterValueChangedCallback(evt =>
             {
                 if (syncing) return;
-                float v = Mathf.Clamp(evt.newValue, min, max);
-                syncing = true;
-                input.value = v.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
-                syncing = false;
-                onChanged?.Invoke(v);
+                Commit(evt.newValue.x, evt.newValue.y, writeSlider: false);
             });
-            input.RegisterCallback<FocusOutEvent>(_ =>
+
+            // Committed on focus loss, matching the other numeric rows: parsing every keystroke would
+            // reformat the text out from under someone halfway through typing "-12".
+            lowField.RegisterCallback<FocusOutEvent>(_ =>
             {
-                if (!float.TryParse(input.value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+                if (syncing) return;
+                if (!TryParseRangeNumber(lowField.value, out float parsed))
                 {
-                    input.value = slider.value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+                    lowField.value = FormatRangeNumber(slider.value.x);
                     return;
                 }
-
-                float v = Mathf.Clamp(parsed, min, max);
-                syncing = true;
-                slider.value = v;
-                input.value = v.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
-                syncing = false;
-                onChanged?.Invoke(v);
+                Commit(parsed, slider.value.y, writeSlider: true);
             });
 
-            row.Add(input);
+            highField.RegisterCallback<FocusOutEvent>(_ =>
+            {
+                if (syncing) return;
+                if (!TryParseRangeNumber(highField.value, out float parsed))
+                {
+                    highField.value = FormatRangeNumber(slider.value.y);
+                    return;
+                }
+                Commit(slider.value.x, parsed, writeSlider: true);
+            });
+
+            row.Add(lowField);
             row.Add(slider);
+            row.Add(highField);
+
+            // Normalise a crossed or out-of-range config on first build, so the file stops
+            // carrying the bad state as soon as the user opens the settings page.
+            if (!Mathf.Approximately(startLo, currentMin) || !Mathf.Approximately(startHi, currentMax))
+                onChanged?.Invoke(startLo, startHi);
 
             return row;
+        }
+
+        private static string FormatRangeNumber(float value)
+            => value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+        private static bool TryParseRangeNumber(string text, out float value)
+            => float.TryParse(
+                text,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out value);
+
+        private TextField MakeRangeNumberField(float initial)
+        {
+            var field = new TextField();
+            field.value = FormatRangeNumber(initial);
+            field.style.minWidth = 58;
+            field.style.maxWidth = 58;
+            field.style.maxHeight = 30;
+            field.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleRight);
+            field.style.marginLeft = 6;
+            field.style.marginRight = 6;
+            field.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
+            field.style.color = Color.white;
+            ForceUIFont(field);
+            return field;
+        }
+
+        // Geometry for the range slider, shared so the thumb offsets stay derived from the
+        // rail rather than hand-tuned against it.
+        private const float RangeRowHeight = 26f;
+        private const float RangeRailHeight = 4f;
+        private const float RangeThumbSize = 16f;
+        private const float RangeRailTop = (RangeRowHeight - RangeRailHeight) / 2f;              // 11
+        private const float RangeThumbTop = -(RangeThumbSize - RangeRailHeight) / 2f;            // -6
+
+        /// <summary>
+        /// MinMaxSlider styled to match the single-value sliders: a 4px translucent rail,
+        /// the selected span filled on top of it, and a round white handle at each end.
+        ///
+        /// The part names are the five the shipped runtime theme actually defines
+        /// (unity-min-max-slider__input/tracker/dragger/min-thumb/max-thumb). The __input
+        /// container matters and was the thing making this look wrong: it is the box the
+        /// other three are positioned inside, so leaving it at its default height left the
+        /// rail measuring against something other than the 26px row and the handles sitting
+        /// off the rail.
+        ///
+        /// The two thumbs are children of the DRAGGER, not of the input, so they inherit the
+        /// dragger's box. That is why the dragger cannot simply be made handle-height: it
+        /// would drag the thumbs with it. The dragger is kept at rail height and the thumbs
+        /// are pulled back out to centre with an explicit negative top, and anchored half
+        /// their width past each edge so they sit centred on the ends of the span.
+        /// </summary>
+        private static void StyleMinMaxSliderControl(UITK.MinMaxSlider s)
+        {
+            s.style.height = RangeRowHeight;
+
+            var input = s.Q<UITK.VisualElement>(className: "unity-min-max-slider__input")
+                     ?? s.Q<UITK.VisualElement>(className: "unity-base-field__input");
+            if (input != null)
+            {
+                input.style.height = RangeRowHeight;
+                input.style.flexGrow = 1;
+                input.style.marginLeft = 0;
+                input.style.marginRight = 0;
+                input.style.paddingLeft = 0;
+                input.style.paddingRight = 0;
+                // The handles overhang the span by half their width at each end, and the
+                // input is their clipping box.
+                input.style.overflow = UITK.Overflow.Visible;
+            }
+
+            var tracker = s.Q<UITK.VisualElement>(className: "unity-min-max-slider__tracker");
+            if (tracker != null)
+            {
+                tracker.style.position = UITK.Position.Absolute;
+                tracker.style.left = 0;
+                tracker.style.right = 0;
+                tracker.style.top = RangeRailTop;
+                tracker.style.height = RangeRailHeight;
+                tracker.style.marginTop = 0;
+                tracker.style.backgroundColor = new UITK.StyleColor(new Color(1f, 1f, 1f, 0.35f));
+                SetUniformRadius(tracker, RangeRailHeight / 2f);
+                SetNoBorder(tracker);
+            }
+
+            // The selected span. Left/right are owned by the drag logic and must not be
+            // touched here, only the vertical box and the paint.
+            var dragger = s.Q<UITK.VisualElement>(className: "unity-min-max-slider__dragger");
+            if (dragger != null)
+            {
+                dragger.style.top = RangeRailTop;
+                dragger.style.height = RangeRailHeight;
+                dragger.style.marginTop = 0;
+                dragger.style.backgroundColor = new UITK.StyleColor(Color.white);
+                SetUniformRadius(dragger, RangeRailHeight / 2f);
+                SetNoBorder(dragger);
+                dragger.style.overflow = UITK.Overflow.Visible;
+            }
+
+            StyleRangeHandle(s.Q<UITK.VisualElement>(className: "unity-min-max-slider__min-thumb"), isMin: true);
+            StyleRangeHandle(s.Q<UITK.VisualElement>(className: "unity-min-max-slider__max-thumb"), isMin: false);
+        }
+
+        private static void StyleRangeHandle(UITK.VisualElement handle, bool isMin)
+        {
+            if (handle == null) return;
+
+            handle.style.position = UITK.Position.Absolute;
+            handle.style.width = RangeThumbSize;
+            handle.style.height = RangeThumbSize;
+            handle.style.top = RangeThumbTop;
+
+            // Centred on its end of the span rather than butted against it, so the pair
+            // reads as two grab points on one bar.
+            if (isMin) handle.style.left = -RangeThumbSize / 2f;
+            else handle.style.right = -RangeThumbSize / 2f;
+
+            handle.style.backgroundColor = new UITK.StyleColor(Color.white);
+            SetUniformRadius(handle, RangeThumbSize / 2f);
+            SetNoBorder(handle);
+        }
+
+        private static void SetUniformRadius(UITK.VisualElement element, float radius)
+        {
+            element.style.borderTopLeftRadius = radius;
+            element.style.borderTopRightRadius = radius;
+            element.style.borderBottomLeftRadius = radius;
+            element.style.borderBottomRightRadius = radius;
+        }
+
+        // The theme gives these parts a border that reads as a grey outline against the
+        // row background once they are recoloured white.
+        private static void SetNoBorder(UITK.VisualElement element)
+        {
+            element.style.borderTopWidth = 0;
+            element.style.borderBottomWidth = 0;
+            element.style.borderLeftWidth = 0;
+            element.style.borderRightWidth = 0;
         }
 
         // PlayerQoL slider look: thin translucent white rail with a large round
@@ -1428,17 +1588,42 @@ namespace DashFallMod.Client
             }
         }
 
-        private UITK.VisualElement MakeHexColorRow(string title, string description, string currentHex, Action<string> onChanged)
+        /// <summary>
+        /// A colour swatch that opens an inline HSV picker, plus the hex field it replaces.
+        ///
+        /// UnityEditor.UIElements.ColorField is editor-only, so there is no stock runtime
+        /// colour control to reach for; this is built from the primitives UITK does ship at
+        /// runtime. Hue/saturation/value rather than raw RGB because picking a colour by
+        /// dragging three independent channel sliders is guesswork, while hue-then-shade is
+        /// how people actually think about it.
+        ///
+        /// Alpha is folded in because colour and opacity are one decision, and the swatch
+        /// can only tell the truth about a translucent trail if it shows both. The config
+        /// keeps them as the separate hex and float fields it always had, so nothing
+        /// downstream changes.
+        ///
+        /// The picker starts collapsed. Two of these expanded at once would push the rest of
+        /// the settings page off screen, so opening one is a deliberate click.
+        /// </summary>
+        private UITK.VisualElement MakeColorPickerRow(
+            string title, string description, string currentHex, float currentAlpha, Action<string, float> onChanged)
         {
-            var row = new UITK.VisualElement();
-            MarkSearchable(row, title);
-            row.style.flexDirection = UITK.FlexDirection.Row;
-            row.style.alignItems = UITK.Align.Center;
-            row.style.height = 50;
-            row.style.marginBottom = 8;
-            row.style.backgroundColor = new UITK.StyleColor(RowBg);
-            row.style.paddingLeft = 12;
-            row.style.paddingRight = 12;
+            Color startColor = ParseHexOrWhite(currentHex);
+            float alpha = Mathf.Clamp01(currentAlpha);
+
+            // The row is a column: the header line, then the picker that expands under it.
+            var container = new UITK.VisualElement();
+            MarkSearchable(container, title);
+            container.style.flexDirection = UITK.FlexDirection.Column;
+            container.style.marginBottom = 8;
+            container.style.backgroundColor = new UITK.StyleColor(RowBg);
+            container.style.paddingLeft = 12;
+            container.style.paddingRight = 12;
+
+            var header = new UITK.VisualElement();
+            header.style.flexDirection = UITK.FlexDirection.Row;
+            header.style.alignItems = UITK.Align.Center;
+            header.style.height = 50;
 
             var textContainer = new UITK.VisualElement();
             textContainer.style.flexGrow = 1;
@@ -1463,72 +1648,183 @@ namespace DashFallMod.Client
                 textContainer.Add(descLabel);
             }
 
-            row.Add(textContainer);
+            header.Add(textContainer);
 
-            var input = new TextField();
-            input.value = string.IsNullOrWhiteSpace(currentHex) ? "#FFFFFF" : currentHex;
-            input.style.width = 120;
-            input.style.minWidth = 120;
-            input.style.flexShrink = 0;
-            input.style.height = 34;
-            input.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-            input.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
-            input.style.color = Color.white;
-            input.style.whiteSpace = UITK.WhiteSpace.NoWrap;
-            ForceUIFont(input);
-            input.RegisterCallback<FocusOutEvent>(_ =>
+            // Alpha is shown by layering the colour over a light plate: at alpha 0 the
+            // swatch reads as the plate, which is the honest preview of an invisible trail.
+            var swatchPlate = new UITK.VisualElement();
+            swatchPlate.style.width = 54;
+            swatchPlate.style.height = 34;
+            swatchPlate.style.flexShrink = 0;
+            swatchPlate.style.backgroundColor = new UITK.StyleColor(new Color(0.55f, 0.55f, 0.55f));
+            StyleSwatchBorder(swatchPlate);
+
+            var swatchFill = new UITK.VisualElement();
+            swatchFill.style.flexGrow = 1;
+            swatchPlate.Add(swatchFill);
+
+            var hexField = new TextField();
+            hexField.value = NormalizeHex(currentHex) ?? "#FFFFFF";
+            hexField.style.width = 110;
+            hexField.style.minWidth = 110;
+            hexField.style.flexShrink = 0;
+            hexField.style.height = 34;
+            hexField.style.marginLeft = 8;
+            hexField.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
+            hexField.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
+            hexField.style.color = Color.white;
+            hexField.style.whiteSpace = UITK.WhiteSpace.NoWrap;
+            ForceUIFont(hexField);
+
+            var toggleButton = new Button { text = "PICK" };
+            toggleButton.style.width = 76;
+            toggleButton.style.height = 34;
+            toggleButton.style.flexShrink = 0;
+            toggleButton.style.marginLeft = 8;
+            toggleButton.style.marginRight = 0;
+            ForceUIFont(toggleButton);
+
+            header.Add(swatchPlate);
+            header.Add(hexField);
+            header.Add(toggleButton);
+            container.Add(header);
+
+            var picker = new UITK.VisualElement();
+            picker.style.flexDirection = UITK.FlexDirection.Column;
+            picker.style.display = UITK.DisplayStyle.None;
+            picker.style.paddingBottom = 10;
+            container.Add(picker);
+
+            Color.RGBToHSV(startColor, out float h, out float s, out float v);
+
+            var hueSlider = MakePickerSlider("HUE", h, 0f, 1f, picker);
+            var satSlider = MakePickerSlider("SATURATION", s, 0f, 1f, picker);
+            var valSlider = MakePickerSlider("BRIGHTNESS", v, 0f, 1f, picker);
+            var alphaSlider = MakePickerSlider("OPACITY", alpha, 0f, 1f, picker);
+
+            bool syncing = false;
+
+            // Single place that writes the swatch, the hex text and the config, so the
+            // sliders and the typed field can never disagree about what the colour is.
+            void Apply(Color rgb, float a, bool writeHexField, bool writeSliders)
             {
-                string normalized = NormalizeHex(input.value);
+                a = Mathf.Clamp01(a);
+                string hex = "#" + ColorUtility.ToHtmlStringRGB(rgb);
+
+                syncing = true;
+                swatchFill.style.backgroundColor = new UITK.StyleColor(new Color(rgb.r, rgb.g, rgb.b, a));
+                if (writeHexField) hexField.value = hex;
+                if (writeSliders)
+                {
+                    Color.RGBToHSV(rgb, out float nh, out float ns, out float nv);
+                    hueSlider.value = nh;
+                    satSlider.value = ns;
+                    valSlider.value = nv;
+                }
+                alphaSlider.value = a;
+                syncing = false;
+
+                onChanged?.Invoke(hex, a);
+            }
+
+            void ApplyFromSliders()
+            {
+                if (syncing) return;
+                Apply(Color.HSVToRGB(hueSlider.value, satSlider.value, valSlider.value),
+                      alphaSlider.value, writeHexField: true, writeSliders: false);
+            }
+
+            hueSlider.RegisterValueChangedCallback(_ => ApplyFromSliders());
+            satSlider.RegisterValueChangedCallback(_ => ApplyFromSliders());
+            valSlider.RegisterValueChangedCallback(_ => ApplyFromSliders());
+            alphaSlider.RegisterValueChangedCallback(_ => ApplyFromSliders());
+
+            hexField.RegisterCallback<FocusOutEvent>(_ =>
+            {
+                if (syncing) return;
+
+                // NormalizeHex stays the only parser, so a typed value is accepted on exactly
+                // the same terms as it was before this row grew a picker.
+                string normalized = NormalizeHex(hexField.value);
                 if (normalized == null)
                 {
-                    input.value = string.IsNullOrWhiteSpace(currentHex) ? "#FFFFFF" : currentHex;
+                    hexField.value = "#" + ColorUtility.ToHtmlStringRGB(
+                        Color.HSVToRGB(hueSlider.value, satSlider.value, valSlider.value));
                     return;
                 }
 
-                input.value = normalized;
-                onChanged?.Invoke(normalized);
+                Apply(ParseHexOrWhite(normalized), alphaSlider.value, writeHexField: true, writeSliders: true);
             });
-            row.Add(input);
 
-            return row;
-        }
-
-        // Copy the four puck-scale fields from the UI's client config onto the
-        // companion config that the spawn/sync paths read. They are usually the
-        // same instance, but mirror defensively so a freshly-loaded companion
-        // config can never lag the UI.
-        private static void MirrorPuckScaleToCompanion(DashFallClientConfig src)
-        {
-            var companion = CompetitiveCompanion.PluginCore.config;
-            if (companion == null || src == null || ReferenceEquals(companion, src)) return;
-            companion.PuckScale = src.PuckScale;
-            companion.PuckScaleX = src.PuckScaleX;
-            companion.PuckScaleY = src.PuckScaleY;
-            companion.PuckScaleZ = src.PuckScaleZ;
-        }
-
-        // Push the current client puck-scale config (uniform + per-axis) onto
-        // every live puck for instant local feedback while dragging sliders.
-        // The composed vector comes from the shared PuckPatch helper so this
-        // matches exactly what spawn/sync paths apply.
-        private static void ApplyLocalPuckScale()
-        {
-            if (PuckManager.Instance == null) return;
-
-            var pucks = PuckManager.Instance.GetPucks();
-            if (pucks == null) return;
-
-            Vector3 scale = CompetitivePuckTweaks.src.PuckPatch.GetSyncedPuckScaleVector();
-            foreach (var puck in pucks)
+            toggleButton.clicked += () =>
             {
-                if (puck == null) continue;
-                puck.transform.localScale = scale;
-                // On a host the ball-mode sphere collider is the real physics, so
-                // keep it in step with the live-previewed shape (no-op on a pure
-                // client, which has no server collider).
-                CompetitiveAdjustments.BallModeHelper.UpdateBallColliderRadius(puck);
-            }
+                bool open = picker.style.display == UITK.DisplayStyle.None;
+                picker.style.display = open ? UITK.DisplayStyle.Flex : UITK.DisplayStyle.None;
+                toggleButton.text = open ? "CLOSE" : "PICK";
+            };
+
+            // Paint the initial swatch without reporting a change, so merely opening the
+            // settings page does not rewrite the config file.
+            swatchFill.style.backgroundColor = new UITK.StyleColor(new Color(startColor.r, startColor.g, startColor.b, alpha));
+
+            return container;
         }
+
+        private static Color ParseHexOrWhite(string hex)
+        {
+            string normalized = NormalizeHex(hex);
+            if (normalized != null && ColorUtility.TryParseHtmlString(normalized, out var parsed)) return parsed;
+            return Color.white;
+        }
+
+        private static void StyleSwatchBorder(UITK.VisualElement element)
+        {
+            element.style.borderTopWidth = 2;
+            element.style.borderBottomWidth = 2;
+            element.style.borderLeftWidth = 2;
+            element.style.borderRightWidth = 2;
+            var border = new UITK.StyleColor(new Color(1f, 1f, 1f, 0.45f));
+            element.style.borderTopColor = border;
+            element.style.borderBottomColor = border;
+            element.style.borderLeftColor = border;
+            element.style.borderRightColor = border;
+        }
+
+        /// <summary>One labelled channel slider inside an expanded colour picker.</summary>
+        private UITK.Slider MakePickerSlider(
+            string caption, float value, float min, float max, UITK.VisualElement parent)
+        {
+            var line = new UITK.VisualElement();
+            line.style.flexDirection = UITK.FlexDirection.Row;
+            line.style.alignItems = UITK.Align.Center;
+            line.style.height = 34;
+
+            var caLabel = new UITK.Label(caption);
+            caLabel.style.fontSize = 16;
+            caLabel.style.minWidth = 120;
+            caLabel.style.maxWidth = 120;
+            caLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
+            ForceUIFont(caLabel);
+            line.Add(caLabel);
+
+            var slider = new UITK.Slider(min, max);
+            slider.style.flexGrow = 1;
+            slider.style.flexBasis = 0;
+            slider.value = Mathf.Clamp(value, min, max);
+            StyleSliderControl(slider);
+            line.Add(slider);
+
+            parent.Add(line);
+            return slider;
+        }
+
+        // MakeHexColorRow was replaced by MakeColorPickerRow, which keeps the same hex field
+        // and the same NormalizeHex round-trip but adds the swatch and the HSV sliders.
+
+                // MirrorPuckScaleToCompanion and ApplyLocalPuckScale lived here to give the puck
+        // scale sliders live feedback while dragging. Both existed only for those rows.
+        // The sync receive path in Companion.PluginCore does its own mirroring and its own
+        // re-apply, so nothing else needed them.
 
         private static string NormalizeHex(string value)
         {

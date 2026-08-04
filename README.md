@@ -140,9 +140,13 @@ JSON line comments (`// ...`) are stripped on load.
 
 Per-user file owned by `DashFallMod.Client.DashFallConfigLoader`. The toggle UI lives in the in-game ModMenu and writes back on every change. Notable client-side options:
 
-- `EnableMinimapTweaks`. Applies arena-scale to minimap. Auto disabled on vanilla servers.
-- `FreeBladeSpinLockEnabled`, `FreeBladeSpinMin`, `FreeBladeSpinMax`. Clamp blade spin to a custom range. Off equals vanilla wraparound at +/-127.
-- `ShowCustomTorsoMesh`, `EnableSprintShoulderTrail`, `ShowArenaClipBrushes`, `ShowPlayerClipBrushes`. Visual preferences.
+- `FreeBladeSpinLockEnabled`, `FreeBladeSpinMin`, `FreeBladeSpinMax`. **On by default at +/-4, which is vanilla's own blade range**, so a stock client plays like vanilla even on a server running FreeBlade. Free spin is opt-in: turn the lock off, or widen the range with the two-handled slider, which reaches +/-127. Because the default range is exactly vanilla's limit, leaving the lock on means FreeBlade has no visible effect. That is intended, not a bug; it is the same behaviour once reported as "the blade locks at max twist", now a stated default with a switch next to it.
+- `EnableSprintShoulderTrail` plus the trail time, width, colour and opacity fields. Colour and opacity are edited together in one picker row.
+- `EnableClientDebug`. Turns on debug logging and reveals the debug-only rows below it (`ShowArenaClipBrushes`, `ShowPlayerClipBrushes`, the version-popup preview). Turning it off also retracts any clip brushes that were showing.
+
+The minimap is always rescaled to match the arena and has no toggle: the map normalises dots against `UIMinimap.Bounds`, which follows the arena scale, so a vanilla minimap on a resized rink simply puts the dots in the wrong place. It is a no-op on a vanilla rink and on a vanilla server.
+
+Puck scale and the goalie leg pad offset are server state. They live in the client config as sync slots only, are not persisted, and have no settings rows.
 
 ### Server to client sync
 

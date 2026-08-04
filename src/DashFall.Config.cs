@@ -1,4 +1,4 @@
-// DashFall.Config.cs - DashFall's own keybind configuration
+﻿// DashFall.Config.cs - DashFall's own keybind configuration
 
 using System;
 using System.Collections.Generic;
@@ -7,24 +7,118 @@ using UnityEngine;
 
 namespace DashFallMod.Client
 {
+    /// <summary>
+    /// Bounds for the client-side blade spin lock, in the same sbyte units the game's
+    /// BladeAngleInput uses.
+    /// </summary>
+    public static class FreeBladeSpinRange
+    {
+        // How far the slider can be dragged. -128 is a valid sbyte but not a valid bound
+        // here: the handler casts the clamped buffer with (sbyte), and a symmetric span
+        // means the blade spins the same distance either way.
+        public const float LimitMin = -127f;
+        public const float LimitMax = 127f;
+
+        // Vanilla's own minimumBladeAngle/maximumBladeAngle, and the default range for the
+        // lock. Safe as a default only because the lock now ships OFF: the pair is exactly
+        // the limit FreeBlade removes, so a lock enabled at this range is a lock that hands
+        // the vanilla limit straight back and stops the blade at 4.
+        public const float DefaultMin = -4f;
+        public const float DefaultMax = 4f;
+    }
+
     [Serializable]
     public class DashFallClientConfig
     {
+        /// <summary>
+        /// Schema version, used only to run one-time repairs on files written by older
+        /// builds. It deliberately defaults to 0 rather than the current version: a file
+        /// written before this field existed has no such key, and JsonUtility leaves a
+        /// missing field at its initializer, so anything but 0 would make every old file
+        /// claim to be current and skip the repair it needs.
+        ///
+        /// A migration must never be inferred from the values alone. Turning the blade lock
+        /// off because it sits at the vanilla range would fire again every launch and
+        /// silently undo a player who genuinely wants that setting; the stamp is what makes
+        /// it one time.
+        /// </summary>
+        public int ClientConfigVersion = 0;
+
         public bool EnableClientDebug = false;
-        public bool ShowCustomTorsoMesh = false;   // runtime: show/hide custom torso visual
         public bool ShowArenaClipBrushes = false; // debug: visualise arena collider meshes
         public bool ShowPlayerClipBrushes = false; // debug: visualise player collider meshes
-        public bool EnableMinimapTweaks = false;    // apply arena-scale minimap rescaling
-        public float PuckScale = 1f;
-        // Per-axis multipliers applied on top of PuckScale (server-synced).
+        // EnableMinimapTweaks is gone. The minimap is normalised by UIMinimap.Bounds, which
+        // tracks the arena scale, so on a resized rink the vanilla minimap is simply wrong:
+        // the dots sit at the wrong place on the map. There was never a reason to prefer
+        // that, and the toggle only ever produced a broken minimap on a modded server. The
+        // rescale is a no-op on a vanilla rink, so it is now unconditional.
+        // How the resized rink's geometry is redrawn. "drawmesh" rescales the base
+        // game's own statically batched surfaces; "batchroot" is the experimental
+        // zero-draw-call variant; "off" leaves the visuals frozen at vanilla size while
+        // collision still resizes, which is only useful for isolating a rendering
+        // problem. See src/ArenaProxyVisual.cs.
+        public string ArenaVisualMode = "drawmesh";
+        // Hide the arena crowd instead of moving it with the resized rink. Worth turning
+        // on at large arena scales, where the crowd is stretched by the same factors as
+        // the building. See src/ArenaStrandedScenery.cs.
+        public bool HideArenaCrowd = false;
+        // Stretch a custom arena loaded by Dem's Scenery Loader so the resized rink fits
+        // inside it. On by default, because the alternative is a vanilla-sized building
+        // with the boards sticking out through its walls.
+        // LEAVE THIS ON unless you are debugging. The scenery carries colliders, and the
+        // server scales it too, so turning it off locally puts your collision out of step
+        // with everyone else's. See src/ArenaSceneryLoaderSync.cs.
+        public bool ScaleSceneryLoaderArena = true;
+        // Brightness multiplier for the arena lights after they are moved with a resized
+        // rink. Raise it when a tall ArenaScaleZ leaves the ice reading dark, since the
+        // fixtures end up much further from it. See src/ArenaLightSync.cs.
+        public float ArenaLightIntensityScale = 1f;
+        // Copy the arena's BAKED light fixtures onto realtime lights. On by default,
+        // because proxy-drawn geometry cannot carry baked lightmaps, so without this a
+        // bake-lit arena renders as flat ambient with no shading at all. Turn it off to
+        // go back to ambient only. See src/ArenaLightSync.cs.
+        public bool ReviveBakedArenaLights = true;
+        // Hand the base game's baked lightmaps back to the proxy-drawn geometry. On by
+        // default; turn it off to fall back to light probes and find out in one restart
+        // whether a shading artefact comes from the lightmap or from something else.
+        // See src/ArenaProxyVisual.cs.
+        public bool ProxyRestoreLightmaps = true;
+        // Puck size is SERVER state. These are the runtime slots the sync receive path
+        // writes (Companion.PluginCore.ReceiveMessage) and PuckPatch.GetSyncedPuckScaleVector
+        // reads back; they are not client preferences and have no settings row, because the
+        // server overwrites them on every sync.
         // Final localScale = PuckScale * (PuckScaleX, PuckScaleY, PuckScaleZ).
-        public float PuckScaleX = 1f;
-        public float PuckScaleY = 1f;
-        public float PuckScaleZ = 1f;
-        public float ButterflyPadOffset = 0f;
+        //
+        // [NonSerialized] is load-bearing, not tidiness. ReceiveMessage calls
+        // SaveClientConfig, so while these persisted, the last server's puck shape was
+        // written to disk and read back at the next launch BEFORE any sync arrived, and
+        // applied again when hosting. With the settings rows gone there is no longer any way
+        // to undo that from the UI. Keeping them session-only means an unsynced client is
+        // always a 1.0 puck. ResetPuckScale covers the same ground within a session.
+        [NonSerialized] public float PuckScale = 1f;
+        [NonSerialized] public float PuckScaleX = 1f;
+        [NonSerialized] public float PuckScaleY = 1f;
+        [NonSerialized] public float PuckScaleZ = 1f;
+        // ButterflyPadOffset was here and was write-only: the sync path set it and nothing
+        // ever read it back. The leg pad reads ConfigManager.CompTweaksEffective, which the
+        // same receive path mirrors two lines later, and that is the value the server and
+        // the client agree on.
+        // ON by default, and the range below is -4/+4, which is EXACTLY vanilla's
+        // minimumBladeAngle/maximumBladeAngle. So a stock client behaves like vanilla even
+        // on a server running FreeBlade, and free spin is something the player opts into by
+        // turning this off. That is the intended default, confirmed deliberately.
+        //
+        // This interaction is NOT an oversight, and the comment is here because it looks
+        // like one. At stock settings the lock hands back the precise limit FreeBlade
+        // removes and the blade stops dead at 4, which is what the "free blade locks at max
+        // twist" report described. The behaviour is the same; what changed is that it is now
+        // a stated choice with a visible switch rather than a surprise.
+        //
+        // If free spin is ever wanted out of the box, widen FreeBladeSpinRange.Default*
+        // rather than flipping this flag, so the lock keeps meaning what its name says.
         public bool FreeBladeSpinLockEnabled = true;
-        public float FreeBladeSpinMin = -4f;
-        public float FreeBladeSpinMax = 4f;
+        public float FreeBladeSpinMin = FreeBladeSpinRange.DefaultMin;
+        public float FreeBladeSpinMax = FreeBladeSpinRange.DefaultMax;
         public bool EnableSprintShoulderTrail = true;
         public float SprintShoulderTrailTime = 0.45f;
         public float SprintShoulderTrailWidth = 0.08f;
@@ -193,14 +287,63 @@ namespace DashFallMod.Client
                 {
                     var json = File.ReadAllText(ClientConfigPath);
                     var cfg = JsonUtility.FromJson<DashFallClientConfig>(json);
-                    return cfg ?? new DashFallClientConfig();
+                    if (cfg == null) return NewClientConfig();
+                    MigrateClientConfig(cfg);
+                    return cfg;
                 }
             }
             catch (Exception e)
             {
                 Debug.LogWarning($"[COMPADJUST] Failed to load client config: {e.Message}");
             }
-            return new DashFallClientConfig();
+            return NewClientConfig();
+        }
+
+        /// <summary>
+        /// A fresh config, stamped as current. Without the stamp a brand new install would
+        /// be born at version 0 and run every back-compat migration against defaults that
+        /// never needed them.
+        /// </summary>
+        private static DashFallClientConfig NewClientConfig()
+            => new DashFallClientConfig { ClientConfigVersion = CurrentClientConfigVersion };
+
+        /// <summary>Current client config schema version. Bump when adding a migration below.</summary>
+        private const int CurrentClientConfigVersion = 1;
+
+        /// <summary>
+        /// One-time repairs for configs written by older builds, plus the ordering guard
+        /// that runs every load.
+        /// </summary>
+        private static void MigrateClientConfig(DashFallClientConfig cfg)
+        {
+            // v1 briefly turned the blade spin lock OFF for any config sitting at the old
+            // on-at-(-4/+4) default, on the grounds that the pair cancels FreeBlade. That
+            // migration is gone: the lock is deliberately ON by default again, so switching
+            // it off on load would fight the intended default on every launch.
+            //
+            // The version field stays and keeps being stamped. It costs nothing, it is the
+            // only way a future one-time repair can tell an old file from a current one, and
+            // an already-stamped config must not be re-migrated. Anyone whose lock got
+            // switched off by the short-lived v1 keeps it off until they toggle it back;
+            // that is one click, and silently re-enabling a setting the player may since
+            // have chosen deliberately would be worse than leaving it.
+            cfg.ClientConfigVersion = CurrentClientConfigVersion;
+
+            // Not versioned: a crossed or out-of-range pair can only come from a hand-edited
+            // file, and Mathf.Clamp with min above max does not fail, it collapses the range
+            // and freezes the blade. Cheap enough to assert on every load.
+            float lo = Mathf.Clamp(Mathf.Min(cfg.FreeBladeSpinMin, cfg.FreeBladeSpinMax),
+                                   FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax);
+            float hi = Mathf.Clamp(Mathf.Max(cfg.FreeBladeSpinMin, cfg.FreeBladeSpinMax),
+                                   FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax);
+
+            if (!Mathf.Approximately(lo, cfg.FreeBladeSpinMin) || !Mathf.Approximately(hi, cfg.FreeBladeSpinMax))
+            {
+                Debug.LogWarning($"[COMPADJUST] Free blade spin range {cfg.FreeBladeSpinMin}..{cfg.FreeBladeSpinMax} " +
+                                 $"is crossed or out of range; using {lo}..{hi}.");
+                cfg.FreeBladeSpinMin = lo;
+                cfg.FreeBladeSpinMax = hi;
+            }
         }
 
         public static void SaveClientConfig(DashFallClientConfig config)

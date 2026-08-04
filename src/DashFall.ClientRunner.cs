@@ -179,7 +179,7 @@ namespace DashFallMod.Client
                 nm.OnClientStopped += OnClientStopped;
         }
 
-        /// <summary>Re-applies or resets the minimap scale immediately. Call after toggling EnableMinimapTweaks.</summary>
+        /// <summary>Re-applies the minimap scale immediately, after an arena resize or a change to the vanilla minimap-size slider.</summary>
         public static void RefreshMinimap()
         {
             if (_instance == null) return;
@@ -239,17 +239,18 @@ namespace DashFallMod.Client
         }
 
         // Synchronous: applies or resets minimap scale right now, no yield.
-        // Used by RefreshMinimap (settings toggle) so it takes effect this frame.
+        // Used by RefreshMinimap, which GoalNetTweaks calls after an arena resize, so the
+        // map matches the new rink in the same frame the rink changes.
         // Returns true once the scale has been applied or reset (or definitively
         // no-opped); false only while the UIMinimap is not yet in the scene, so the
         // coroutine's retry loop knows to try again next frame.
         private bool ApplyMinimapScaleNow()
         {
-            if (DashFallConfigLoader.ClientConfig?.EnableMinimapTweaks == false)
-            {
-                ResetMinimapScale();
-                return true;
-            }
+            // No opt-out. The minimap normalises dots by UIMinimap.Bounds, which follows the
+            // arena scale, so leaving it vanilla on a resized rink puts every dot in the
+            // wrong place. TryGetEffectiveArenaScale below already returns false on a
+            // vanilla rink and on a vanilla server, which resets to the stock minimap, so
+            // this is a no-op exactly when there is nothing to correct.
 
             // Pull the arena scale from the effective source: local config when hosting,
             // synced values when joined to a modded server, or "vanilla rink" (returns
@@ -385,7 +386,6 @@ namespace DashFallMod.Client
                 // poll the cheap scalar; gated to an active session and to frames where it
                 // actually differs, so FindUIMinimap runs only on the rare changed frame.
                 if (nm != null && nm.IsConnectedClient
-                    && DashFallConfigLoader.ClientConfig?.EnableMinimapTweaks == true
                     && !float.IsNaN(_lastAppliedMinimapBaseScale)
                     && !Mathf.Approximately(SettingsManager.MinimapScale, _lastAppliedMinimapBaseScale)
                     && FindUIMinimap() != null)

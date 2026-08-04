@@ -25,12 +25,40 @@ namespace DashFallMod.Client
         // whether the DLL runs from the Workshop folder or a local Plugins build.
         private const ulong WORKSHOP_FILE_ID = 3689734278UL;
 
-        private bool _modOutOfDate;            // Workshop has a newer version than installed
+        /// <summary>Why we believe the running build is stale. Drives the popup's wording.</summary>
+        private enum StaleReason
+        {
+            None = 0,
+            /// <summary>Our own DLL on disk is no longer the bytes we are executing.</summary>
+            FilesReplaced,
+            /// <summary>Steam says the Workshop item still needs downloading.</summary>
+            WorkshopNeedsUpdate,
+            /// <summary>The TEST button.</summary>
+            Test,
+        }
+
+        private bool _modOutOfDate;            // the running build is stale, by either signal
+        private StaleReason _staleReason;      // which signal fired
         private bool _versionDismissed;        // user dismissed the popup; don't show again
         private bool _versionCheckLoggedSkip;  // logged the "Steam unavailable" reason once
         private bool _versionShowRequested;    // a trigger (enable / server join / test) asked to show
-        private bool _versionStartupChecked;   // ran the one-shot post-launch check
-        private float _versionStartupCheckAt;  // when the post-launch check is due
+        private bool _versionStartupChecked;   // armed the initial delay
+        private float _nextVersionCheckAt;     // when the next check is due
+
+        // On-disk identity of the assembly we are executing, captured once at startup.
+        private string _assemblyPath;
+        private long _assemblyLength = -1;
+        private DateTime _assemblyWriteTimeUtc;
+        private bool _assemblyStampProbed;
+
+        /// <summary>Grace period before the first query, so Steam and the UI root can settle.</summary>
+        private const float VersionFirstCheckDelay = 5f;
+
+        /// <summary>
+        /// Gap between repeat queries. A minute is far below the time it takes anyone to
+        /// notice a stale build, and the query stops entirely once out-of-date latches.
+        /// </summary>
+        private const float VersionRecheckInterval = 60f;
         private ulong _workshopFileId;         // derived published file id (0 = not a workshop install)
         private UITK.VisualElement _versionBackdrop;
 
@@ -42,15 +70,39 @@ namespace DashFallMod.Client
         /// </summary>
         private void TickVersionPopup()
         {
-            // "Enabled the mod": one-shot check a few seconds after the runner starts. Steam
-            // needs a moment to settle its item state and the UI root needs to come up.
-            if (!_versionStartupChecked)
+            // First check runs a few seconds in: Steam needs a moment to settle its item
+            // state and the UI root needs to come up. After that it REPEATS.
+            //
+            // Repeating is the whole point, not belt and braces. The situation this feature
+            // exists for, spelled out at the top of this file, is the Workshop item being
+            // updated WHILE THE GAME IS RUNNING, and that is precisely the case a single
+            // check at launch cannot see: NeedsUpdate flips to true minutes after the one
+            // check already ran and returned false. Before this, the only other trigger was
+            // joining a modded server, so a player already in a server when the update
+            // published was never told, and a player who never joins one never found out
+            // at all.
+            //
+            // The poll is cheap and self-limiting. SteamUGC.GetItemState is a local read of
+            // client state with no callback and no network round trip, it runs once a minute
+            // rather than per frame, and CheckOutOfDate returns immediately once _modOutOfDate
+            // latches, so a client that IS out of date stops querying entirely.
+            if (!_modOutOfDate && Time.unscaledTime >= _nextVersionCheckAt)
             {
-                if (_versionStartupCheckAt <= 0f) _versionStartupCheckAt = Time.unscaledTime + 5f;
-                else if (Time.unscaledTime >= _versionStartupCheckAt)
+                _nextVersionCheckAt = Time.unscaledTime
+                    + (_versionStartupChecked ? VersionRecheckInterval : VersionFirstCheckDelay);
+
+                if (_versionStartupChecked)
                 {
-                    _versionStartupChecked = true;
                     if (CheckOutOfDate()) RequestVersionPopup();
+                }
+                else
+                {
+                    // The first tick arms the delay and stamps the DLL. Stamping here rather
+                    // than after the grace period keeps the baseline as close to load time as
+                    // possible, so an update that lands during those first seconds is still
+                    // seen as a change rather than baked in as the starting state.
+                    _versionStartupChecked = true;
+                    CaptureAssemblyStamp();
                 }
             }
 
@@ -99,9 +151,96 @@ namespace DashFallMod.Client
         // _modOutOfDate. Queries the known published id directly so it works whether the DLL
         // is loaded from the Workshop folder or a local Plugins build. Fails silent (returns
         // false) if Steam is unavailable or the player is not subscribed, so it never blocks play.
+        /// <summary>
+        /// Records what our own DLL looked like on disk when we started. Called once.
+        ///
+        /// Assembly.Location is empty for an assembly loaded from a byte[] rather than a
+        /// path, which some loaders do. That is not an error, it just means this signal is
+        /// unavailable and the Steam one has to carry the check alone.
+        /// </summary>
+        private void CaptureAssemblyStamp()
+        {
+            if (_assemblyStampProbed) return;
+            _assemblyStampProbed = true;
+
+            try
+            {
+                string path = Assembly.GetExecutingAssembly().Location;
+                if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path))
+                {
+                    Debug.Log("[COMPADJUST] Stale-build check: this assembly has no file on disk " +
+                              "(loaded from memory), so only the Steam Workshop state is watched.");
+                    return;
+                }
+
+                var info = new System.IO.FileInfo(path);
+                _assemblyPath = path;
+                _assemblyLength = info.Length;
+                _assemblyWriteTimeUtc = info.LastWriteTimeUtc;
+                Debug.Log($"[COMPADJUST] Stale-build check armed on '{path}' " +
+                          $"({_assemblyLength} bytes, {_assemblyWriteTimeUtc:u}).");
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[COMPADJUST] Could not stamp this assembly for the stale-build check: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// True once our DLL on disk stops matching the bytes we are running.
+        ///
+        /// THIS, not Steam, is the signal that catches the real case. SteamUGC's
+        /// k_EItemStateNeedsUpdate reports whether STEAM has work left to do, and Steam
+        /// happily finishes writing the new DLL while the game is running, at which point
+        /// the flag CLEARS. The process keeps executing the assembly it loaded at launch
+        /// until it restarts, so the interesting window is exactly the one where Steam
+        /// reports everything is fine. That is not a hypothetical: a client running a
+        /// months-old build, failing to parse the server's config sync, logged
+        /// "needsUpdate=False" while doing it.
+        ///
+        /// Comparing length and last-write-time against the values captured at startup asks
+        /// the question that actually matters, which is whether the file backing this
+        /// assembly has been replaced since we read it. It needs no Steam bookkeeping and
+        /// works for a Workshop install and a local build alike.
+        /// </summary>
+        private bool CheckAssemblyReplaced()
+        {
+            if (_assemblyPath == null) return false;
+
+            try
+            {
+                if (!System.IO.File.Exists(_assemblyPath)) return false;   // mid-write; try again next poll
+
+                var info = new System.IO.FileInfo(_assemblyPath);
+                if (info.Length == _assemblyLength && info.LastWriteTimeUtc == _assemblyWriteTimeUtc) return false;
+
+                Debug.LogWarning(
+                    $"[COMPADJUST] The mod's DLL on disk has changed since it was loaded: " +
+                    $"{_assemblyLength} bytes @ {_assemblyWriteTimeUtc:u} -> {info.Length} bytes @ {info.LastWriteTimeUtc:u}. " +
+                    "The game is still running the OLD build and must be restarted to pick the new one up.");
+                return true;
+            }
+            catch
+            {
+                // A partially written file can throw here. Never treat that as stale.
+                return false;
+            }
+        }
+
         private bool CheckOutOfDate()
         {
             if (_modOutOfDate) return true;
+
+            // Checked FIRST, and deliberately: it is the signal that stays true once it
+            // fires, whereas the Steam flag below goes false again the moment Steam finishes
+            // its download and is therefore silent for most of the window we care about.
+            if (CheckAssemblyReplaced())
+            {
+                _modOutOfDate = true;
+                _staleReason = StaleReason.FilesReplaced;
+                return true;
+            }
+
             try
             {
                 if (!SteamAPI.IsSteamRunning()) { Debug.Log("[COMPADJUST] Version check: Steam not running; skipping."); return false; }
@@ -114,6 +253,7 @@ namespace DashFallMod.Client
                 if (needs)
                 {
                     _modOutOfDate = true;
+                    _staleReason = StaleReason.WorkshopNeedsUpdate;
                     Debug.LogWarning($"[COMPADJUST] Workshop item {WORKSHOP_FILE_ID} reports NeedsUpdate; prompting player to update.");
                 }
             }
@@ -145,6 +285,9 @@ namespace DashFallMod.Client
         {
             if (_workshopFileId == 0) _workshopFileId = ResolveWorkshopFileId();
             _modOutOfDate = true;
+            // Previews the Workshop wording. The files-replaced variant is reachable by
+            // rebuilding the DLL while the game runs, which is also how to test it for real.
+            _staleReason = StaleReason.Test;
             _versionDismissed = false;
             _versionShowRequested = true;
             _versionBackdrop?.RemoveFromHierarchy();
@@ -210,19 +353,32 @@ namespace DashFallMod.Client
             panel.style.borderTopColor = new UITK.StyleColor(accent);
             panel.style.borderLeftColor = edge; panel.style.borderRightColor = edge; panel.style.borderBottomColor = edge;
 
-            var title = new UITK.Label("MOD OUT OF DATE");
+            // The two cases need different instructions. "Close the game so Steam can finish
+            // updating" is actively wrong once the files are ALREADY updated, which is the
+            // common case: at that point there is nothing left to download and the only thing
+            // standing between the player and the new build is the restart. Saying otherwise
+            // sends the player to wait on a download that finished long ago.
+            bool alreadyDownloaded = _staleReason == StaleReason.FilesReplaced;
+
+            var title = new UITK.Label(alreadyDownloaded ? "RESTART TO FINISH UPDATING" : "MOD OUT OF DATE");
             title.style.fontSize = 32;
             title.style.unityFontStyleAndWeight = FontStyle.Bold;
             title.style.color = new UITK.StyleColor(accent);
             title.style.marginBottom = 14;
+            title.style.whiteSpace = UITK.WhiteSpace.Normal;
             ForceUIFont(title);
             panel.Add(title);
 
-            var body = new UITK.Label(
-                "A newer version of COMPADJUST is available on the Steam Workshop.\n\n" +
-                "Fully close the game so Steam can finish updating the mod, then relaunch. " +
-                "Playing on the old build while the Workshop files have already changed can " +
-                "cause bugs (physics glitches, desync, crashes).");
+            var body = new UITK.Label(alreadyDownloaded
+                ? "COMPADJUST has already been updated on disk, but the game is still running "
+                  + "the version it loaded at launch.\n\n"
+                  + "Restart the game to pick it up. Carrying on runs old code against updated "
+                  + "files, which shows up as settings not applying, physics that disagree with "
+                  + "the server, or a mod that silently does nothing."
+                : "A newer version of COMPADJUST is available on the Steam Workshop.\n\n"
+                  + "Fully close the game so Steam can finish updating the mod, then relaunch. "
+                  + "Playing on the old build while the Workshop files have already changed can "
+                  + "cause bugs (physics glitches, desync, crashes).");
             body.style.whiteSpace = UITK.WhiteSpace.Normal;
             body.style.fontSize = 16;
             body.style.color = new UITK.StyleColor(new Color(0.85f, 0.85f, 0.86f));
@@ -245,7 +401,8 @@ namespace DashFallMod.Client
             btnContainer.style.flexDirection = UITK.FlexDirection.Row;
             btnContainer.style.alignItems = UITK.Align.Center;
 
-            var updateBtn = MakeVersionButton("Open Workshop & Quit",
+            // Nothing to open when the download already happened; quitting is the whole fix.
+            var updateBtn = MakeVersionButton(alreadyDownloaded ? "Quit to Update" : "Open Workshop & Quit",
                 new Color32(176, 58, 52, 255), new Color32(208, 76, 68, 255));
             updateBtn.clicked += () =>
             {

@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using System;
 using Unity.Netcode;
 using UnityEngine;
@@ -99,66 +99,13 @@ namespace CompetitivePuckTweaks.src
             __instance.GetComponent<SphereCollider>().radius *= PluginCore.config.HeadColliderRadiusFactor;
 
             bool isGoalie = __instance.name.Contains("Goalie");
-            bool useCustomCollider = !isGoalie
-                && DashFallMod.ConfigManager.CompAdjustEffective.EnableCustomSkaterTorsoModel
-                && PluginCore.torsoMesh != null;
 
-            // SmallerModels goalie groin offset
-            if (isGoalie && PluginCore.config.EnableSmallerModels)
-                ___playerMesh.PlayerGroin.transform.localPosition += new Vector3(0, 0.1f, 0);
-
-            if (!isGoalie) {
-                var mf = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshFilter>();
-                var mc = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>();
-
-                // Save originals so RefreshPlayerTorsoStates can restore them.
-                if (mf != null) {
-                    int mfId = mf.GetInstanceID();
-                    if (!PluginCore.OriginalTorsoMeshes.ContainsKey(mfId))
-                        PluginCore.OriginalTorsoMeshes[mfId] = mf.sharedMesh;
-                }
-
-                // ── COLLIDER — server config (EnableCustomSkaterTorsoModel) only ────────
-                if (mc != null) {
-                    int mcId = mc.GetInstanceID();
-                    if (!PluginCore.OriginalTorsoColliderMeshes.ContainsKey(mcId))
-                        PluginCore.OriginalTorsoColliderMeshes[mcId] = mc.sharedMesh;
-                    if (!PluginCore.OriginalTorsoColliderLayers.ContainsKey(mcId))
-                        PluginCore.OriginalTorsoColliderLayers[mcId] = mc.gameObject.layer;
-
-                    if (useCustomCollider) {
-                        var colliderMesh = PluginCore.GetOrBuildScaledColliderMesh();
-                        if (colliderMesh != null) {
-                            mc.convex = true;
-                            mc.isTrigger = false;
-                            mc.sharedMesh = colliderMesh;
-                            // CRITICAL: Keep the original layer (not player body layer 8).
-                            // The physics matrix excludes player body layer from puck collisions.
-                            // The original layer allows puck collision to work correctly.
-                            // (Layer remains unchanged from game default)
-                            mc.enabled = false;
-                            mc.enabled = true;
-                            PluginCore.Dbg($"[TorsoApply] Custom collider. convex={mc.convex} layer={mc.gameObject.layer} bounds={mc.bounds}");
-                            TorsoDebugBrush.Sync(mc);
-                        }
-                        else
-                            PluginCore.Dbg($"[TorsoApply] Custom collider skipped (readable={PluginCore.torsoMesh.isReadable}).");
-                    }
-                    // If !useCustomCollider: original collider stays — nothing to do at spawn time.
-                }
-                else
-                    PluginCore.Dbg($"[TorsoApply] No MeshCollider on PlayerTorso. children={string.Join(", ", System.Linq.Enumerable.Select(___playerMesh.PlayerTorso.GetComponentsInChildren<Collider>(true), c => c.GetType().Name + ":" + c.name))}");
-
-                // ── VISUAL — handled by CompetitiveCompanion.PlayerBodyPatch (client config) ──
-                // The game's MeshRendererHider (Event_OnPlayerCameraEnabled) hides the local player's
-                // own body automatically — we must never touch mr.enabled here.
-
-                if (PluginCore.config.EnableSmallerModels) {
-                    ___playerMesh.PlayerTorso.transform.localPosition += new Vector3(0, 0.27f, 0);
-                    ___playerMesh.PlayerGroin.GetComponentInChildren<MeshFilter>().mesh = PluginCore.groinMesh;
-                    ___playerMesh.PlayerGroin.GetComponentInChildren<MeshCollider>().sharedMesh = PluginCore.groinMesh;
-                }
-            }
+            // The custom skater torso used to be swapped in here, mesh and collider both,
+            // from the CompAssets bundle. That bundle is gone, so there is nothing to swap
+            // and the vanilla torso stands as shipped. EnableSmallerModels went the same
+            // way: it swapped shrunken torso/groin meshes, and the position offsets it
+            // paired with would only shift a vanilla mesh out of place on its own. Both
+            // config flags are kept so existing config files still load.
 
             ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>().material.bounciness = PluginCore.config.PlayerColliderBounciness;
             ___playerMesh.PlayerGroin.GetComponentInChildren<MeshCollider>().material.bounciness = PluginCore.config.PlayerColliderBounciness;
@@ -189,16 +136,10 @@ namespace CompetitivePuckTweaks.src
                     var s = groinMc.transform.localScale;
                     groinMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
                 }
-                // When a custom torso model is active its MeshFilter and MeshCollider share the same
-                // child transform, which was already set to 100x scale to correct the Blender export unit
-                // mismatch.  Applying ThinSkaterBodies here would overwrite that scale, making the mesh
-                // invisible.  Skip torso thinning in that case — the custom shape defines its own width.
-                if (!useCustomCollider) {
-                    var torsoMc = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>();
-                    if (torsoMc != null) {
-                        var s = torsoMc.transform.localScale;
-                        torsoMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
-                    }
+                var torsoMc = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>();
+                if (torsoMc != null) {
+                    var s = torsoMc.transform.localScale;
+                    torsoMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
                 }
             }
         }
@@ -218,6 +159,36 @@ namespace CompetitivePuckTweaks.src
             // fall. In b897 HasFallen was a plain bool so the unguarded call was
             // harmless. The server write replicates HasFallen to clients as before.
             if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer) return;
+
+            // DO NOT ADD A `if (__instance.HasFallen.Value) return;` LATCH HERE.
+            //
+            // It was added once, as an audit fix for OnFall() not being idempotent, and it
+            // stopped players falling over at all. The reasoning was sound in isolation and
+            // wrong about what this line is doing, so the whole thing is written out.
+            //
+            // Vanilla's own sequence, from the decompiled PlayerBody, is:
+            //     !HasSlipped && !HasFallen && IsSlipping -> OnSlip()      balance -> 0 over 0.25s
+            //      HasSlipped && !HasFallen && IsSideways -> OnFall()      balance -> 1 over 5s
+            //      HasFallen && !HasSlipped && IsUpright  -> OnStandUp()
+            // with IsUpright = Upwardness > 0.8 and IsSideways = Upwardness < 0.2, so the
+            // "intermediate band" this line targets is 0.2..0.8, where vanilla is ALREADY
+            // slipping (IsSlipping is just Upwardness < 0.8).
+            //
+            // OnFall() sets HasSlipped = false and starts the RECOVERY tween. So a single
+            // call in that band does not fell anyone: it cancels the slip in progress and
+            // starts standing them back up, after which vanilla can neither slip (HasFallen
+            // is true) nor fall (HasSlipped is false) and simply waits to reach upright.
+            //
+            // What actually makes this line fell people is that it re-fires every
+            // FixedUpdate while the skater is in the band, killing and restarting the
+            // recovery tween each frame so KeepUpright.Balance never climbs. The
+            // re-allocation the audit flagged IS the mechanism, not a bug alongside it.
+            //
+            // So the latch cannot be reinstated on its own. If the per-frame tween churn
+            // ever has to go, the trigger has to change with it, e.g. gate on
+            // __instance.HasSlipped so OnFall() lands after vanilla's OnSlip and reads as a
+            // real fall. That is a gameplay change and wants playtesting, which is why it is
+            // not being done here.
             if (!__instance.IsUpright && !__instance.IsSideways) __instance.OnFall();
         }
     }
