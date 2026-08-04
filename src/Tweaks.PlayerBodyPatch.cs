@@ -159,14 +159,36 @@ namespace CompetitivePuckTweaks.src
             // fall. In b897 HasFallen was a plain bool so the unguarded call was
             // harmless. The server write replicates HasFallen to clients as before.
             if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer) return;
-            // The trigger is deliberately wider than vanilla's (we fall from the
-            // intermediate band, before the skater is fully sideways), but the
-            // !HasFallen.Value latch is not optional: OnFall() is not idempotent.
-            // It kills and re-allocates the balance-recovery DOTween on every
-            // call, so without the latch it re-runs every FixedUpdate for as long
-            // as the skater sits in that band, pinning KeepUpright.Balance near 0
-            // instead of letting it ramp back to 1 over balanceRecoveryTime.
-            if (__instance.HasFallen.Value) return;
+
+            // DO NOT ADD A `if (__instance.HasFallen.Value) return;` LATCH HERE.
+            //
+            // It was added once, as an audit fix for OnFall() not being idempotent, and it
+            // stopped players falling over at all. The reasoning was sound in isolation and
+            // wrong about what this line is doing, so the whole thing is written out.
+            //
+            // Vanilla's own sequence, from the decompiled PlayerBody, is:
+            //     !HasSlipped && !HasFallen && IsSlipping -> OnSlip()      balance -> 0 over 0.25s
+            //      HasSlipped && !HasFallen && IsSideways -> OnFall()      balance -> 1 over 5s
+            //      HasFallen && !HasSlipped && IsUpright  -> OnStandUp()
+            // with IsUpright = Upwardness > 0.8 and IsSideways = Upwardness < 0.2, so the
+            // "intermediate band" this line targets is 0.2..0.8, where vanilla is ALREADY
+            // slipping (IsSlipping is just Upwardness < 0.8).
+            //
+            // OnFall() sets HasSlipped = false and starts the RECOVERY tween. So a single
+            // call in that band does not fell anyone: it cancels the slip in progress and
+            // starts standing them back up, after which vanilla can neither slip (HasFallen
+            // is true) nor fall (HasSlipped is false) and simply waits to reach upright.
+            //
+            // What actually makes this line fell people is that it re-fires every
+            // FixedUpdate while the skater is in the band, killing and restarting the
+            // recovery tween each frame so KeepUpright.Balance never climbs. The
+            // re-allocation the audit flagged IS the mechanism, not a bug alongside it.
+            //
+            // So the latch cannot be reinstated on its own. If the per-frame tween churn
+            // ever has to go, the trigger has to change with it, e.g. gate on
+            // __instance.HasSlipped so OnFall() lands after vanilla's OnSlip and reads as a
+            // real fall. That is a gameplay change and wants playtesting, which is why it is
+            // not being done here.
             if (!__instance.IsUpright && !__instance.IsSideways) __instance.OnFall();
         }
     }
