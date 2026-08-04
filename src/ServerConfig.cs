@@ -476,11 +476,7 @@ namespace CompetitiveAdjustments
                 // defaults and rewrite, so newly-added fields appear with their
                 // defaults and the version is bumped.  Existing values survive.
                 string clean = StripJson(raw);
-                if (NeedsUpgrade(clean))
-                {
-                    BackupConfigFile("upgrade");
-                    WriteConfig(ParseConfig(clean));
-                }
+                if (NeedsUpgrade(clean)) UpgradeConfigFile(clean, ParseConfig(clean));
             }
             catch (Exception ex)
             {
@@ -488,16 +484,127 @@ namespace CompetitiveAdjustments
             }
         }
 
-        // Write each sub-section via JsonUtility (flat serialization per section)
-        // then stitch into a nested JSON file.
-        private static void WriteConfig(ServerConfig cfg)
+        // Exactly the bytes WriteConfig would put on disk for cfg. Split out so an
+        // upgrade can compare its result against the current file before touching
+        // anything; see UpgradeConfigFile.
+        private static string RenderConfig(ServerConfig cfg)
         {
             cfg.Admin = cfg.Admin ?? new AdminAuthConfig();
             // Generate the random editor password the first time the file is
             // written (and after an upgrade that dropped the old credentials).
             if (string.IsNullOrEmpty(cfg.Admin.EditorPassword))
                 cfg.Admin.EditorPassword = AdminAuth.GeneratePassword();
-            File.WriteAllText(ConfigFile, BuildConfigContent(cfg, redactAdmin: false));
+            return BuildConfigContent(cfg, redactAdmin: false);
+        }
+
+        // Write each sub-section via JsonUtility (flat serialization per section)
+        // then stitch into a nested JSON file.
+        private static void WriteConfig(ServerConfig cfg)
+            => File.WriteAllText(ConfigFile, RenderConfig(cfg));
+
+        /// <summary>How many timestamped upgrade backups to keep before deleting the oldest.</summary>
+        private const int MaxUpgradeBackups = 5;
+
+        private static bool _warnedUpgradeUnwritable;
+        private static bool _warnedUpgradeNoOp;
+
+        /// <summary>
+        /// Brings the on-disk file up to the current schema, backing it up first.
+        ///
+        /// Written this way because of a server that accumulated twenty-odd identical
+        /// backups. Its config was owned by root while the game ran as another user, so
+        /// every launch backed the file up (a NEW file, in a directory the service could
+        /// write), then failed to write the config itself, left it stale, and did the whole
+        /// thing again next launch. The giveaway was that every backup carried the SAME
+        /// modified time: File.Copy preserves the source's timestamp, so they were all
+        /// copies of a file that never changed.
+        ///
+        /// Two guards. The backup is deleted again if the write it was taken for did not
+        /// happen, so a config that cannot be written stops littering. And an upgrade that
+        /// would produce byte-identical output does nothing at all, which covers the case
+        /// where NeedsUpgrade is satisfied by something RenderConfig does not actually
+        /// change.
+        /// </summary>
+        private static void UpgradeConfigFile(string clean, ServerConfig parsed)
+        {
+            string updated;
+            try { updated = RenderConfig(parsed); }
+            catch (Exception ex) { LogWarning("Could not render the upgraded config: " + ex.Message); return; }
+
+            string current = null;
+            try { current = File.ReadAllText(ConfigFile); } catch { }
+
+            if (current != null && string.Equals(current, updated, StringComparison.Ordinal))
+            {
+                if (!_warnedUpgradeNoOp)
+                {
+                    _warnedUpgradeNoOp = true;
+                    LogWarning("Config upgrade wanted but the result is byte-identical to the file on disk, " +
+                               "so nothing was written. NeedsUpgrade is matching on something the writer does " +
+                               "not emit; the config is fine and this will not repeat-log.");
+                }
+                return;
+            }
+
+            string backup = null;
+            try
+            {
+                if (File.Exists(ConfigFile))
+                {
+                    string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                    backup = Path.Combine(ConfigDir, $"CompetitiveAdjustments_{ts}_upgrade.json");
+                    File.Copy(ConfigFile, backup, true);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogWarning("Config backup failed: " + ex.Message);
+                backup = null;
+            }
+
+            try
+            {
+                File.WriteAllText(ConfigFile, updated);
+                Log($"Config upgraded to version {ServerConfig.CURRENT_VERSION}" +
+                    (backup != null ? $"; previous file kept as {Path.GetFileName(backup)}." : "."));
+                PruneUpgradeBackups();
+            }
+            catch (Exception ex)
+            {
+                // The backup exists only to protect a rewrite that just failed, so it is
+                // pure litter. Removing it is what stops one file per launch forever.
+                if (backup != null)
+                {
+                    try { File.Delete(backup); } catch { }
+                }
+
+                if (!_warnedUpgradeUnwritable)
+                {
+                    _warnedUpgradeUnwritable = true;
+                    LogWarning($"Could not write '{ConfigFile}': {ex.Message}. The server is running the config it " +
+                               "read, but the upgrade cannot be saved and will be attempted again on every launch. " +
+                               "Check the file's ownership and permissions: this happens when the config is owned by " +
+                               "a different user (root) than the one the server runs as.");
+                }
+            }
+        }
+
+        /// <summary>Keeps the newest few upgrade backups and deletes the rest.</summary>
+        private static void PruneUpgradeBackups()
+        {
+            try
+            {
+                var files = Directory.GetFiles(ConfigDir, "CompetitiveAdjustments_*_upgrade.json");
+                if (files.Length <= MaxUpgradeBackups) return;
+
+                Array.Sort(files, (a, b) => string.CompareOrdinal(b, a));   // newest name first (timestamped)
+                for (int i = MaxUpgradeBackups; i < files.Length; i++)
+                {
+                    try { File.Delete(files[i]); } catch { }
+                }
+                Log($"Pruned {files.Length - MaxUpgradeBackups} old config backup(s), keeping the newest {MaxUpgradeBackups}.");
+            }
+            catch (Exception ex) { LogWarning("Could not prune old config backups: " + ex.Message); }
         }
 
         // Builds the nested, indented on-disk JSON for a config.  When
@@ -566,21 +673,9 @@ namespace CompetitiveAdjustments
             WriteConfig(Config ?? new ServerConfig());
         }
 
-        // Snapshot the current config file before a migration rewrites it, so a
-        // schema bump that drops fields the old file did not contain (they come
-        // back as defaults) can be recovered from disk instead of being lost.
-        private static void BackupConfigFile(string tag)
-        {
-            try
-            {
-                if (!File.Exists(ConfigFile)) return;
-                string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                string dest = Path.Combine(ConfigDir, $"CompetitiveAdjustments_{ts}_{tag}.json");
-                File.Copy(ConfigFile, dest, true);
-                Log($"Backed up config to {Path.GetFileName(dest)} before {tag}.");
-            }
-            catch (Exception ex) { LogWarning("Config backup failed: " + ex.Message); }
-        }
+        // BackupConfigFile lived here. Its job is now inside UpgradeConfigFile, because
+        // taking the backup and doing the write have to be one decision: a backup kept for
+        // a write that then failed is exactly the litter this was producing.
 
         public static void ReloadConfig()
         {
@@ -600,18 +695,20 @@ namespace CompetitiveAdjustments
                 // Self-heal the file if it is missing fields or on an older
                 // version, so a direct ReloadConfig (no prior EnsureConfig)
                 // still brings the on-disk file up to the current schema.
-                if (NeedsUpgrade(clean))
-                {
-                    BackupConfigFile("upgrade");
-                    WriteConfig(cfg);
-                }
+                if (NeedsUpgrade(clean)) UpgradeConfigFile(clean, cfg);
 
                 Config = cfg;
                 SyncFeatureStates(cfg);
                 NotifySubModReconcile();
             }
-            catch
+            catch (Exception ex)
             {
+                // Say something. This used to be a bare `catch` that silently replaced the
+                // operator's config with defaults, so a server whose file could not be read
+                // ran vanilla settings and looked like the mod was simply not working. The
+                // fallback is still correct, it just has to be visible.
+                LogWarning($"Could not load '{ConfigFile}': {ex.Message}. Falling back to DEFAULT settings for this " +
+                           "session; nothing from the file is applied until it loads cleanly.");
                 Config = new ServerConfig();
                 SyncFeatureStates(Config);
                 NotifySubModReconcile();
