@@ -103,14 +103,20 @@ namespace DashFallMod.Client
         // ever read it back. The leg pad reads ConfigManager.CompTweaksEffective, which the
         // same receive path mirrors two lines later, and that is the value the server and
         // the client agree on.
-        // OFF by default, and that is the "blade locks at max" fix. The lock shipped ON at
-        // a -4/+4 range, which is EXACTLY vanilla's minimumBladeAngle/maximumBladeAngle, so
-        // it re-imposed the very limit FreeBlade removes: the blade climbed to 4 and
-        // stopped, and every player hit it because nothing had to be switched on for it to
-        // happen. A lock that constrains a feature has to be opt-in, so FreeBlade now works
-        // fully out of the box and this narrows it only when asked.
-        // ClientConfigVersion 1 turns it off for the files that already carry the old pair.
-        public bool FreeBladeSpinLockEnabled = false;
+        // ON by default, and the range below is -4/+4, which is EXACTLY vanilla's
+        // minimumBladeAngle/maximumBladeAngle. So a stock client behaves like vanilla even
+        // on a server running FreeBlade, and free spin is something the player opts into by
+        // turning this off. That is the intended default, confirmed deliberately.
+        //
+        // This interaction is NOT an oversight, and the comment is here because it looks
+        // like one. At stock settings the lock hands back the precise limit FreeBlade
+        // removes and the blade stops dead at 4, which is what the "free blade locks at max
+        // twist" report described. The behaviour is the same; what changed is that it is now
+        // a stated choice with a visible switch rather than a surprise.
+        //
+        // If free spin is ever wanted out of the box, widen FreeBladeSpinRange.Default*
+        // rather than flipping this flag, so the lock keeps meaning what its name says.
+        public bool FreeBladeSpinLockEnabled = true;
         public float FreeBladeSpinMin = FreeBladeSpinRange.DefaultMin;
         public float FreeBladeSpinMax = FreeBladeSpinRange.DefaultMax;
         public bool EnableSprintShoulderTrail = true;
@@ -310,24 +316,17 @@ namespace DashFallMod.Client
         /// </summary>
         private static void MigrateClientConfig(DashFallClientConfig cfg)
         {
-            if (cfg.ClientConfigVersion < 1)
-            {
-                // v1: the blade spin lock used to ship ON at -4/+4, which is vanilla's own
-                // blade limit, so it cancelled FreeBlade and stopped the blade at 4. Every
-                // file written by an older build carries that pair, and flipping the field
-                // default cannot reach them. Only the enabled flag is touched: the range is
-                // a perfectly good preset once the lock is something you choose to turn on.
-                if (cfg.FreeBladeSpinLockEnabled
-                    && Mathf.Approximately(cfg.FreeBladeSpinMin, FreeBladeSpinRange.DefaultMin)
-                    && Mathf.Approximately(cfg.FreeBladeSpinMax, FreeBladeSpinRange.DefaultMax))
-                {
-                    cfg.FreeBladeSpinLockEnabled = false;
-                    Debug.Log("[COMPADJUST] Free blade spin lock was on at the old -4/+4 default, which is " +
-                              "vanilla's own blade limit and cancelled FreeBlade. Turned off; turn it back on " +
-                              "in settings if you want the blade constrained.");
-                }
-            }
-
+            // v1 briefly turned the blade spin lock OFF for any config sitting at the old
+            // on-at-(-4/+4) default, on the grounds that the pair cancels FreeBlade. That
+            // migration is gone: the lock is deliberately ON by default again, so switching
+            // it off on load would fight the intended default on every launch.
+            //
+            // The version field stays and keeps being stamped. It costs nothing, it is the
+            // only way a future one-time repair can tell an old file from a current one, and
+            // an already-stamped config must not be re-migrated. Anyone whose lock got
+            // switched off by the short-lived v1 keeps it off until they toggle it back;
+            // that is one click, and silently re-enabling a setting the player may since
+            // have chosen deliberately would be worse than leaving it.
             cfg.ClientConfigVersion = CurrentClientConfigVersion;
 
             // Not versioned: a crossed or out-of-range pair can only come from a hand-edited

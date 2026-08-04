@@ -985,7 +985,7 @@ namespace DashFallMod.Client
             // while disagreeing with every other client in the meantime; the config fields
             // remain as the sync slots they always were.
 
-            _actionsSection.Add(MakeToggleRow("FREE BLADE SPIN LOCK", "Off means full free spin. On constrains the blade to the range below", clientConfig.FreeBladeSpinLockEnabled, (val) =>
+            _actionsSection.Add(MakeToggleRow("FREE BLADE SPIN LOCK", "On (default) keeps the vanilla blade range. Turn OFF for full free spin", clientConfig.FreeBladeSpinLockEnabled, (val) =>
             {
                 clientConfig.FreeBladeSpinLockEnabled = val;
                 DashFallConfigLoader.SaveClientConfig(clientConfig);
