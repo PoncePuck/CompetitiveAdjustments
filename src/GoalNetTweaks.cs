@@ -82,8 +82,8 @@ namespace DashFallMod
         // Deliberately separate from _forceNextRefresh. Subscribers treat every
         // broadcast as "the arena just changed" and rebuild state from it: oomtm450's
         // Ruleset clears its _barriersLowered latch on entry and re-derives the barrier
-        // collider's ABSOLUTE world Y from the values in the message (see
-        // RULESET_INTEROP.md). Broadcasting from the PlayerBodyV2 spawn hook therefore
+        // collider's ABSOLUTE world Y from the values in the message.
+        // Broadcasting from the PlayerBodyV2 spawn hook therefore
         // reset a dedicated server's barrier every time anyone joined or respawned, and
         // any broadcast that landed while the rink was momentarily back at vanilla scale
         // (see ResetCapturedBaselines) parked the barrier at a height computed for a rink
@@ -592,8 +592,14 @@ namespace DashFallMod
         }
 
         // ── Event_CompetitiveAdjustments_OnArenaSync payload helpers ─────────────
-        // See RULESET_INTEROP.md. Both of these exist to make the message safe to
-        // consume as-is, so a correct Ruleset build needs no compensating code.
+        // Both of these exist to make the message safe to consume as-is, so a correct
+        // Ruleset build needs no compensating code.
+        //
+        // The full contract (authoritative axis mapping, the ordering guarantee, and the
+        // three open Ruleset-side bugs) lived in RULESET_INTEROP.md until it was removed.
+        // It is still in history if it is ever needed again:
+        //     git log --all --diff-filter=D -- RULESET_INTEROP.md
+        //     git show 299ba83:RULESET_INTEROP.md
 
         // The height axis is no longer clamped. It used to be pinned to 1.0 because
         // ScaleLevelDefaultRoot held collision height at vanilla, which made 1.0 simply

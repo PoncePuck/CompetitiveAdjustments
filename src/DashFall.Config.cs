@@ -20,9 +20,13 @@ namespace DashFallMod.Client
         public const float LimitMax = 127f;
 
         // Vanilla's own minimumBladeAngle/maximumBladeAngle, and the default range for the
-        // lock. Safe as a default only because the lock now ships OFF: the pair is exactly
-        // the limit FreeBlade removes, so a lock enabled at this range is a lock that hands
-        // the vanilla limit straight back and stops the blade at 4.
+        // lock. The lock ships ON at this pair, which is deliberate: it is exactly the limit
+        // FreeBlade removes, so a stock client stops the blade at 4 and plays like vanilla
+        // even on a server running FreeBlade. Free spin is opt-in.
+        //
+        // So these two are the knob to widen if free spin is ever wanted out of the box.
+        // Do not flip FreeBladeSpinLockEnabled instead: that makes the lock's name stop
+        // describing what it does. See the field's own comment further down this file.
         public const float DefaultMin = -4f;
         public const float DefaultMax = 4f;
     }

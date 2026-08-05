@@ -41,15 +41,41 @@ namespace DashFallMod.Client
         private StaleReason _staleReason;      // which signal fired
         private bool _versionDismissed;        // user dismissed the popup; don't show again
         private bool _versionCheckLoggedSkip;  // logged the "Steam unavailable" reason once
+
+        // Log suppression for the repeating query. These exist because the check became a
+        // poll: as a one-shot each line below ran at most once per session, but at one
+        // query a minute, and with _modOutOfDate false for almost every client forever,
+        // an unguarded line is ~240 identical entries per four-hour session in Player.log.
+        // Both report a STATE, so both are logged on change rather than on occurrence, and
+        // a state that never changes is worth exactly one line.
+        private bool _versionCheckLoggedNotRunning;  // Steam was down last time we looked
+        private bool _loggedAnyItemState;            // have we reported an item state at all
+        private uint _lastLoggedItemState;           // the last one reported
         private bool _versionShowRequested;    // a trigger (enable / server join / test) asked to show
         private bool _versionStartupChecked;   // armed the initial delay
         private float _nextVersionCheckAt;     // when the next check is due
 
         // On-disk identity of the assembly we are executing, captured once at startup.
-        private string _assemblyPath;
-        private long _assemblyLength = -1;
-        private DateTime _assemblyWriteTimeUtc;
-        private bool _assemblyStampProbed;
+        //
+        // STATIC, and that is not incidental. The thing this baseline describes is the loaded
+        // assembly, whose lifetime is the PROCESS: BepInEx never reloads the domain, so once
+        // Mono has an image for a path it hands the same one back forever. The runner's
+        // lifetime is much shorter. Puck's BasePlugin.Disable nulls its plugin instance and
+        // Enable re-runs Activator.CreateInstance, so toggling the mod off and on in the mod
+        // list builds a fresh runner with fresh instance fields while the process carries on
+        // executing the old code.
+        //
+        // As instance fields these were re-stamped by that toggle. If the DLL had already
+        // been replaced, the new baseline was the NEW file and the check then compared it
+        // against itself and returned false for the rest of the session. Toggling a mod off
+        // and on is the first thing anyone does when a mod "isn't working", which is exactly
+        // the symptom this feature exists to explain, so that was the case most likely to
+        // reach it. Static, the baseline outlives the toggle and the check re-latches on the
+        // next poll.
+        private static string _assemblyPath;
+        private static long _assemblyLength = -1;
+        private static DateTime _assemblyWriteTimeUtc;
+        private static bool _assemblyStampProbed;
 
         /// <summary>Grace period before the first query, so Steam and the UI root can settle.</summary>
         private const float VersionFirstCheckDelay = 5f;
@@ -173,10 +199,27 @@ namespace DashFallMod.Client
                     return;
                 }
 
+                // Read the metadata BEFORE arming the check. FileInfo is lazy, so
+                // info.Length is the first call that actually stats the file, and it can
+                // throw if the file is deleted or renamed in the window since File.Exists
+                // above. Steam replaces files by delete-plus-rename, so that window is the
+                // very thing this feature watches for rather than a hypothetical.
+                //
+                // _assemblyPath != null is the only readiness guard CheckAssemblyReplaced
+                // has. Assigning it first meant a throw here left the check ARMED against
+                // the sentinel baseline (-1 bytes, DateTime.MinValue), which no real file
+                // can ever match, so the next poll raised a false "RESTART TO FINISH
+                // UPDATING" on a build that was perfectly current. Path last: a partial
+                // stamp now leaves the signal simply unavailable, which is what the catch
+                // below already reports.
                 var info = new System.IO.FileInfo(path);
+                long length = info.Length;
+                DateTime writeTimeUtc = info.LastWriteTimeUtc;
+
+                _assemblyLength = length;
+                _assemblyWriteTimeUtc = writeTimeUtc;
                 _assemblyPath = path;
-                _assemblyLength = info.Length;
-                _assemblyWriteTimeUtc = info.LastWriteTimeUtc;
+
                 Debug.Log($"[COMPADJUST] Stale-build check armed on '{path}' " +
                           $"({_assemblyLength} bytes, {_assemblyWriteTimeUtc:u}).");
             }
@@ -243,13 +286,38 @@ namespace DashFallMod.Client
 
             try
             {
-                if (!SteamAPI.IsSteamRunning()) { Debug.Log("[COMPADJUST] Version check: Steam not running; skipping."); return false; }
+                if (!SteamAPI.IsSteamRunning())
+                {
+                    if (!_versionCheckLoggedNotRunning)
+                    {
+                        _versionCheckLoggedNotRunning = true;
+                        Debug.Log("[COMPADJUST] Version check: Steam not running; skipping. " +
+                                  "Silenced until it comes back.");
+                    }
+                    return false;
+                }
+
+                // Say so when it returns, so the silence above has a visible end.
+                if (_versionCheckLoggedNotRunning)
+                {
+                    _versionCheckLoggedNotRunning = false;
+                    Debug.Log("[COMPADJUST] Version check: Steam is back; resuming.");
+                }
 
                 uint state = SteamUGC.GetItemState(new PublishedFileId_t(WORKSHOP_FILE_ID));
                 bool subscribed = (state & (uint)EItemState.k_EItemStateSubscribed) != 0;
                 bool installed  = (state & (uint)EItemState.k_EItemStateInstalled)  != 0;
                 bool needs      = (state & (uint)EItemState.k_EItemStateNeedsUpdate) != 0;
-                Debug.Log($"[COMPADJUST] Version check: id={WORKSHOP_FILE_ID} state=0x{state:X} subscribed={subscribed} installed={installed} needsUpdate={needs}");
+
+                // On change only. The first query always logs, so the "did the check run at
+                // all" question the line was added to answer is still answered, and a client
+                // whose state never moves pays one line instead of one a minute.
+                if (!_loggedAnyItemState || state != _lastLoggedItemState)
+                {
+                    _loggedAnyItemState = true;
+                    _lastLoggedItemState = state;
+                    Debug.Log($"[COMPADJUST] Version check: id={WORKSHOP_FILE_ID} state=0x{state:X} subscribed={subscribed} installed={installed} needsUpdate={needs}");
+                }
                 if (needs)
                 {
                     _modOutOfDate = true;
@@ -401,7 +469,17 @@ namespace DashFallMod.Client
             btnContainer.style.flexDirection = UITK.FlexDirection.Row;
             btnContainer.style.alignItems = UITK.Align.Center;
 
-            // Nothing to open when the download already happened; quitting is the whole fix.
+            // Both variants open the Workshop item, and only the caption differs.
+            //
+            // The files-replaced case does not NEED the page to get the new build: the
+            // download already happened and quitting is what picks it up, which is why the
+            // caption drops the promise of opening anything. But the page is still the right
+            // place to land. It is where the player checks which version they are about to
+            // restart into, reads what changed, and unsubscribes or rolls back if the update
+            // is the reason they are here. The steam:// handler also brings the Steam client
+            // forward, which is where any of that gets done.
+            //
+            // An earlier comment here claimed there was nothing worth opening. There is.
             var updateBtn = MakeVersionButton(alreadyDownloaded ? "Quit to Update" : "Open Workshop & Quit",
                 new Color32(176, 58, 52, 255), new Color32(208, 76, 68, 255));
             updateBtn.clicked += () =>
