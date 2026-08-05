@@ -448,11 +448,43 @@ namespace CompetitiveAdjustments
         // is ReloadConfig's job, and callers invoke ReloadConfig right after.
         public static void EnsureConfig()
         {
-            if (!Directory.Exists(ConfigDir)) Directory.CreateDirectory(ConfigDir);
-
-            if (!File.Exists(ConfigFile))
+            // Every step here is best-effort, and that is the point.
+            //
+            // A config we cannot create means a server running DEFAULT settings, which
+            // ReloadConfig already handles and now says out loud. It must never mean a
+            // server running NO MOD. Both statements below used to sit above the try: the
+            // ConfigDir getter creates the directory itself, and the first-run WriteConfig
+            // is a bare File.WriteAllText. On a read-only install directory, or one owned
+            // by a different account than the service (the same ownership situation that
+            // produced the repeated-backup bug this file's upgrade path was rewritten for),
+            // either throws UnauthorizedAccessException. Nothing caught it here, so it
+            // unwound into CompetitiveAdjustmentsGameMod.OnEnable's catch, which returns
+            // false and leaves every sub-mod and every Harmony patch unloaded. The operator
+            // sees a mod that did not load at all, for a file that is merely unwritable.
+            try
             {
-                WriteConfig(new ServerConfig());
+                if (!Directory.Exists(ConfigDir)) Directory.CreateDirectory(ConfigDir);
+            }
+            catch (Exception ex)
+            {
+                LogWarning($"Could not create the config directory: {ex.Message}. The server runs with DEFAULT " +
+                           "settings this session and nothing is saved. The mod itself is still loaded.");
+                return;
+            }
+
+            try
+            {
+                if (!File.Exists(ConfigFile))
+                {
+                    WriteConfig(new ServerConfig());
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogWarning($"Could not create '{ConfigFile}': {ex.Message}. The server runs with DEFAULT settings " +
+                           "this session and nothing is saved. The mod itself is still loaded. Check that the " +
+                           "config directory is writable by the account the server runs as.");
                 return;
             }
 
@@ -527,9 +559,29 @@ namespace CompetitiveAdjustments
         /// </summary>
         private static void UpgradeConfigFile(string clean, ServerConfig parsed)
         {
+            // RenderConfig MUTATES what it renders: it mints an editor password when the
+            // config carries none, so that a freshly written file has one. That is right for
+            // a write that lands and wrong for one that does not. ReloadConfig publishes this
+            // very object as the live Config, so a failed write left the server running a
+            // password that exists nowhere on disk, re-minted on every launch and every
+            // reload. Nobody could ever produce it: the file does not have it, ExportConfigJson
+            // redacts it, and the reveal row needs a client UI a headless server does not have.
+            // Meanwhile OnAdminAuthMsg saw a non-empty password and told non-admins to "enter
+            // the admin password to unlock". Identity-based admins were never affected, so this
+            // is the share-a-password path being advertised while it cannot work.
+            //
+            // Captured here and put back on every path that does not write, so the live config
+            // and the file always agree about whether a password exists.
+            string priorPassword = parsed != null && parsed.Admin != null ? parsed.Admin.EditorPassword : null;
+
             string updated;
             try { updated = RenderConfig(parsed); }
-            catch (Exception ex) { LogWarning("Could not render the upgraded config: " + ex.Message); return; }
+            catch (Exception ex)
+            {
+                RestoreEditorPassword(parsed, priorPassword);
+                LogWarning("Could not render the upgraded config: " + ex.Message);
+                return;
+            }
 
             string current = null;
             try { current = File.ReadAllText(ConfigFile); } catch { }
@@ -578,6 +630,10 @@ namespace CompetitiveAdjustments
                     try { File.Delete(backup); } catch { }
                 }
 
+                // Nothing reached disk, so the password RenderConfig may have minted must not
+                // stay in the object ReloadConfig is about to publish as the live Config.
+                RestoreEditorPassword(parsed, priorPassword);
+
                 if (!_warnedUpgradeUnwritable)
                 {
                     _warnedUpgradeUnwritable = true;
@@ -587,6 +643,22 @@ namespace CompetitiveAdjustments
                                "a different user (root) than the one the server runs as.");
                 }
             }
+        }
+
+        /// <summary>
+        /// Puts back the editor password RenderConfig may have minted, for a write that did
+        /// not happen.
+        ///
+        /// A null prior means the config arrived with no Admin block at all. RenderConfig
+        /// created one, which is harmless and is kept, but its password goes back to empty
+        /// so the live config agrees with the file: no password set. An empty password is
+        /// the state AdminAuth already understands, and it is what stops the auth path
+        /// advertising a credential nobody can produce.
+        /// </summary>
+        private static void RestoreEditorPassword(ServerConfig cfg, string priorPassword)
+        {
+            if (cfg == null || cfg.Admin == null) return;
+            cfg.Admin.EditorPassword = priorPassword ?? "";
         }
 
         /// <summary>Keeps the newest few upgrade backups and deletes the rest.</summary>
