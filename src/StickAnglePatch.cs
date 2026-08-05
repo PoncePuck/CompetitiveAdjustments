@@ -229,14 +229,23 @@ namespace CompetitiveCompanion
     // own range for the game's fields, which FreeBlade has already widened to +/-127.
     // Nothing here wraps, despite what these section headers said for a long time.
     //
-    // THE "BLADE LOCKS AT MAX" BUG. The lock shipped ON with bounds of -4/+4, which is
-    // exactly vanilla's own minimumBladeAngle/maximumBladeAngle, so the client handed back
-    // precisely the limit FreeBlade had just removed. The blade climbed to 4 and stopped,
-    // and nothing in the UI suggested the client was the one stopping it. The lock is now
-    // OFF by default, so FreeBlade works out of the box and this only narrows it when asked;
-    // a config carrying the old on-at-vanilla-range pair is switched off once on load
-    // (ClientConfigVersion 1). The bounds are ordered here as well, so no hand-edited file
-    // can collapse the range and freeze the blade a different way.
+    // THE "BLADE LOCKS AT MAX" REPORT. The lock ships ON with bounds of -4/+4, which is
+    // exactly vanilla's own minimumBladeAngle/maximumBladeAngle, so at stock settings the
+    // client hands back precisely the limit FreeBlade had just removed and the blade climbs
+    // to 4 and stops. That is the reported symptom, and it is the INTENDED DEFAULT: a stock
+    // client plays like vanilla even against a server running FreeBlade, and free spin is
+    // something the player turns on, either by switching the lock off or by widening the
+    // range. What was wrong originally was not the behaviour but that nothing named it; the
+    // toggle beside it now says so, as do the config comment and the README.
+    //
+    // It went the other way for one build. de073ff made the lock opt-in and added a
+    // ClientConfigVersion 1 migration that switched it off for files sitting at the old
+    // default; fafe474 reversed both, since a migration that disables the intended default
+    // would fight it on every launch. There is no live migration now. Do not reintroduce one
+    // here without reading MigrateClientConfig first.
+    //
+    // The bounds are ordered here as well, so no hand-edited file can collapse the range and
+    // freeze the blade a different way.
 
     internal static class BladeSpinLock
     {
