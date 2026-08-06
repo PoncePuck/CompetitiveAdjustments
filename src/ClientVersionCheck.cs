@@ -92,6 +92,15 @@ namespace CompetitiveAdjustments
         /// static readonly rather than const so flipping it is a one-character edit. As a
         /// const the compiler folds it away and the unused branch becomes CS0162 unreachable
         /// code, which this project builds warning-free and would otherwise have to suppress.
+        ///
+        /// ONE THING TO KNOW BEFORE FLIPPING IT. The Replay Mod records chat, so this notice
+        /// lands in replay files. Whispered, the send goes through RpcTarget.Group with one
+        /// real client id, which never routes to the server's own LocalSendRpcTarget, so a
+        /// dedicated server does not record its own nag and only the warned player's replay
+        /// carries it. Broadcast to ConnectedClientsIds on a LISTEN HOST is different: the
+        /// host's own id is in that list, which is exactly why the sweep below has to skip
+        /// NetworkManager.ServerClientId, so the notice would be baked into the host's replay
+        /// of the match. Harmless, but it is somebody else's name in a file they keep.
         /// </summary>
         private static readonly bool WarnPublicly = false;
 
