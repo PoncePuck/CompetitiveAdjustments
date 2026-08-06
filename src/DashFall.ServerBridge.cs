@@ -138,6 +138,7 @@ namespace PoncePuck.Keybinds
                     _cmm.UnregisterNamedMessageHandler("PPKB/AdminConfigSet");
                     _cmm.UnregisterNamedMessageHandler("PPKB/ConfigFull");
                     _cmm.UnregisterNamedMessageHandler("PPKB/ConfigReq");
+                    _cmm.UnregisterNamedMessageHandler(CompetitiveAdjustments.ClientVersionCheck.MessageName);
                     _cmm = null;
                 }
             }
@@ -260,11 +261,19 @@ namespace PoncePuck.Keybinds
                         _cmm.RegisterNamedMessageHandler("PPKB/AdminConfigSet", OnAdminConfigSetMsg);
                         _cmm.RegisterNamedMessageHandler("PPKB/ConfigFull", OnConfigFullMsg);
                         _cmm.RegisterNamedMessageHandler("PPKB/ConfigReq", OnConfigReqMsg);
+                        _cmm.RegisterNamedMessageHandler(
+                            CompetitiveAdjustments.ClientVersionCheck.MessageName,
+                            CompetitiveAdjustments.ClientVersionCheck.OnClientVersionMsg);
                         nm.OnClientDisconnectCallback += OnClientLeft;
                         if (DashFallMod.ConfigManager.Config.EnableDebugLogs)
                             DashFallMod.ConfigManager.Dbg($"Registered CMM handlers. IsServer={nm.IsServer} IsHost={nm.IsHost} IsClient={nm.IsClient}");
                     }
                 }
+
+                // Announce our build as a client, and sweep for silent ones as a server.
+                // Hung off this Update rather than a new runner because this is the object
+                // that already owns _cmm and already ticks on every role.
+                CompetitiveAdjustments.ClientVersionCheck.Tick(nm);
             }
 
             private void OnDestroy() { TryUnregister(); }
@@ -285,6 +294,7 @@ namespace PoncePuck.Keybinds
                         _cmm.UnregisterNamedMessageHandler("PPKB/AdminConfigSet");
                         _cmm.UnregisterNamedMessageHandler("PPKB/ConfigFull");
                         _cmm.UnregisterNamedMessageHandler("PPKB/ConfigReq");
+                    _cmm.UnregisterNamedMessageHandler(CompetitiveAdjustments.ClientVersionCheck.MessageName);
                     }
                     if (nm != null) nm.OnClientDisconnectCallback -= OnClientLeft;
                 }
@@ -298,6 +308,7 @@ namespace PoncePuck.Keybinds
                 _held.Remove(clientId);
                 _authedClients.Remove(clientId);
                 _configSetRx.Clear(clientId);
+                CompetitiveAdjustments.ClientVersionCheck.ForgetClient(clientId);
             }
         }
         

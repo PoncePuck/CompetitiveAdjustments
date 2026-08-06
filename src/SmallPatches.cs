@@ -11,6 +11,31 @@ namespace CompetitiveAdjustments
         public const string MOD_NAME = "COMPADJUST";
         public const string COMPANION_VERSION = "0.4c";
         public const string TWEAKS_VERSION = "0.6a-b45";
+
+        /// <summary>
+        /// Monotonic build number, the one thing two builds can compare without agreeing on
+        /// anything else. BUMP ON EVERY WORKSHOP RELEASE.
+        ///
+        /// Deliberately an int and not the version strings above. The Ruleset mod solves the
+        /// same problem by carrying a hardcoded list of every version it has ever shipped and
+        /// asking whether the peer's string is in it; that works, but it is a list somebody
+        /// has to remember to append to, and a version that never made the list reads as
+        /// current. A number only has to be bigger.
+        /// </summary>
+        public const int MOD_BUILD = 2;
+
+        /// <summary>
+        /// The oldest client build this server will not complain about.
+        ///
+        /// Raise this ONLY when a change actually breaks older clients, never merely because
+        /// a new build shipped. If it tracked MOD_BUILD, every client would be scolded for
+        /// the few hours between the server updating and the Workshop item reaching them,
+        /// which is the fastest way to teach people to ignore the warning.
+        ///
+        /// 2 is the first build that sends PPKB/ClientVersion at all. Anything older cannot
+        /// report, and is detected by staying silent instead. See ClientVersionCheck.
+        /// </summary>
+        public const int MIN_SUPPORTED_CLIENT_BUILD = 2;
     }
 }
 
