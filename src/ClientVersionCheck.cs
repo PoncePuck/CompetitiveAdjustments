@@ -64,16 +64,28 @@ namespace CompetitiveAdjustments
         internal const string MessageName = "PPKB/ClientVersion";
 
         /// <summary>
-        /// How long a client may stay silent before it is treated as too old to speak.
-        ///
-        /// This is the whole false-positive surface, so it is generous. A current client sends
-        /// within a frame or two of its first connected Update; twenty seconds is far past any
-        /// plausible scene load, asset load or bad connection, and the cost of waiting is that
-        /// a genuinely stale player is told twenty seconds later. The cost of being too eager
-        /// is telling a correctly-updated player their mod is broken, which is worse: it is
-        /// the kind of wrong that gets the whole warning ignored.
+        /// Server to client: your build is too old, raise the popup. A separate name rather
+        /// than a direction flag on the one above, so neither side has to guess which way a
+        /// message was travelling before it can parse it.
         /// </summary>
-        private const float GraceSeconds = 20f;
+        internal const string RejectMessageName = "PPKB/BuildRejected";
+
+        /// <summary>
+        /// How long a client may stay silent, AFTER it is fully joined, before it is treated
+        /// as too old to speak.
+        ///
+        /// This started at twenty seconds, which was buying safety with the wrong currency.
+        /// The thing that makes a fast verdict wrong is judging a client that has not had a
+        /// fair chance to answer yet, and wall-clock is a poor proxy for that: it waits just
+        /// as long for a client that joined instantly as for one still loading. The join gate
+        /// in TickServer measures the real condition instead, so the clock here only has to
+        /// cover the round trip plus a hitch or two once the player is actually in.
+        ///
+        /// A current client answers within a frame or two of IsConnectedClient, so five
+        /// seconds is many times the honest worst case, and with PollSeconds below the notice
+        /// lands about five seconds after the player appears rather than twenty.
+        /// </summary>
+        private const float GraceSeconds = 5f;
 
         /// <summary>
         /// Re-notify an unchanged stale client no more often than this. Borrowed from
@@ -82,8 +94,13 @@ namespace CompetitiveAdjustments
         /// </summary>
         private const float RenotifySeconds = 900f;
 
-        /// <summary>Sweep cadence. Nothing here is urgent to the frame.</summary>
-        private const float PollSeconds = 1f;
+        /// <summary>
+        /// Sweep cadence. Also the slop on both ends of GraceSeconds, since the clock cannot
+        /// start until a sweep sees the player and the verdict cannot land until the next one
+        /// after it expires. Half a second keeps that slop small enough not to matter now
+        /// that the grace itself is short.
+        /// </summary>
+        private const float PollSeconds = 0.5f;
 
         /// <summary>
         /// Whisper (false) or post publicly with the player's name (true), the way Ruleset
@@ -107,11 +124,17 @@ namespace CompetitiveAdjustments
         private const string ChatColor = "#c8a04a";
 
         // Server state, all keyed by client id and all cleared on disconnect.
-        private static readonly Dictionary<ulong, float> _firstSeen = new Dictionary<ulong, float>();
+        //
+        // Doubles, because these are absolute times on a machine that stays up for weeks.
+        // Time.unscaledTime is a float, and past about 97 days of uptime `now + PollSeconds`
+        // stops being distinguishable from `now`, at which point _nextPoll never advances and
+        // the sweep below degrades from twice a second to every frame. Halving PollSeconds
+        // brought that day forward, which is what made it worth fixing rather than noting.
+        private static readonly Dictionary<ulong, double> _firstSeen = new Dictionary<ulong, double>();
         private static readonly Dictionary<ulong, int> _reportedBuild = new Dictionary<ulong, int>();
-        private static readonly Dictionary<ulong, float> _lastNotified = new Dictionary<ulong, float>();
+        private static readonly Dictionary<ulong, double> _lastNotified = new Dictionary<ulong, double>();
 
-        private static float _nextPoll;
+        private static double _nextPoll;
 
         // Client state. Reset whenever we are not a connected client, so a reconnect re-sends.
         private static bool _announced;
@@ -196,7 +219,7 @@ namespace CompetitiveAdjustments
 
         private static void TickServer(NetworkManager nm)
         {
-            float now = Time.unscaledTime;
+            double now = Time.unscaledTimeAsDouble;
             if (now < _nextPoll) return;
             _nextPoll = now + PollSeconds;
 
@@ -210,11 +233,23 @@ namespace CompetitiveAdjustments
                 // The host's own client. It IS the server; it cannot disagree with itself.
                 if (id == NetworkManager.ServerClientId) continue;
 
-                // Polling rather than OnClientConnectedCallback on purpose: this starts the
-                // clock from the first sweep that SEES a client, so a client already connected
+                // THE JOIN GATE, and the reason the grace period could drop from twenty
+                // seconds to five. A connection exists long before the player does: the
+                // client is still loading the level and its mod has not necessarily ticked
+                // yet, so a clock started here measures our impatience rather than their
+                // silence. Waiting for the Player object with a real username is the same
+                // guard Ruleset uses before it says anything (Ruleset.cs:2860), and it is a
+                // far better proxy for "has had a fair chance to answer" than any duration.
+                //
+                // It also means a client that connects and drops during the load is never
+                // accused of anything, because it never reaches this line.
+                if (!IsFullyJoined(id)) continue;
+
+                // Polling rather than OnClientConnectedCallback on purpose: the clock starts
+                // from the first sweep that sees a JOINED client, so a client already present
                 // when the handlers were re-registered (which Runner.Update does whenever the
-                // CustomMessagingManager is replaced) is still given a full grace period
-                // rather than being judged on a callback that fired before we were listening.
+                // CustomMessagingManager is replaced) still gets a full grace period rather
+                // than being judged on a callback that fired before we were listening.
                 if (!_firstSeen.ContainsKey(id))
                 {
                     _firstSeen[id] = now;
@@ -227,10 +262,13 @@ namespace CompetitiveAdjustments
                 // Silent, but not for long enough to conclude anything yet.
                 if (!reported && now - _firstSeen[id] < GraceSeconds) continue;
 
-                if (_lastNotified.TryGetValue(id, out float last) && now - last < RenotifySeconds) continue;
+                if (_lastNotified.TryGetValue(id, out double last) && now - last < RenotifySeconds) continue;
                 _lastNotified[id] = now;
 
                 Notify(nm, id, reported, build);
+
+                // Only a client that answered can be told anything it will understand.
+                if (reported) SendPopupTrigger(nm, id, build);
             }
         }
 
@@ -275,6 +313,95 @@ namespace CompetitiveAdjustments
             catch (Exception e)
             {
                 ConfigManager.LogWarning($"Could not deliver the out-of-date notice to {clientId}: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// True once the connection has become an actual player with a name.
+        ///
+        /// Everything is wrapped, because this runs on a sweep and PlayerManager is exactly
+        /// the kind of thing that is null during a level transition. Any failure reads as
+        /// "not joined yet", which delays a verdict rather than inventing one, and that is
+        /// the right way for this particular check to fail.
+        /// </summary>
+        private static bool IsFullyJoined(ulong clientId)
+        {
+            try
+            {
+                var pm = PlayerManager.Instance;
+                if (pm == null) return false;
+
+                var player = pm.GetPlayerByClientId(clientId);
+                if (player == null) return false;
+
+                var name = player.Username.Value;
+                return !string.IsNullOrEmpty(name.ToString());
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Tells a client that speaks our protocol to raise its own out-of-date popup.
+        ///
+        /// Only reachable for a client that REPORTED a build, which is the same thing as
+        /// saying it is new enough to understand this message. A client detected by silence
+        /// cannot be sent anything it could read, by definition, so chat remains the only
+        /// thing that reaches it and this is skipped.
+        ///
+        /// Today MIN_SUPPORTED_CLIENT_BUILD equals the first build that reports at all, so
+        /// this path is empty. It becomes the main path the first time the minimum is raised,
+        /// which is exactly when a popup beats a line of chat somebody scrolled past.
+        /// </summary>
+        private static void SendPopupTrigger(NetworkManager nm, ulong clientId, int theirBuild)
+        {
+            var cmm = nm.CustomMessagingManager;
+            if (cmm == null) return;
+
+            try
+            {
+                using (var w = new FastBufferWriter(sizeof(int) * 2, Unity.Collections.Allocator.Temp))
+                {
+                    w.WriteValueSafe(theirBuild);
+                    w.WriteValueSafe(SharedConstants.MIN_SUPPORTED_CLIENT_BUILD);
+                    cmm.SendNamedMessage(RejectMessageName, clientId, w, NetworkDelivery.Reliable);
+                }
+            }
+            catch (Exception e)
+            {
+                ConfigManager.LogWarning($"Could not send the build-rejected popup to {clientId}: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// CLIENT SIDE. The server has told us our build is too old; show the popup at once
+        /// rather than leaving the player to notice a grey line in chat.
+        /// </summary>
+        internal static void OnBuildRejectedMsg(ulong senderId, FastBufferReader reader)
+        {
+            // Server to client only. A peer client sending this would be able to fake an
+            // out-of-date popup on someone else's screen, which is harmless but silly.
+            var nm = NetworkManager.Singleton;
+            if (senderId != NetworkManager.ServerClientId) return;
+            if (nm != null && nm.IsServer) return;   // host talking to itself
+
+            try
+            {
+                int ourBuild, minimum;
+                reader.ReadValueSafe(out ourBuild);
+                reader.ReadValueSafe(out minimum);
+
+                ConfigManager.LogWarning(
+                    $"The server rejected this build: we are {ourBuild}, it requires {minimum} or newer. " +
+                    "Raising the out-of-date popup.");
+
+                DashFallMod.Client.DashFallClientRunner.RaiseServerRejectedPopup(ourBuild, minimum);
+            }
+            catch (Exception e)
+            {
+                ConfigManager.LogWarning($"OnBuildRejectedMsg: {e.Message}");
             }
         }
 

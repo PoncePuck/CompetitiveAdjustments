@@ -22,7 +22,7 @@ namespace CompetitiveAdjustments
         /// has to remember to append to, and a version that never made the list reads as
         /// current. A number only has to be bigger.
         /// </summary>
-        public const int MOD_BUILD = 2;
+        public const int MOD_BUILD = 3;
 
         /// <summary>
         /// The oldest client build this server will not complain about.
@@ -34,6 +34,17 @@ namespace CompetitiveAdjustments
         ///
         /// 2 is the first build that sends PPKB/ClientVersion at all. Anything older cannot
         /// report, and is detected by staying silent instead. See ClientVersionCheck.
+        ///
+        /// Build 3 (stick spin fatigue) deliberately did NOT raise this. It carries its one
+        /// new synced flag in a spare bit of the existing ConfigSyncPackage.BoolFlags, so the
+        /// wire size is unchanged and a build 2 client reads a correct 0 for it rather than
+        /// misparsing anything. Nothing about build 2 is broken against a build 3 server, so
+        /// scolding it would be the exact false positive the paragraph above warns about.
+        ///
+        /// While this equals MOD_BUILD's predecessor rather than MOD_BUILD, the reported-but-
+        /// too-old branch of ClientVersionCheck stays dormant: no shipped client can report a
+        /// build below it. The popup that branch raises is previewable from the debug section
+        /// of the SETTINGS tab so it does not go untested. See ForceShowServerRejectedForTest.
         /// </summary>
         public const int MIN_SUPPORTED_CLIENT_BUILD = 2;
     }

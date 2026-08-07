@@ -16,6 +16,10 @@ namespace DashFallMod.Client
         // How far the slider can be dragged. -128 is a valid sbyte but not a valid bound
         // here: the handler casts the clamped buffer with (sbyte), and a symmetric span
         // means the blade spins the same distance either way.
+        //
+        // These bound the LOCK only. They are not the ceiling on free spin: with the lock
+        // off the buffer wraps rather than clamping, so the blade turns without end. See
+        // BladeSpinWrap in src/StickAnglePatch.cs.
         public const float LimitMin = -127f;
         public const float LimitMax = 127f;
 
@@ -120,6 +124,10 @@ namespace DashFallMod.Client
         //
         // If free spin is ever wanted out of the box, widen FreeBladeSpinRange.Default*
         // rather than flipping this flag, so the lock keeps meaning what its name says.
+        //
+        // OFF is endless, not merely wide. The handler wraps the buffer instead of clamping
+        // it, so there is no bound to reach in either direction. Widening the range above
+        // instead tops out at +/-127, which is the widest clamp an sbyte on the wire allows.
         public bool FreeBladeSpinLockEnabled = true;
         public float FreeBladeSpinMin = FreeBladeSpinRange.DefaultMin;
         public float FreeBladeSpinMax = FreeBladeSpinRange.DefaultMax;

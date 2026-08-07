@@ -33,9 +33,19 @@ namespace DashFallMod.Client
             FilesReplaced,
             /// <summary>Steam says the Workshop item still needs downloading.</summary>
             WorkshopNeedsUpdate,
+            /// <summary>
+            /// A server we joined told us our build is below its minimum. The only reason
+            /// that is not a guess: the other two infer staleness from local state, this one
+            /// is a machine we are actually playing against saying it cannot work with us.
+            /// </summary>
+            ServerRejected,
             /// <summary>The TEST button.</summary>
             Test,
         }
+
+        // Populated by RaiseServerRejectedPopup so the popup can quote real numbers.
+        private int _serverRejectedOurBuild;
+        private int _serverRejectedMinimum;
 
         private bool _modOutOfDate;            // the running build is stale, by either signal
         private StaleReason _staleReason;      // which signal fired
@@ -171,6 +181,36 @@ namespace DashFallMod.Client
         {
             if (!_modOutOfDate || _versionDismissed) return;
             _versionShowRequested = true;
+        }
+
+        /// <summary>
+        /// A server we are connected to has rejected our build. Raise the popup now.
+        ///
+        /// Static because the caller is ClientVersionCheck's message handler, which has no
+        /// runner reference. Silently does nothing without a runner, which is the pure
+        /// dedicated-server case: there is no UI there to put a popup on.
+        /// </summary>
+        internal static void RaiseServerRejectedPopup(int ourBuild, int minimumBuild)
+        {
+            if (_instance == null) return;
+            _instance.ShowServerRejected(ourBuild, minimumBuild);
+        }
+
+        private void ShowServerRejected(int ourBuild, int minimumBuild)
+        {
+            _serverRejectedOurBuild = ourBuild;
+            _serverRejectedMinimum = minimumBuild;
+
+            // Re-open a popup the player dismissed, but only when this is NEW information.
+            // A dismissal of a Steam-flag guess should not suppress a server telling us
+            // outright that it cannot work with this build; a dismissal of that same server
+            // message should stick, or the server's 15-minute re-notify would reopen it all
+            // match at somebody who has already decided to keep playing.
+            if (_staleReason != StaleReason.ServerRejected) _versionDismissed = false;
+
+            _modOutOfDate = true;
+            _staleReason = StaleReason.ServerRejected;
+            RequestVersionPopup();
         }
 
         // Ask Steam whether the COMPADJUST Workshop item needs an update. Sets and returns
@@ -364,6 +404,28 @@ namespace DashFallMod.Client
         }
 
         /// <summary>
+        /// Test entry point for the SERVER-REJECTED wording, wired to its own debug button.
+        ///
+        /// It has one, rather than sharing the button above, because that variant cannot be
+        /// reached by playing: it is only sent to a client that reported a build BELOW
+        /// MIN_SUPPORTED_CLIENT_BUILD, and no shipped build can do that while the minimum
+        /// sits at the first build that reports at all. Without this the whole branch would
+        /// ship having never been rendered once.
+        /// </summary>
+        public void ForceShowServerRejectedForTest()
+        {
+            // Real numbers rather than placeholders, so the preview also catches the case
+            // where the popup is raised without its two fields having been set.
+            _versionDismissed = false;
+            _staleReason = StaleReason.None;   // force ShowServerRejected's "new information" path
+            ShowServerRejected(CompetitiveAdjustments.SharedConstants.MOD_BUILD,
+                               CompetitiveAdjustments.SharedConstants.MOD_BUILD + 1);
+            _versionBackdrop?.RemoveFromHierarchy();
+            _versionBackdrop = null;    // force a fresh build on the next Update tick
+            Debug.Log("[COMPADJUST] TEST server-rejected popup requested.");
+        }
+
+        /// <summary>
         /// Parse the published file id out of the running assembly's path, expecting
         /// ...\steamapps\workshop\content\&lt;appid&gt;\&lt;publishedFileId&gt;\...  Returns 0 when the
         /// DLL is not loaded from a Workshop folder (e.g. a local Plugins dev deploy).
@@ -427,8 +489,12 @@ namespace DashFallMod.Client
             // standing between the player and the new build is the restart. Saying otherwise
             // sends the player to wait on a download that finished long ago.
             bool alreadyDownloaded = _staleReason == StaleReason.FilesReplaced;
+            bool serverRejected = _staleReason == StaleReason.ServerRejected;
 
-            var title = new UITK.Label(alreadyDownloaded ? "RESTART TO FINISH UPDATING" : "MOD OUT OF DATE");
+            var title = new UITK.Label(
+                serverRejected ? "THIS SERVER NEEDS A NEWER BUILD"
+                : alreadyDownloaded ? "RESTART TO FINISH UPDATING"
+                : "MOD OUT OF DATE");
             title.style.fontSize = 32;
             title.style.unityFontStyleAndWeight = FontStyle.Bold;
             title.style.color = new UITK.StyleColor(accent);
@@ -437,7 +503,21 @@ namespace DashFallMod.Client
             ForceUIFont(title);
             panel.Add(title);
 
-            var body = new UITK.Label(alreadyDownloaded
+            // Careful with the middle paragraph. This variant only ever reaches a client that
+            // ANSWERED the server's version handshake, which is the same thing as saying it
+            // speaks the current protocol, so the flat "none of the sync is being applied to
+            // you" line the chat notice uses is not true here and would read as alarmism to
+            // somebody whose rink looks fine. What is true is narrower: the server is running
+            // settings this build has no field for, and those are the ones silently missing.
+            var body = new UITK.Label(serverRejected
+                ? "The server you are on requires a newer COMPADJUST build than this one "
+                  + $"(yours is {_serverRejectedOurBuild}, it needs {_serverRejectedMinimum} or newer).\n\n"
+                  + "Anything it is running that your build does not know about is being ignored "
+                  + "here, so parts of the rink, the goals or the stick rules can differ from what "
+                  + "everyone else is playing. Steam may still show the mod as up to "
+                  + "date; if it does, unsubscribe from COMPADJUST in the Workshop, fully close the "
+                  + "game, resubscribe, then relaunch."
+                : alreadyDownloaded
                 ? "COMPADJUST has already been updated on disk, but the game is still running "
                   + "the version it loaded at launch.\n\n"
                   + "Restart the game to pick it up. Carrying on runs old code against updated "

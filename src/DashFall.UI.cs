@@ -985,7 +985,7 @@ namespace DashFallMod.Client
             // while disagreeing with every other client in the meantime; the config fields
             // remain as the sync slots they always were.
 
-            _actionsSection.Add(MakeToggleRow("FREE BLADE SPIN LOCK", "On (default) keeps the vanilla blade range. Turn OFF for full free spin", clientConfig.FreeBladeSpinLockEnabled, (val) =>
+            _actionsSection.Add(MakeToggleRow("FREE BLADE SPIN LOCK", "On (default) keeps the vanilla blade range. Turn OFF for endless spin with no stop at either end", clientConfig.FreeBladeSpinLockEnabled, (val) =>
             {
                 clientConfig.FreeBladeSpinLockEnabled = val;
                 DashFallConfigLoader.SaveClientConfig(clientConfig);
@@ -1091,6 +1091,11 @@ namespace DashFallMod.Client
                 // Preview the out-of-date version popup without a real Workshop update.
                 _actionsSection.Add(MakeButtonRow("TEST VERSION POPUP", "Preview the 'mod out of date' popup", "SHOW",
                     () => ForceShowVersionPopupForTest()));
+
+                // Its own row, because the server-rejected wording is not reachable by
+                // playing: see ForceShowServerRejectedForTest.
+                _actionsSection.Add(MakeButtonRow("TEST SERVER-REJECTED POPUP", "Preview the 'this server needs a newer build' popup", "SHOW",
+                    () => ForceShowServerRejectedForTest()));
             }
 
             // Check if connected to server

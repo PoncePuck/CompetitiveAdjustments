@@ -26,6 +26,7 @@ Built as a BepInEx-style plugin DLL loaded from `Puck/Plugins/CompetitiveAdjustm
 
 ### Stick
 - Free blade.
+- Stick spin fatigue: a speed limit on the blade, earned by spinning it.
 - Higher stick (activate angle plus max angle).
 - Stick-body collision.
 - Mid-stick collider, disable shaft/stick collision, alter stick positioner output, stick speed decay.
@@ -53,6 +54,18 @@ Tie-ups are a vanilla B897 mechanic. `Stick.Server_OnCollisionStay` reduces the 
 
 There is no friction coefficient anywhere in the B897 C#. Blade and puck friction lives on the prefab colliders in the asset bundle, so it is not a value the game or this mod sets in code.
 
+### Stick spin fatigue
+
+Nothing in the game limits how fast the blade turns. `PlayerInput` clamps the angle's RANGE and the mod's own spin lock replaces that clamp with a wrap, but the rate is whatever the scroll wheel emits. A wheel built on a bearing rather than a notched detent emits far more of those events than a hand can click, so it can hold the blade in a permanent full-speed spin. `StickSpinFatigueEnabled` (on by default, in `CompAdjust`) caps the blade's angular speed once a player has turned it a whole revolution one way inside `StickSpinFatigueWindowSeconds`.
+
+The cap lasts `StickSpinFatigueSlowSeconds` from the last fast revolution, and stacks: the first is `StickSpinFatigueLimitDegreesPerSecond`, each further one multiplies by `StickSpinFatigueStackFactor` up to `StickSpinFatigueMaxStacks`, which at the defaults is 360, 216, 130 then 78 degrees per second. Stacks are earned on what the player ASKS for rather than on what the cap lets through, so keeping the wheel spinning keeps deepening it; they clear together once the slowdown has been over for `StickSpinFatigueRecoverySeconds`.
+
+Everything is measured in degrees of blade rotation, not wheel notches, so the binding's own scale is irrelevant: one unit of `BladeAngleInput` is `Stick.bladeAngleStep` degrees (12.5 on the stock prefab), which puts a revolution at 28.8 units. The default trigger therefore asks for 57.6 scroll steps per second sustained across half a second, which a notched wheel cannot reach, and the whole feature is inert unless `FreeBladeEnabled` is on, since vanilla's +/-4 range cannot hold a revolution.
+
+It runs on both ends ([StickSpinFatigue.cs](src/StickSpinFatigue.cs)). The client limits its own input, which is what everyone sees, because the blade pose comes from the owner's value relayed back through the server. The server then re-applies the limit to the value each client asks it to relay, so a client with the limiter removed gains nothing; that half runs a deliberately looser cap and should never be the one that bites. Set `StickSpinFatigueServerEnforced` to false to leave the rule entirely to the clients.
+
+The enable flag rides a spare bit of `ConfigSyncPackage.BoolFlags` rather than only the `PPKB/ConfigFull` JSON, which is what makes it behave on a server older than the feature. `FromJsonOverwrite` leaves a field the server never sent at whatever the client already had, so carrying it in the JSON alone would have left a client on an old server limiting itself while nobody else was. A server too old to set the bit sends 0, and 0 is the right answer.
+
 ### Physics and tuning (CompTweaks)
 - Turn acceleration, brake, and max speed for skaters and goalies.
 - Forwards, backwards, and sprint acceleration curves with scaling factors.
@@ -73,6 +86,7 @@ src/                            all source
   GoalNetTweaks.cs              goal net rescaling, synced-tweaks state machine, refresh runner
   StaminaPatch.cs               skater / goalie stamina drain and regen
   StickAnglePatch.cs            free blade, spin lock, high sticking
+  StickSpinFatigue.cs           blade speed limit earned by spinning, client and server halves
   StickOnBodyCollisions.cs      stick-body collision rules
   StickPositionerPatch.cs       stick positioner output alteration
   MovementPatch.cs              turn / accel / max-speed
@@ -141,6 +155,12 @@ JSON line comments (`// ...`) are stripped on load.
 Per-user file owned by `DashFallMod.Client.DashFallConfigLoader`. The toggle UI lives in the in-game ModMenu and writes back on every change. Notable client-side options:
 
 - `FreeBladeSpinLockEnabled`, `FreeBladeSpinMin`, `FreeBladeSpinMax`. **On by default at +/-4, which is vanilla's own blade range**, so a stock client plays like vanilla even on a server running FreeBlade. Free spin is opt-in: turn the lock off, or widen the range with the two-handled slider, which reaches +/-127. Because the default range is exactly vanilla's limit, leaving the lock on means FreeBlade has no visible effect. That is intended, not a bug; it is the same behaviour once reported as "the blade locks at max twist", now a stated default with a switch next to it.
+
+  The two settings are not the same knob at different strengths. Widening the range still clamps, and +/-127 is as far as it goes, because `BladeAngleInput` travels the wire as an `sbyte`; at 12.5 degrees per step that is about four and two fifths turns from centre and then the blade stops. Turning the lock **off** wraps the value instead, so the blade turns without end. The rollover is 144 steps, exactly five turns, so it lands on the same pose and nothing jumps on screen (`BladeSpinWrap` in [StickAnglePatch.cs](src/StickAnglePatch.cs)).
+
+  Wrapping does cost something on clients that do not have the mod, and it is worth knowing before turning the lock off. They clamp whatever they receive to vanilla's +/-4, so under the old behaviour, where the value ran to 127 and stopped, they saw the blade sit steady at +4. Under wrapping the value sweeps the whole period, so they see it hold at one bound, flip to the other, and sweep back, once per rollover. Modded clients see the real spin.
+
+  Endless is not the same as unlimited. Neither setting bounds how FAST the blade turns, which is the part a free spinning wheel exploits, and that is what stick spin fatigue above limits. It is a server setting, so the lock and the range stay the client's own choice.
 - `EnableSprintShoulderTrail` plus the trail time, width, colour and opacity fields. Colour and opacity are edited together in one picker row.
 - `EnableClientDebug`. Turns on debug logging and reveals the debug-only rows below it (`ShowArenaClipBrushes`, `ShowPlayerClipBrushes`, the version-popup preview). Turning it off also retracts any clip brushes that were showing.
 

@@ -139,6 +139,7 @@ namespace PoncePuck.Keybinds
                     _cmm.UnregisterNamedMessageHandler("PPKB/ConfigFull");
                     _cmm.UnregisterNamedMessageHandler("PPKB/ConfigReq");
                     _cmm.UnregisterNamedMessageHandler(CompetitiveAdjustments.ClientVersionCheck.MessageName);
+                    _cmm.UnregisterNamedMessageHandler(CompetitiveAdjustments.ClientVersionCheck.RejectMessageName);
                     _cmm = null;
                 }
             }
@@ -264,6 +265,9 @@ namespace PoncePuck.Keybinds
                         _cmm.RegisterNamedMessageHandler(
                             CompetitiveAdjustments.ClientVersionCheck.MessageName,
                             CompetitiveAdjustments.ClientVersionCheck.OnClientVersionMsg);
+                        _cmm.RegisterNamedMessageHandler(
+                            CompetitiveAdjustments.ClientVersionCheck.RejectMessageName,
+                            CompetitiveAdjustments.ClientVersionCheck.OnBuildRejectedMsg);
                         nm.OnClientDisconnectCallback += OnClientLeft;
                         if (DashFallMod.ConfigManager.Config.EnableDebugLogs)
                             DashFallMod.ConfigManager.Dbg($"Registered CMM handlers. IsServer={nm.IsServer} IsHost={nm.IsHost} IsClient={nm.IsClient}");
@@ -295,6 +299,7 @@ namespace PoncePuck.Keybinds
                         _cmm.UnregisterNamedMessageHandler("PPKB/ConfigFull");
                         _cmm.UnregisterNamedMessageHandler("PPKB/ConfigReq");
                     _cmm.UnregisterNamedMessageHandler(CompetitiveAdjustments.ClientVersionCheck.MessageName);
+                    _cmm.UnregisterNamedMessageHandler(CompetitiveAdjustments.ClientVersionCheck.RejectMessageName);
                     }
                     if (nm != null) nm.OnClientDisconnectCallback -= OnClientLeft;
                 }

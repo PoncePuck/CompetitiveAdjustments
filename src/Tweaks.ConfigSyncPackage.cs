@@ -70,6 +70,15 @@ namespace CompetitivePuckTweaks.src
             if (df?.HighStickingEnabled        == true) b |= 1u << 19;
             if (df?.BallMode                  == true) b |= 1u << 20;
             if (df?.StickBodyCollision        == true) b |= 1u << 21;
+            // A spare bit in the existing uint rather than a new field, which is what makes
+            // this safe to add: WireSizeBytes does not move, so no peer's size check trips
+            // and no field shifts onto another field's slot. A server too old to set it
+            // sends 0, and 0 is the right answer for a server that does not have the
+            // feature. That matters more here than for the flags above: the field also
+            // travels in the PPKB/ConfigFull JSON, but JsonUtility.FromJsonOverwrite leaves
+            // absent fields alone, so a client on an older server would otherwise have kept
+            // its own default of ON and rate-limited its blade while nobody else was.
+            if (df?.StickSpinFatigueEnabled   == true) b |= 1u << 22;
             return b;
         }
 
@@ -102,6 +111,7 @@ namespace CompetitivePuckTweaks.src
             df.HighStickingMaxAngle         = pkg.HighStickingMaxAngle;
             df.BallMode                     = (pkg.BoolFlags & (1u << 20)) != 0;
             df.StickBodyCollision           = (pkg.BoolFlags & (1u << 21)) != 0;
+            df.StickSpinFatigueEnabled      = (pkg.BoolFlags & (1u << 22)) != 0;
         }
     }
 }

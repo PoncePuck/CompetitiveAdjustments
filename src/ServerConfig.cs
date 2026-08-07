@@ -106,6 +106,39 @@ namespace CompetitiveAdjustments
         // --- Free Blade ---
         public bool FreeBladeEnabled = false;
 
+        // --- Stick Spin Fatigue ---
+        // A speed limit on the blade that a player earns by spinning it, aimed at the
+        // free spinning (bearing) mouse wheels that can hold the blade at full speed
+        // indefinitely.  See src/StickSpinFatigue.cs.
+        //
+        // On by default, and inert on its own: it does nothing unless FreeBlade is on,
+        // and the default trigger asks for 57.6 scroll steps per second sustained for
+        // half a second, which a notched wheel cannot produce.  Set Enabled to false to
+        // take it out entirely.
+        public bool StickSpinFatigueEnabled = true;
+        // How far the blade must turn one way to count as a revolution, in degrees, and
+        // how quickly it has to get there to count as a fast one.  One unit of blade
+        // angle is 12.5 degrees on the stock stick, so 360 degrees is 28.8 scroll steps.
+        public float StickSpinFatigueRotationDegrees = 360f;
+        public float StickSpinFatigueWindowSeconds = 0.5f;
+        // How long the slowdown lasts, measured from the last fast revolution.
+        public float StickSpinFatigueSlowSeconds = 1f;
+        // Top blade speed while slowed, in degrees per second, at one stack.  Each
+        // further stack multiplies it by StackFactor, so the defaults give 360, 216,
+        // 130 and 78 degrees per second.  A revolution per second at one stack is still
+        // brisk; it is half of what the default trigger demands.
+        public float StickSpinFatigueLimitDegreesPerSecond = 360f;
+        public float StickSpinFatigueStackFactor = 0.6f;
+        public int StickSpinFatigueMaxStacks = 4;
+        // Quiet time after the slowdown ends before the stacks clear.
+        public float StickSpinFatigueRecoverySeconds = 1.5f;
+        // Re-apply the limit on the server, to the value each client asks it to relay,
+        // so a client running without the limiter gains nothing by it.  The server runs
+        // a looser cap than the client does, and an honest client has already throttled
+        // itself, so this should never be the half that bites.  Turn it off to leave the
+        // rule entirely to the clients.
+        public bool StickSpinFatigueServerEnforced = true;
+
         // --- High Sticking ---
         public bool HighStickingEnabled = false;
         public float HighStickingActivateAngle = -20f;
@@ -294,7 +327,7 @@ namespace CompetitiveAdjustments
         // Single source of truth for the config schema version.  Bump this
         // whenever fields are added or removed so existing files are migrated
         // (merged onto the current defaults) on the next load.
-        public const int CURRENT_VERSION = 16;
+        public const int CURRENT_VERSION = 17;
         public int ConfigVersion = CURRENT_VERSION;
         // Top-level section enables.  Each gates a whole feature category so
         // a user who only wants one category can disable the others without
@@ -368,6 +401,7 @@ namespace CompetitiveAdjustments
             EnableGoalNetTweaks           = false,
             EnableArenaTweaks             = false,
             FreeBladeEnabled              = false,
+            StickSpinFatigueEnabled       = false,
             HighStickingEnabled           = false,
             StickBodyCollision            = false,
             BallMode                      = false,

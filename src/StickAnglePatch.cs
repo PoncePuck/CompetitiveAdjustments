@@ -225,9 +225,16 @@ namespace CompetitiveCompanion
     //     bladeAngleBuffer = Mathf.Clamp(bladeAngleBuffer, minimumBladeAngle, maximumBladeAngle);
     //     BladeAngleInput.ClientValue = (sbyte)bladeAngleBuffer;
     //
-    // The only difference is which bounds the clamp uses: the mod substitutes the player's
-    // own range for the game's fields, which FreeBlade has already widened to +/-127.
-    // Nothing here wraps, despite what these section headers said for a long time.
+    // The difference is what bounds the buffer. With the lock ON the mod substitutes the
+    // player's own range for the game's fields, which FreeBlade has already widened to
+    // +/-127. With the lock OFF the buffer WRAPS instead of clamping, which is the only
+    // form of genuinely uncapped spin the game's own types allow: see BladeSpinWrap.
+    //
+    // Neither of those bounds the SPEED, which is what a free spinning mouse wheel
+    // exploits, so the movement also goes through the server's spin limiter on its way
+    // into the buffer: see src/StickSpinFatigue.cs. That is a no-op for a blade nobody
+    // has spun a full revolution recently, which includes every blade turned with a
+    // notched wheel.
     //
     // THE "BLADE LOCKS AT MAX" REPORT. The lock ships ON with bounds of -4/+4, which is
     // exactly vanilla's own minimumBladeAngle/maximumBladeAngle, so at stock settings the
@@ -247,6 +254,91 @@ namespace CompetitiveCompanion
     // The bounds are ordered here as well, so no hand-edited file can collapse the range and
     // freeze the blade a different way.
 
+    /// <summary>
+    /// The rollover used by uncapped spin, in the same sbyte units BladeAngleInput carries.
+    /// </summary>
+    /// <remarks>
+    /// There is no such thing as an unbounded blade angle on the wire. BladeAngleInput is a
+    /// NetworkedInput&lt;sbyte&gt;, so every value the client can send fits in -128..127, and
+    /// FreeBlade widening minimumBladeAngle/maximumBladeAngle to +/-127 is already the widest
+    /// clamp the type allows. That is why "uncapped" still stopped: at Stick.bladeAngleStep of
+    /// 12.5 degrees, 127 steps is 1587.5 degrees, four and a bit turns, and then the blade sits
+    /// there.
+    ///
+    /// What rescues it is that the angle is only ever consumed modulo a turn. Stick.FixedUpdate
+    /// does Quaternion.AngleAxis(value * bladeAngleStep, forward) and UIMinimap subtracts
+    /// Stick.BladeAngle from a UI rotation; nothing integrates it or compares it against a
+    /// threshold. So a value that rolls over a whole number of turns is not just close to the
+    /// one before it, it is the same pose, and the spin can carry on forever inside an sbyte.
+    ///
+    /// The rollover has to land on a whole turn or the seam is visible. At 12.5 degrees a turn
+    /// is 28.8 steps, so the first step count that closes the circle is 144 (1800 degrees, five
+    /// turns), which still fits inside the 256 values an sbyte holds. Rolling over at +/-127
+    /// instead would jump the blade by 52.5 degrees every time.
+    /// </remarks>
+    internal static class BladeSpinWrap
+    {
+        // 144 steps at the stock 12.5 degrees. Used only when the real step cannot be read.
+        private const int FallbackPeriod = 144;
+
+        // The widest rollover an sbyte holds, for a step that never closes the circle.
+        private const int WidestPeriod = 255;
+
+        private static int _period;
+
+        /// <summary>
+        /// Step count that adds up to a whole number of turns, so rolling the buffer over it
+        /// changes nothing on screen. Resolved once from a live Stick, because bladeAngleStep
+        /// is a serialized field and the prefab, not the source default, has the last word.
+        /// </summary>
+        internal static int Period(Stick stick)
+        {
+            if (_period != 0) return _period;
+
+            float step = ReadStep(stick);
+            _period = FindWholeTurnPeriod(step);
+            if (_period == 0)
+            {
+                // No step count under 256 lands on a whole turn, so no seamless rollover
+                // exists. Take the widest span the wire allows and let it jump.
+                Debug.LogWarning($"[COMPADJUST] Blade angle step {step} closes no whole turn " +
+                                 $"inside an sbyte; uncapped spin will jump at the rollover.");
+                _period = WidestPeriod;
+            }
+            return _period;
+        }
+
+        /// <summary>Fold <paramref name="value"/> into [-period/2, +period/2).</summary>
+        internal static float Fold(float value, int period)
+        {
+            float half = period * 0.5f;
+            return Mathf.Repeat(value + half, period) - half;
+        }
+
+        // Shared with the spin limiter, which needs the same number for the opposite
+        // reason: a whole turn of rollover here, 360/step units per revolution there.
+        // Returns 0 when the field cannot be read, which FindWholeTurnPeriod answers with
+        // the stock period.
+        private static float ReadStep(Stick stick)
+            => CompetitiveAdjustments.StickSpinFatigue.BladeStepDegrees(stick);
+
+        /// <summary>
+        /// Smallest n in 1..255 where n steps is a whole number of turns, or 0 if there is none.
+        /// </summary>
+        private static int FindWholeTurnPeriod(float step)
+        {
+            step = Mathf.Abs(step);
+            if (step < 0.0001f) return FallbackPeriod;   // unreadable step, assume the stock one
+
+            for (int n = 1; n <= WidestPeriod; n++)
+            {
+                float turns = Mathf.Round(n * step / 360f);
+                if (turns >= 1f && Mathf.Abs(n * step - turns * 360f) < 0.01f) return n;
+            }
+            return 0;
+        }
+    }
+
     internal static class BladeSpinLock
     {
         /// <summary>
@@ -259,28 +351,68 @@ namespace CompetitiveCompanion
             if (!cfg.FreeBladeEnabled) return true;
 
             if (GlobalStateManager.UIState.IsMouseRequired) return false;
-            if (input.Player?.Stick == null) return false;
+            Stick stick = input.Player?.Stick;
+            if (stick == null) return false;
 
             var clientCfg = DashFallMod.Client.DashFallConfigLoader.ClientConfig;
-            if (clientCfg == null || !clientCfg.FreeBladeSpinLockEnabled) return true;
+            if (clientCfg == null) return true;   // nothing to read a range out of
 
-            // Ordered rather than trusted. Mathf.Clamp(v, min, max) with min > max does not
-            // throw or return v: it pins to min when v < min and otherwise to max, so a
-            // crossed range makes the blade sit on one bound or flip between the two, which
-            // is the same "stuck" symptom from a different cause. The range slider in the
-            // settings UI cannot produce a crossed pair, but a hand-edited file can.
-            float lo = Mathf.Min(clientCfg.FreeBladeSpinMin, clientCfg.FreeBladeSpinMax);
-            float hi = Mathf.Max(clientCfg.FreeBladeSpinMin, clientCfg.FreeBladeSpinMax);
+            float start = StickAngleRefs.bladeAngleBufferRef(input);
+            float moved = delta;
+            float correction = 0f;      // catch-up back into a range the buffer starts outside of
+            bool wraps = !clientCfg.FreeBladeSpinLockEnabled;
 
-            // Never ask for an angle the game itself would reject. FreeBlade widens these to
-            // +/-127; intersecting keeps the client honest if that ever stops being true, and
-            // guarantees the cast below stays inside sbyte.
-            lo = Mathf.Max(lo, StickAngleRefs.minBladeRef(input));
-            hi = Mathf.Min(hi, StickAngleRefs.maxBladeRef(input));
-            if (lo > hi) return true;   // no usable range at all, let vanilla have it
+            // Lock off means uncapped, and uncapped has to wrap. Falling through to vanilla
+            // here was still a cap: vanilla clamps against the game's own
+            // minimumBladeAngle/maximumBladeAngle, which FreeBlade had set to +/-127, so the
+            // blade stopped dead after about four and a half turns. See BladeSpinWrap for why
+            // rolling over is invisible. The fold happens at the end, on the position, once
+            // the movement has been decided.
+            if (!wraps)
+            {
+                // Ordered rather than trusted. Mathf.Clamp(v, min, max) with min > max does not
+                // throw or return v: it pins to min when v < min and otherwise to max, so a
+                // crossed range makes the blade sit on one bound or flip between the two, which
+                // is the same "stuck" symptom from a different cause. The range slider in the
+                // settings UI cannot produce a crossed pair, but a hand-edited file can.
+                float lo = Mathf.Min(clientCfg.FreeBladeSpinMin, clientCfg.FreeBladeSpinMax);
+                float hi = Mathf.Max(clientCfg.FreeBladeSpinMin, clientCfg.FreeBladeSpinMax);
 
-            float buf = StickAngleRefs.bladeAngleBufferRef(input);
-            buf = Mathf.Clamp(buf + delta, lo, hi);
+                // Never ask for an angle the game itself would reject. FreeBlade widens these to
+                // +/-127; intersecting keeps the client honest if that ever stops being true, and
+                // guarantees the cast below stays inside sbyte.
+                lo = Mathf.Max(lo, StickAngleRefs.minBladeRef(input));
+                hi = Mathf.Min(hi, StickAngleRefs.maxBladeRef(input));
+                if (lo > hi) return true;   // no usable range at all, let vanilla have it
+
+                // As a movement, not a position, and before fatigue sees it: an angle the
+                // range refuses must not be counted as spin, or a player parked against
+                // either bound would be fatigued for a blade that is not turning.
+                //
+                // Two different things happen here and only one of them is spin. The buffer
+                // can START outside [lo, hi]: switching this lock back ON after spinning with
+                // it off leaves the buffer anywhere in the wrap period, and dragging the range
+                // slider in under the current angle does the same. Clamping then produces a
+                // "movement" of hundreds of degrees that nobody asked for, and booking that
+                // against the limiter bought four stacks off a single scroll click and left
+                // the blade crawling back into range for the better part of ten seconds.
+                //
+                // So the catch-up is split out and applied whole, the way it was before the
+                // limiter existed, and only the part of the step that happens INSIDE the range
+                // is offered to the limiter. A buffer already in range gives correction 0 and
+                // this is exactly the old line; a player parked ON a bound still contributes
+                // nothing, which was the original point.
+                float from = Mathf.Clamp(start, lo, hi);
+                correction = from - start;
+                moved = Mathf.Clamp(start + delta, lo, hi) - from;
+            }
+
+            // Returns `moved` untouched unless this player has spun a revolution recently
+            // enough to have earned a speed limit. See src/StickSpinFatigue.cs.
+            moved = CompetitiveAdjustments.StickSpinFatigue.ThrottleLocalInput(input, moved, cfg);
+
+            float buf = start + correction + moved;
+            if (wraps) buf = BladeSpinWrap.Fold(buf, BladeSpinWrap.Period(stick));
 
             StickAngleRefs.bladeAngleBufferRef(input) = buf;
             input.BladeAngleInput.ClientValue = (sbyte)buf;
