@@ -103,6 +103,20 @@ namespace CompetitiveAdjustments
         public float ArenaOffsetY = 0.0108f;
         public float ArenaOffsetZ = 0f;
 
+        // Chunked network positions. Puck quantises positions into a fixed box, world X
+        // to +/-25 m and Y and Z to +/-50 m, and the compression SATURATES rather than
+        // wrapping, so an object past the edge is pinned exactly at it. On a rink scaled
+        // past that box, clients see remote objects stop dead on an invisible plane while
+        // the server simulates correctly. Chunking gives each object a per-axis offset so
+        // the wire only ever carries a chunk-local coordinate, which keeps positions
+        // correct at any arena scale with bit-identical vanilla precision.
+        //
+        // Off by default. It changes what goes on the wire (one extra UInt16 on records
+        // that need it), so every peer must run this mod. A client that has not announced
+        // chunk capability is served vanilla-shaped records and simply sees the old
+        // clipping, rather than a corrupted stream.
+        public bool EnableChunkedPositions = false;
+
         // --- Free Blade ---
         public bool FreeBladeEnabled = false;
 

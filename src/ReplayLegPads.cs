@@ -11,13 +11,14 @@
 // both client appliers, and push them back through the existing CMM channels at
 // playback time.
 //
-// This costs nothing in wire format or compatibility. ReplayRecorder.EventMap is a
-// SortedList<int, List<(string, object)>> of boxed payloads that never leaves the
-// server process: it is not serialized, not sent, and not written to disk, so there
-// is no format to version. Server_ReplayEvent and Server_SkipEvent are switches with
-// no default case, so vanilla silently ignores our event name. Our payload is
-// per-tick absolute state rather than cumulative, so skipping it during the replay
-// pre-roll loses nothing and no Server_SkipEvent patch is needed.
+// This costs nothing in wire format or compatibility. Our payloads land in
+// ReplayRecording.events, a List of boxed entries that never leaves the server
+// process: not serialized, not sent, not written to disk, so there is no format to
+// version. (Before B1231 this was ReplayRecorder.EventMap, a
+// SortedList<int, List<(string, object)>>; the storage moved, the property did not.)
+// Server_ReplayEvent is a switch with no default case, so vanilla silently ignores our
+// event name. Our payload is per-tick absolute state rather than cumulative, so
+// skipping it during the replay pre-roll loses nothing.
 //
 // Deliberately in the DashFallMod namespace, which DashFallGameMod patches
 // unconditionally on every role. Both patched methods are IsServer-gated by vanilla,
@@ -62,16 +63,49 @@ namespace DashFallMod
             Debug.LogWarning("[CA/Replay] " + what + " (further occurrences suppressed): " + e.Message);
         }
 
+        /// Target rate for our pad samples, in hertz. This is what the recorder itself
+        /// ran at before B1231, so playback fidelity is unchanged from the original design.
+        private const float TargetSampleHz = 15f;
+
         /// <summary>
-        /// ReplayRecorder.Update calls Server_Tick() and only then Tick++, so a postfix
-        /// appends into the same tick bucket vanilla just filled, immediately after that
-        /// tick's PlayerBodyMove for the same player.
+        /// How many recorder ticks to skip between pad samples.
+        ///
+        /// Before B1231 the recorder ticked from its own Update at ReplayManager.tickRate,
+        /// which was 15, and one sample per tick was the whole design. B1231 moved it onto
+        /// PhysicsManager.OnAfterSimulate, and ReplayRecorder.Server_OnAfterSimulate does
+        /// not throttle: it calls Server_Tick() on every simulate step, so the recorder now
+        /// runs at the physics rate (code default 100).
+        ///
+        /// That matters more for us than for vanilla. Vanilla's pose, state and input
+        /// samples go into ReplayTrack&lt;T&gt;, which drops expired chunks via
+        /// DropExpiredChunks and is bounded by retainedSeconds. Our samples go through
+        /// Server_AddReplayEvent into ReplayRecording.events, a plain List with no trim
+        /// path at all, so they accumulate for the life of the recording. Left alone that
+        /// is 6.7x the previous growth rate on a dedicated server that records all match.
+        /// </summary>
+        private static int SampleStride()
+        {
+            var physicsManager = MonoBehaviourSingleton<PhysicsManager>.Instance;
+            if (physicsManager == null) return 1;
+            return Mathf.Max(1, Mathf.RoundToInt(physicsManager.TickRate / TargetSampleHz));
+        }
+
+        /// <summary>
+        /// ReplayRecorder.Server_OnAfterSimulate calls Server_Tick() and only then
+        /// TickCount++, so a postfix appends into the same tick bucket vanilla just filled,
+        /// immediately after that tick's pose and state samples for the same player.
+        ///
+        /// Decimated by SampleStride. Keying off the absolute tick number rather than a
+        /// counter means Server_StartRecording installing a fresh recording needs no reset.
         /// </summary>
         [HarmonyPatch(typeof(ReplayRecorder), "Server_Tick")]
         [HarmonyPostfix]
         public static void Server_Tick_Postfix(ReplayRecorder __instance)
         {
             if (!GoalieDashExtend.Enabled && !Stances.Enabled) return;
+
+            int stride = SampleStride();
+            if (stride > 1 && (__instance.Tick % stride) != 0) return;
 
             var pm = PlayerManager.Instance;
             if (pm == null) return;

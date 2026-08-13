@@ -64,6 +64,21 @@ namespace CompetitiveAdjustments
         internal const string MessageName = "PPKB/ClientVersion";
 
         /// <summary>
+        /// Capability bit 0: this client has the chunked-position patches installed and
+        /// will consume the trailing chunk word. Reported from live patch state, never
+        /// from the build number.
+        /// </summary>
+        internal const byte CapChunkedPositions = 1 << 0;
+
+        /// <summary>
+        /// Send the announce again on the next tick. Called when a capability changes
+        /// after the first announce, which is the normal case for chunked positions:
+        /// the announce goes out on connect, but the chunk patches only install once the
+        /// arena sync has arrived and told us the server is running this mod.
+        /// </summary>
+        internal static void ReAnnounce() => _announced = false;
+
+        /// <summary>
         /// Server to client: your build is too old, raise the popup. A separate name rather
         /// than a direction flag on the one above, so neither side has to guess which way a
         /// message was travelling before it can parse it.
@@ -172,9 +187,40 @@ namespace CompetitiveAdjustments
 
             try
             {
-                using (var w = new FastBufferWriter(sizeof(int), Unity.Collections.Allocator.Temp))
+                // Sized from the writes below. Every field added here MUST be added to this
+                // sum: FastBufferWriter does not grow, WriteValueSafe throws on overflow, and
+                // the throw lands before SendNamedMessage while _announced is only set after
+                // it -- so an undersized buffer does not drop one announce, it retries forever
+                // and the server never learns this client's build at all.
+                const int announceSize = sizeof(int)      // MOD_BUILD
+                                       + sizeof(byte)     // capability flags
+                                       + sizeof(uint);    // wrap protocol fingerprint
+                using (var w = new FastBufferWriter(announceSize, Unity.Collections.Allocator.Temp))
                 {
                     w.WriteValueSafe(SharedConstants.MOD_BUILD);
+
+                    // Capability byte, appended after the build. Older servers read only
+                    // the int and ignore the rest, and older clients send only the int,
+                    // which the server below handles by treating the byte as absent.
+                    //
+                    // Bit 0 is chunked positions, and it reports whether the patches are
+                    // ACTUALLY INSTALLED on this client, not what build we compiled as.
+                    // A client whose patches failed to install has the right build number
+                    // and would then fail to consume the appended chunk word, which does
+                    // not merely misplace one object: records are concatenated with no
+                    // per-element length, so it would shred every remaining record.
+                    byte caps = 0;
+                    if (DashFallMod.Net.WrapSyncDecode.Installed) caps |= CapChunkedPositions;
+                    w.WriteValueSafe(caps);
+
+                    // The capability bit alone says "I have a handler installed". It does not
+                    // say the handler agrees with the sender about periods, jump guards or
+                    // the marker bit. Two builds that differ on any of those both announce
+                    // capable and then disagree silently, by whole periods, with no symptom
+                    // the wire can show. Announcing the fingerprint makes the server's test
+                    // "can decode AND decodes the same way I encode".
+                    w.WriteValueSafe(DashFallMod.Net.WrapSyncSeed.Fingerprint());
+
                     cmm.SendNamedMessage(MessageName, NetworkManager.ServerClientId, w, NetworkDelivery.Reliable);
                 }
 
@@ -207,6 +253,56 @@ namespace CompetitiveAdjustments
                 if (build < SharedConstants.MIN_SUPPORTED_CLIENT_BUILD)
                     ConfigManager.Log($"Client {senderId} reports build {build}, below the minimum " +
                                       $"{SharedConstants.MIN_SUPPORTED_CLIENT_BUILD}.");
+
+                // Optional capability byte. Absent from clients built before it existed,
+                // so its absence means "no capabilities" rather than a malformed message.
+                byte caps = 0;
+                if (reader.Length - reader.Position >= sizeof(byte))
+                    reader.ReadValueSafe(out caps);
+
+                // Absent on older clients, which is why an unreadable fingerprint means
+                // incapable rather than malformed.
+                uint peerFingerprint = 0;
+                bool haveFingerprint = false;
+                if (reader.Length - reader.Position >= sizeof(uint))
+                {
+                    reader.ReadValueSafe(out peerFingerprint);
+                    haveFingerprint = true;
+                }
+
+                uint ourFingerprint = DashFallMod.Net.WrapSyncSeed.Fingerprint();
+                bool chunkCapable = (caps & CapChunkedPositions) != 0
+                                    && haveFingerprint && peerFingerprint == ourFingerprint;
+
+                if ((caps & CapChunkedPositions) != 0 && !chunkCapable)
+                {
+                    ConfigManager.Log($"Client {senderId} announced wrapped-position support but with "
+                                      + $"protocol {peerFingerprint:X8} against our {ourFingerprint:X8}"
+                                      + (haveFingerprint ? "" : " (no fingerprint sent)")
+                                      + "; treating as incapable and sending absolute positions.");
+                }
+
+                if (chunkCapable)
+                {
+                    // A transition from incapable to capable must be answered by wiping
+                    // this client's send baseline. The late-join seed goes out before the
+                    // client can possibly have announced, so anything stationary at that
+                    // moment was sent in the unsupported encoding and then went to sleep,
+                    // and a sleeping object is never resent. Wiping the baseline forces a
+                    // complete resend of every object including sleepers.
+                    if (DashFallMod.Net.WrapSync.MarkPeerCapable(senderId))
+                    {
+                        bool wiped = DashFallMod.Net.WrapSyncEncode.WipeSendBaseline(senderId);
+                        ConfigManager.Log($"Client {senderId} announced wrapped-position support"
+                                          + (wiped
+                                              ? "; send baseline queued for a complete resend."
+                                              : " (encoding is disarmed, so nothing to resend)."));
+                    }
+                }
+                else
+                {
+                    DashFallMod.Net.WrapSync.MarkPeerIncapable(senderId);
+                }
             }
             catch (Exception e)
             {
@@ -423,6 +519,10 @@ namespace CompetitiveAdjustments
             _firstSeen.Remove(clientId);
             _reportedBuild.Remove(clientId);
             _lastNotified.Remove(clientId);
+            // Client ids are recycled. A stale capability entry would have us send the
+            // chunked encoding to a fresh client that has not announced it yet.
+            DashFallMod.Net.WrapSync.MarkPeerIncapable(clientId);
+            DashFallMod.Net.WrapSyncEncode.ForgetClient(clientId);
         }
     }
 }

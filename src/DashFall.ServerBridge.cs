@@ -1,4 +1,4 @@
-﻿// DashFall.ServerBridge.cs - Server-side message handler for client keybinds
+// DashFall.ServerBridge.cs - Server-side message handler for client keybinds
 // Receives PPKB/Hello and PPKB/Action messages from clients
 
 using System;
@@ -140,6 +140,7 @@ namespace PoncePuck.Keybinds
                     _cmm.UnregisterNamedMessageHandler("PPKB/ConfigReq");
                     _cmm.UnregisterNamedMessageHandler(CompetitiveAdjustments.ClientVersionCheck.MessageName);
                     _cmm.UnregisterNamedMessageHandler(CompetitiveAdjustments.ClientVersionCheck.RejectMessageName);
+                    _cmm.UnregisterNamedMessageHandler(DashFallMod.Net.WrapSyncSeed.MessageName);
                     _cmm = null;
                 }
             }
@@ -160,6 +161,10 @@ namespace PoncePuck.Keybinds
             OnFullConfigReceived = null;
             OnAdminAuthResult = null;
             DashFallMod.GoalNetTweaks.ClearSyncedTweaks();
+            // Session-scoped chunk state goes here too, for the same reason as in
+            // DashFallClientRunner.OnClientStopped: it must survive a mid-session disarm
+            // but must not leak into the next connection, where object ids are recycled.
+            DashFallMod.Net.WrapSync.ClearAll();
             OnFeaturesReceived = null;
         }
         
@@ -268,7 +273,19 @@ namespace PoncePuck.Keybinds
                         _cmm.RegisterNamedMessageHandler(
                             CompetitiveAdjustments.ClientVersionCheck.RejectMessageName,
                             CompetitiveAdjustments.ClientVersionCheck.OnBuildRejectedMsg);
+                        // Predictor seeds for wrapped positions. Registered here, and
+                        // unregistered in BOTH teardown paths below: a handler registered in
+                        // one place but released in only one of the two leaks across a
+                        // NetworkManager swap and then fires against a dead session.
+                        _cmm.RegisterNamedMessageHandler(
+                            DashFallMod.Net.WrapSyncSeed.MessageName,
+                            DashFallMod.Net.WrapSyncSeed.OnSeedMsg);
                         nm.OnClientDisconnectCallback += OnClientLeft;
+
+                        // A listen host that started hosting after plugin load gets the
+                        // encode hooks here. Idempotent, and this block only runs on a
+                        // server role, so a pure client never installs them.
+                        if (nm.IsServer) DashFallMod.Net.WrapSyncEncode.Install();
                         if (DashFallMod.ConfigManager.Config.EnableDebugLogs)
                             DashFallMod.ConfigManager.Dbg($"Registered CMM handlers. IsServer={nm.IsServer} IsHost={nm.IsHost} IsClient={nm.IsClient}");
                     }
@@ -300,6 +317,7 @@ namespace PoncePuck.Keybinds
                         _cmm.UnregisterNamedMessageHandler("PPKB/ConfigReq");
                     _cmm.UnregisterNamedMessageHandler(CompetitiveAdjustments.ClientVersionCheck.MessageName);
                     _cmm.UnregisterNamedMessageHandler(CompetitiveAdjustments.ClientVersionCheck.RejectMessageName);
+                    _cmm.UnregisterNamedMessageHandler(DashFallMod.Net.WrapSyncSeed.MessageName);
                     }
                     if (nm != null) nm.OnClientDisconnectCallback -= OnClientLeft;
                 }

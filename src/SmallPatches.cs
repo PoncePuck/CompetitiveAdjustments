@@ -356,17 +356,15 @@ namespace CompetitivePuckTweaks.src
         }
     }
 
-    [HarmonyPatch(typeof(SynchronizedObjectManager), "Awake")]
-    public class SyncObjMngrPatch
-    {
-        [HarmonyPostfix]
-        public static void Postfix(SynchronizedObjectManager __instance, ref SnapshotInterpolationSettings ___snapshotInterpolationSettings, ref bool ___skipLateTicks)
-        {
-            ___skipLateTicks = false;
-            ___snapshotInterpolationSettings.bufferLimit = 128;
-            ___snapshotInterpolationSettings.bufferTimeMultiplier = 2.5f;
-        }
-    }
+    // SyncObjMngrPatch is gone as of B1231. It postfixed SynchronizedObjectManager.Awake to
+    // widen the snapshot interpolation buffer (bufferLimit 128, bufferTimeMultiplier 2.5) and
+    // to clear skipLateTicks. B1213 deleted that whole mechanism: SnapshotInterpolationSettings,
+    // SnapshotInterpolation and the skipLateTicks field no longer exist on the manager, which
+    // now buffers through SynchronizedObjectClientReceiver and interpolates against a client
+    // timeline. The nearest equivalent knob is SettingsManager.NetworkBuffering plus
+    // SynchronizedObjectManager.Client_SetTargetTimelinePosition, and both are client-side
+    // player settings rather than something a server plugin should be overriding, so this is a
+    // deletion and not a port. See the B1231 migration notes.
 
     [HarmonyPatch(typeof(ChatManager), "Client_SendChatMessageRpc")]
     public class ChatManagerCommandPatch

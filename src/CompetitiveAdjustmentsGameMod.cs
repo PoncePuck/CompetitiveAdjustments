@@ -194,18 +194,60 @@ internal static class HarmonyPatchHelper
 {
     public static void PatchNamespaces(Harmony harmony, params string[] nsPrefixes)
     {
-        foreach (var type in Assembly.GetExecutingAssembly().GetTypes())
+        // GetTypes() was outside the try. A single unloadable type throws
+        // ReflectionTypeLoadException here and silently disables EVERY patch in the
+        // namespace, with the caller still logging "Harmony patching complete".
+        // Take whatever loaded and carry on.
+        Type[] types;
+        try
+        {
+            types = Assembly.GetExecutingAssembly().GetTypes();
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            types = Array.FindAll(ex.Types, t => t != null);
+            UnityEngine.Debug.LogWarning(
+                $"[COMPADJUST] {ex.Types.Length - types.Length} type(s) failed to load; "
+                + "patching only what resolved. First loader error: "
+                + (ex.LoaderExceptions != null && ex.LoaderExceptions.Length > 0
+                    ? ex.LoaderExceptions[0].Message : "(none reported)"));
+        }
+
+        int patched = 0, failed = 0;
+        foreach (var type in types)
         {
             if (type.Namespace == null) continue;
             foreach (var prefix in nsPrefixes)
             {
                 if (type.Namespace == prefix || type.Namespace.StartsWith(prefix + "."))
                 {
-                    try { harmony.CreateClassProcessor(type).Patch(); }
-                    catch { /* skip types with no patches */ }
+                    try
+                    {
+                        var applied = harmony.CreateClassProcessor(type).Patch();
+                        if (applied != null && applied.Count > 0) patched++;
+                    }
+                    catch (Exception ex)
+                    {
+                        // This used to be a bare `catch { }` justified as "skip types with no
+                        // patches". It also swallowed every patch whose target no longer
+                        // resolves on the running build, which is precisely the failure a
+                        // game update produces, and it left no trace anywhere in the log.
+                        failed++;
+                        UnityEngine.Debug.LogWarning(
+                            $"[COMPADJUST] Harmony patch FAILED for {type.FullName}: {ex.Message}");
+                    }
                     break;
                 }
             }
         }
+
+        if (failed > 0)
+            UnityEngine.Debug.LogWarning(
+                $"[COMPADJUST] Harmony namespace patch summary for [{string.Join(", ", nsPrefixes)}]: "
+                + $"{patched} type(s) patched, {failed} FAILED. A failed patch means that feature "
+                + "is silently absent on this game build.");
+        else
+            CompetitiveAdjustments.ConfigManager.Log(
+                $"Harmony patched {patched} type(s) for [{string.Join(", ", nsPrefixes)}], 0 failures.");
     }
 }

@@ -154,6 +154,12 @@ namespace DashFallMod.Client
             DashFallMod.GoalNetTweaks.OnTweaksSynced -= OnTweaksSynced;
             ResetMinimapScale();
             GoalNetTweaks.RemoveNetworkBoundsPatches();
+            // The session is over, so per-connection chunk state is finally safe to drop.
+            // RemoveNetworkBoundsPatches deliberately keeps the chunk table and the peer
+            // capability set while a connection is live, because dropping either mid-session
+            // strands already-chunked objects or silently reverts peers to the saturating
+            // encoding. This is the point where neither concern applies.
+            DashFallMod.Net.WrapSync.ClearAll();
             // Clear the cached server config so that when the client joins the next
             // server (which may be vanilla), RefreshAll() doesn't re-apply the old
             // server's EnableArenaTweaks=true via _hasSyncedTweaks.

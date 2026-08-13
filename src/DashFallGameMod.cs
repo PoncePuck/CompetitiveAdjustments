@@ -40,6 +40,30 @@ public sealed class DashFallGameMod
             _harmony = new Harmony("net.poncepuck.dashfall");
             _harmony.PatchAll(typeof(DashFallGameMod));
             HarmonyPatchHelper.PatchNamespaces(_harmony, "DashFallMod", "PoncePuck.Keybinds", "PonceMods.Shared");
+
+            // Wrapped-position decode. Installed once, here, for every role, and never
+            // removed: it is inert unless a record arrives carrying wire bit 16384, which
+            // vanilla cannot produce (max attainable ChangeMask is 8191). Installing it
+            // permanently is what lets the SERVER be the only thing that arms, instead of
+            // two switches that have to agree.
+            DashFallMod.Net.WrapSyncDecode.Install();
+
+            // Wrapped-position encode. SERVER ROLES ONLY.
+            //
+            // This used to install on every role, on the reasoning that the hooks are
+            // no-ops off the server path so installing them everywhere was free. It is not
+            // free. WrapSyncEncode prefixes the SynchronizedObjectData constructor, and
+            // SyncRangePatch TRANSPILES that same constructor, live, the moment a synced
+            // arena resize arrives. Being a no-op at runtime does not make a patch absent
+            // at patch time: it still changes what Harmony has to compose on a struct
+            // constructor that sits directly in the deserialization path.
+            //
+            // A pure client gains nothing from encode -- it never serializes object data --
+            // so the only thing installing it there could do was cost. A listen host still
+            // gets the hooks, because ServerBridge calls this again (it is idempotent) once
+            // NetworkManager reports IsServer.
+            if (isHeadless || isServerRuntime)
+                DashFallMod.Net.WrapSyncEncode.Install();
             
             // b1117 renamed the spawn broadcast to Event_Everyone_OnPlayerBodySpawned,
             // and role changes are now delivered through the combined
@@ -128,8 +152,147 @@ public sealed class DashFallGameMod
     {
         var body = msg?["playerBody"] as PlayerBodyV2;
         if (body != null) DashMod.EnableDash(body);
+        LogSpawnPose(body);
     }
-    
+
+    /// <summary>
+    /// One-shot pose dump for the local player's body at spawn.
+    ///
+    /// This exists because an "I spawn in upside down" report produced a log with
+    /// literally nothing in it: this codebase logs no rotation value anywhere, on any
+    /// path, so there was no way to tell an inverted BODY from an inverted CAMERA, or
+    /// either from a decode that never delivered a valid pose. Three investigations ran
+    /// on inference alone. Sixteen fields of text at spawn ends that argument.
+    ///
+    /// Read it like this:
+    ///   up.y near +1        upright.        up.y near -1  inverted.
+    ///   kinematic=True      the body is driven from the network, so a wrong pose means
+    ///                       a wrong or missing record, not local physics.
+    ///   kinematic=False     the body simulates locally and the whole externally-driven
+    ///                       model is wrong; that would be the real finding.
+    ///   camLocalEuler       PlayerCamera rewrites its own localRotation every frame from
+    ///                       the look angle, so if the body is upright and the view is not,
+    ///                       the flip is in the camera's PARENT chain, printed here.
+    /// </summary>
+    private static void LogSpawnPose(PlayerBodyV2 body)
+    {
+        try
+        {
+            if (body == null || !body.IsOwner) return;   // local player only
+
+            var t = body.transform;
+            var rb = body.GetComponent<Rigidbody>();
+            var cam = body.GetComponentInChildren<Camera>(true);
+
+            string camInfo = "(none)";
+            if (cam != null)
+            {
+                var chain = "";
+                for (var p = cam.transform.parent; p != null; p = p.parent)
+                    chain = p.name + "/" + chain;
+                camInfo = $"parent='{chain}' localEuler={cam.transform.localEulerAngles} "
+                        + $"worldEuler={cam.transform.eulerAngles} lossyScale={cam.transform.lossyScale}";
+            }
+
+            ConfigManager.Log(
+                "SPAWN POSE (local): "
+                + $"pos={t.position} euler={t.eulerAngles} up={t.up} "
+                + $"lossyScale={t.lossyScale} "
+                + $"kinematic={(rb != null ? rb.isKinematic.ToString() : "no-rb")} "
+                + $"parent='{(t.parent != null ? t.parent.name : "(root)")}' "
+                + $"| camera {camInfo}");
+
+            // The spawn-instant sample is necessary but not sufficient: it fires on the
+            // spawn event, BEFORE the first decoded network pose has been applied, so it
+            // always reports the prefab default. It proved the body starts upright and is
+            // kinematic; it cannot catch an inversion that arrives one network tick later.
+            // Attach a watcher for that.
+            if (t.GetComponent<UprightWatch>() == null)
+                t.gameObject.AddComponent<UprightWatch>();
+        }
+        catch (Exception e)
+        {
+            ConfigManager.Dbg("LogSpawnPose failed: " + e.Message);
+        }
+    }
+
+    /// <summary>
+    /// Watches the local body's orientation and logs the transition into and out of
+    /// "not upright", with the raw quaternion.
+    ///
+    /// The raw quaternion is the point. If an inverted body reads exactly
+    /// (x=1, y=0, z=0, w=0) then it is 180 degrees about X, which is precisely what
+    /// Puck's QuaternionCompressor.DecompressQuaternion(0) returns for an all-zero
+    /// rotation field. That would mean the client is being handed a record with no
+    /// rotation data and vanilla is decoding the hole into a flip, rather than anything
+    /// rotating the body locally. Any other quaternion points somewhere else entirely.
+    ///
+    /// Self-limiting: samples at 5 Hz, logs only on state change plus a bounded number of
+    /// periodic samples, and stops sampling once it has seen enough of a stable state.
+    /// </summary>
+    private sealed class UprightWatch : MonoBehaviour
+    {
+        private const float SampleInterval = 0.2f;
+        private const int MaxTransitionLogs = 12;
+
+        private float _next;
+        private bool _wasUpright = true;
+        private bool _primed;
+        private int _logs;
+        private float _started;
+
+        private void Start() { _started = Time.time; }
+
+        private void Update()
+        {
+            if (Time.time < _next) return;
+            _next = Time.time + SampleInterval;
+
+            var t = transform;
+            bool upright = t.up.y >= 0.5f;
+
+            if (!_primed)
+            {
+                _primed = true;
+                _wasUpright = upright;
+                if (!upright) Report(t, "INVERTED ON FIRST SAMPLE");
+                return;
+            }
+
+            if (upright != _wasUpright)
+            {
+                _wasUpright = upright;
+                Report(t, upright ? "returned UPRIGHT" : "became INVERTED");
+            }
+        }
+
+        private void Report(Transform t, string what)
+        {
+            if (_logs++ >= MaxTransitionLogs)
+            {
+                if (_logs == MaxTransitionLogs + 1)
+                    ConfigManager.Log("Upright watch: further transitions suppressed (flapping).");
+                return;
+            }
+
+            var q = t.rotation;
+            var rb = GetComponent<Rigidbody>();
+            ConfigManager.Log(
+                $"UPRIGHT WATCH ({what}) at t+{Time.time - _started:F2}s: "
+                + $"quat=({q.x:F4}, {q.y:F4}, {q.z:F4}, {q.w:F4}) "
+                + $"euler={t.eulerAngles} up={t.up} pos={t.position} "
+                + $"kinematic={(rb != null ? rb.isKinematic.ToString() : "no-rb")}");
+
+            // Call out the one shape that identifies a decoded hole rather than a rotation.
+            if (Mathf.Abs(q.x) > 0.99f && Mathf.Abs(q.w) < 0.01f
+                && Mathf.Abs(q.y) < 0.01f && Mathf.Abs(q.z) < 0.01f)
+                Debug.LogWarning(
+                    "[COMPADJUST] The body rotation is EXACTLY 180 degrees about X, which is what "
+                    + "DecompressQuaternion(0) returns for an all-zero rotation field. That points at "
+                    + "a record arriving with no rotation data, not at anything rotating the body.");
+        }
+    }
+
     private void OnRoleChanged(Dictionary<string, object> msg)
     {
         if (msg == null) return;

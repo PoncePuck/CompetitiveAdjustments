@@ -1,4 +1,4 @@
-﻿using CompetitivePuckTweaks.src;
+using CompetitivePuckTweaks.src;
 using DashFallMod.Net;
 using System;
 using System.Collections;
@@ -1159,13 +1159,20 @@ namespace DashFallMod
 
         // ── Arena network bounds patches ──────────────────────────────────────
         // Applied when EnableArenaTweaks is true; unapplied when it is turned off.
-        // Replaces vanilla 16-bit position quantisation with the chunked-sync
-        // system in src/Net/, keeping vanilla 1.5 mm precision out to +/-4 km.
+        // Keeps a rink scaled past vanilla's wire box transmitting real positions.
+        // Two mechanisms exist and exactly one may be active at a time:
+        //   SyncRangePatch  widens the quantisation window. Simple, symmetric, costs
+        //                   precision linearly with arena scale. This is the fallback.
+        //   WrapSync        wraps the coordinate so it always fits the vanilla window,
+        //                   at bit-identical vanilla precision and unbounded range.
+        // See src/Net/WrapSync.cs.
+        //
+        // The old early-out on "chunks already installed" was removed deliberately: it
+        // also skipped SyncRangePatch.RefreshRange(), so a live arena-scale edit left the
+        // two ends on different ranges with no way to converge.
 
         private static void ApplyNetworkBoundsPatches()
         {
-            if (NetworkBoundsPatch.ChunksEnabled) return;
-
             // Guard 1: no active network session — the DontDestroyOnLoad Runner can fire
             // RefreshAll() after disconnect or after mod disable; bail out in that case.
             var nm = Unity.Netcode.NetworkManager.Singleton;
@@ -1187,23 +1194,50 @@ namespace DashFallMod
             }
 
             _loggedVanillaServerSkip = false;
-            NetworkBoundsPatch.EnableOpenWorldPrecision();
-            LogRequiredChunks();
+
+            // Widen the wire's position range to match the resized rink.
+            //
+            // This MUST sit below the two guards above, not above them. Guard 2 is what
+            // proves the peer is running this mod with a synced arena scale; widening the
+            // range on one end only does not fail loudly, it silently rescales every
+            // position, which is strictly worse than the clamp it replaces.
+            //
+            // Enable() is idempotent and re-derives the range each call, so routing live
+            // arena-scale edits through here (RefreshAll runs on every arena refresh) keeps
+            // the two ends in step after an admin change rather than only on connect.
+            SyncRangePatch.Enable();
+
+            LogWireFit();
         }
 
         internal static void RemoveNetworkBoundsPatches()
         {
             _loggedVanillaServerSkip = false;
-            NetworkBoundsPatch.Disable();
+            // Back to vanilla bounds and unpatch. Without this, a client that leaves a
+            // modded server keeps a widened range and mis-decodes every position on the
+            // next vanilla server it joins.
+            SyncRangePatch.Disable();
         }
 
-        // Vanilla rink half-extent along world X / Z, used to derive required chunk
+        // Vanilla WIRE half-extent along world X / Z, used to derive required chunk
         // counts. World X scales with ArenaScaleX and world Z (rink length) with
-        // ArenaScaleZ. ArenaScaleY is the vertical axis and is not chunked.
-        private const float VanillaArenaHalfExtentX = 50f;
-        private const float VanillaArenaHalfExtentZ = 25f;
+        // ArenaScaleZ. ArenaScaleY is the vertical axis and is not chunked here.
+        //
+        // These are deliberately the wire bounds from SynchronizedObjectData
+        // (POSITION_MAX_X = 25, POSITION_MAX_Z = 50) rather than a measured rink extent.
+        // The predecessors of these constants were VanillaArenaHalfExtentX = 50 and
+        // Z = 25, which is the opposite way round from the wire and cannot both be
+        // right: if the rink really were 50 m half-extent on X it would not fit inside
+        // vanilla's own +/-25 m X box at scale 1, and stock Puck would clip itself.
+        // Rather than resolve the rink's true size from a scene we cannot read, derive
+        // from the box the game guarantees is big enough to hold it. The vanilla box
+        // contains the vanilla rink with whatever margin the developers chose, so
+        // scaling the box by the same factor as the rink preserves that margin and is
+        // the correct quantity for sizing chunks regardless of the rink's real extents.
+        private const float VanillaArenaHalfExtentX = 25f;   // POSITION_MAX_X on B1231
+        private const float VanillaArenaHalfExtentZ = 50f;   // POSITION_MAX_Z on B1231
 
-        private static void LogRequiredChunks()
+        private static void LogWireFit()
         {
             var nm = Unity.Netcode.NetworkManager.Singleton;
             bool useSynced = _hasSyncedTweaks && nm != null && !nm.IsServer;
@@ -1217,16 +1251,28 @@ namespace DashFallMod
 
             float halfX = VanillaArenaHalfExtentX * scaleX;
             float halfZ = VanillaArenaHalfExtentZ * scaleZ;
-            int requiredChunksX = Mathf.CeilToInt(halfX / ChunkRegistry.ChunkSizeMeters);
-            int requiredChunksZ = Mathf.CeilToInt(halfZ / ChunkRegistry.ChunkSizeMeters);
-            int maxChunkIndex = Mathf.Max(requiredChunksX, requiredChunksZ);
+
+            // Report against the range that is actually live, not against the dead chunk
+            // scheme. The previous version of this line printed "required chunks X=2/31"
+            // and a reach of +/-1265m from a feature that is compiled out, which read as
+            // reassurance while objects were in fact clipping at +/-25m.
+            string live = SyncRangePatch.DescribeRange();
+            bool fitsX = halfX <= SyncRangePatch.GetMaxX() + 0.01f;
+            bool fitsZ = halfZ <= SyncRangePatch.GetMaxZ() + 0.01f;
 
             CompetitiveAdjustments.ConfigManager.Log(
-                $"Arena half-extent X={halfX:F1}m Z={halfZ:F1}m (scale X={scaleX:F2} Z={scaleZ:F2}); " +
-                $"required chunks per axis: X={requiredChunksX} Z={requiredChunksZ}; chunk-index limit +/-{sbyte.MaxValue} (~{sbyte.MaxValue * ChunkRegistry.ChunkSizeMeters:F0}m).");
+                $"Arena half-extent X={halfX:F1}m Z={halfZ:F1}m (scale X={scaleX:F2} Z={scaleZ:F2}); "
+                + $"wire range now {live}; "
+                + (fitsX && fitsZ
+                    ? "the whole rink fits on the wire."
+                    : "PART OF THE RINK DOES NOT FIT and will clip."));
 
-            if (maxChunkIndex > sbyte.MaxValue)
-                Debug.LogWarning($"[COMPADJUST] Required chunk index {maxChunkIndex} exceeds sbyte range; positions beyond +/-{sbyte.MaxValue * ChunkRegistry.ChunkSizeMeters:F0}m will clamp.");
+            if (!fitsX)
+                Debug.LogWarning($"[COMPADJUST] Arena half-extent X={halfX:F1}m exceeds the wire bound "
+                                 + $"{SyncRangePatch.GetMaxX():F1}m; objects past that plane will pin to it on every client.");
+            if (!fitsZ)
+                Debug.LogWarning($"[COMPADJUST] Arena half-extent Z={halfZ:F1}m exceeds the wire bound "
+                                 + $"{SyncRangePatch.GetMaxZ():F1}m; objects past that plane will pin to it on every client.");
         }
 
         // ── Audio environment adjustment ──────────────────────────────────────

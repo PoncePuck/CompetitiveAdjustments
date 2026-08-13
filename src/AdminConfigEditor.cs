@@ -213,8 +213,15 @@ namespace CompetitiveAdjustments
             var ct = ConfigManager.Config?.CompTweaks;
             if (ct == null) return;
 
-            if (float.IsNaN(ct.FixedDeltaTime) || ct.FixedDeltaTime < 0.002f) ct.FixedDeltaTime = 0.002f;
-            else if (ct.FixedDeltaTime > 0.05f) ct.FixedDeltaTime = 0.05f;
+            // As of B1231 this is no longer only the physics step. PhysicsManager drives
+            // both SynchronizedObjectManager.Server_Tick and ReplayRecorder.Server_Tick off
+            // OnAfterSimulate, so this value is also the per-player object-sync send rate
+            // and the replay sample rate. The old floor of 0.002 meant 500 Hz of sync RPCs
+            // per connected player, which is a bandwidth incident rather than a physics
+            // setting, and the old ceiling of 0.05 meant 20 Hz, well below what the client
+            // interpolator expects. Bound it to a sane network range instead: 125 Hz to 50 Hz.
+            if (float.IsNaN(ct.FixedDeltaTime) || ct.FixedDeltaTime < 0.008f) ct.FixedDeltaTime = 0.008f;
+            else if (ct.FixedDeltaTime > 0.02f) ct.FixedDeltaTime = 0.02f;
 
             if (ct.SolverIterations < 1) ct.SolverIterations = 1;
             else if (ct.SolverIterations > 64) ct.SolverIterations = 64;

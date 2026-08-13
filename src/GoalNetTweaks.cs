@@ -360,12 +360,11 @@ namespace DashFallMod
                 // failed early attempt does not latch the bundled prefab in for good and
                 // late-appearing geometry still gets picked up.
                 TickArenaProxyRescan();
-                // ChunkSyncClient.Enable() is only invoked from
-                // ApplyNetworkBoundsPatches, which early-returns once chunks
-                // are active -- so a CMM-not-ready failure on the initial
-                // Enable would otherwise never retry. Poll here at 1Hz; the
-                // call is a fast no-op once registration succeeds.
-                DashFallMod.Net.ChunkSyncClient.TickRegistrationRetry();
+                // The 1 Hz ChunkSyncClient.TickRegistrationRetry() poll that used to sit
+                // here is gone. It existed to retry a CustomMessagingManager handler
+                // registration for the old chunk side channel; the B1231 design carries
+                // chunk indices inline on the object-sync record instead, so there is no
+                // named-message registration left to retry.
             }
         }
 

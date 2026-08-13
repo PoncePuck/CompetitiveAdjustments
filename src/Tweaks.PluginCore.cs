@@ -41,6 +41,7 @@ namespace CompetitivePuckTweaks.src
         private bool _vanillaPhysicsCaptured;
         private float _vanillaFixedDeltaTime;
         private int _vanillaSolverIterations;
+        private int _vanillaTickRate;
         private bool _vanillaIgnore_6_6;
         private bool _vanillaIgnore_6_8;
 
@@ -88,6 +89,11 @@ namespace CompetitivePuckTweaks.src
                 {
                     _vanillaFixedDeltaTime = Time.fixedDeltaTime;
                     _vanillaSolverIterations = Physics.defaultSolverIterations;
+                    // Capture the tick rate too, not just the step. Restoring via
+                    // PhysicsManager is what re-syncs the advertised object-sync interval;
+                    // restoring Time.fixedDeltaTime alone would leave them diverged.
+                    var pm = MonoBehaviourSingleton<PhysicsManager>.Instance;
+                    _vanillaTickRate = pm != null ? pm.TickRate : 0;
                     _vanillaIgnore_6_6 = Physics.GetIgnoreLayerCollision(6, 6);
                     _vanillaIgnore_6_8 = Physics.GetIgnoreLayerCollision(6, 8);
                     _vanillaPhysicsCaptured = true;
@@ -96,7 +102,7 @@ namespace CompetitivePuckTweaks.src
                 if (config.DisableStickCollision) Physics.IgnoreLayerCollision(6, 6, true);
                 Physics.IgnoreLayerCollision(6, 8, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
 
-                Time.fixedDeltaTime = config.FixedDeltaTime;
+                ApplySimulationStep(config.FixedDeltaTime);
                 Physics.defaultSolverIterations = config.SolverIterations;
 
                 // 310 migration changed several event names; listen to both for compatibility.
@@ -153,7 +159,11 @@ namespace CompetitivePuckTweaks.src
                 // simulation step / layer mask.
                 if (_vanillaPhysicsCaptured)
                 {
-                    Time.fixedDeltaTime = _vanillaFixedDeltaTime;
+                    var pm = MonoBehaviourSingleton<PhysicsManager>.Instance;
+                    if (pm != null && _vanillaTickRate > 0)
+                        pm.TickRate = _vanillaTickRate;
+                    else
+                        Time.fixedDeltaTime = _vanillaFixedDeltaTime;
                     Physics.defaultSolverIterations = _vanillaSolverIterations;
                     Physics.IgnoreLayerCollision(6, 6, _vanillaIgnore_6_6);
                     Physics.IgnoreLayerCollision(6, 8, _vanillaIgnore_6_8);
@@ -166,6 +176,48 @@ namespace CompetitivePuckTweaks.src
                 PluginCore.Log($"Failed to disable: {e}");
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Sets the simulation step through PhysicsManager rather than writing
+        /// Time.fixedDeltaTime directly.
+        ///
+        /// As of B1231 the physics step is also the object-synchronisation send rate:
+        /// SynchronizedObjectManager.Awake subscribes its OnAfterSimulate to
+        /// PhysicsManager.OnAfterSimulate, and that handler calls Server_Tick once per
+        /// simulate step. Writing Time.fixedDeltaTime directly therefore changes how
+        /// often the server actually sends, but leaves SynchronizedObjectManager.TickRate
+        /// at its serialized value, so the tick header still advertises the old interval
+        /// and every client sizes its buffer and extrapolation clamps from a lie.
+        ///
+        /// PhysicsManager.set_TickRate writes Time.fixedDeltaTime itself and fires
+        /// Event_OnPhysicsManagerTickRateChanged, which SynchronizedObjectManagerController
+        /// forwards into SynchronizedObjectManager.TickRate, which in turn calls
+        /// clientReceiver.SetTickInterval. Going through the property is what keeps the
+        /// advertised interval and the real send rate the same number.
+        ///
+        /// Note the knob quantises: TickRate is an int, so the step lands on 1/N seconds.
+        /// Returns true when it went through PhysicsManager.
+        /// </summary>
+        private static bool ApplySimulationStep(float fixedDeltaTime)
+        {
+            if (fixedDeltaTime <= 0f) return false;
+
+            var physicsManager = MonoBehaviourSingleton<PhysicsManager>.Instance;
+            if (physicsManager != null)
+            {
+                int tickRate = Mathf.Max(1, Mathf.RoundToInt(1f / fixedDeltaTime));
+                physicsManager.TickRate = tickRate;
+                return true;
+            }
+
+            // PhysicsManager not up yet (or a build without it). Fall back to the direct
+            // write so behaviour is no worse than before, and say so, because in that
+            // state the advertised sync interval will not match.
+            Time.fixedDeltaTime = fixedDeltaTime;
+            Log("PhysicsManager unavailable; wrote Time.fixedDeltaTime directly. "
+                + "Object-sync tick interval may not match the physics step until it initialises.");
+            return false;
         }
 
         public static void Log(string message)
@@ -312,7 +364,7 @@ namespace CompetitivePuckTweaks.src
 
             Physics.IgnoreLayerCollision(6, 6, config.DisableStickCollision);
             Physics.IgnoreLayerCollision(6, 8, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
-            Time.fixedDeltaTime = config.FixedDeltaTime;
+            ApplySimulationStep(config.FixedDeltaTime);
             Physics.defaultSolverIterations = config.SolverIterations;
 
             // Keep runtime pucks aligned with current config (e.g. /reload or config edits).
