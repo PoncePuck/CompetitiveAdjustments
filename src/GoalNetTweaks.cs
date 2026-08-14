@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -135,6 +135,10 @@ namespace DashFallMod
                 h = h * 397 ^ aOffX.GetHashCode();
                 h = h * 397 ^ aOffY.GetHashCode();
                 h = h * 397 ^ aOffZ.GetHashCode();
+                // The wrap status changes the wire range, so a flip on its own has to count
+                // as a config change. Without this term the hash-based early-out swallows it
+                // and the range keeps whatever it had.
+                h = h * 397 ^ DashFallMod.Net.WrapSync.WrappingGovernsRange.GetHashCode();
                 return h;
             }
         }

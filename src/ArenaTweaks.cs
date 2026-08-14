@@ -1193,6 +1193,25 @@ namespace DashFallMod
                 return;
             }
 
+            // Guard 3: the range depends on TWO synced facts, and guard 2 only proves one.
+            // PPKB/GoalTweaks carries the arena scale but not the wrapping status, and it is
+            // what triggers this method, so on a fresh client this can run knowing the rink
+            // is 10x while still holding the default "server is not wrapping". Widening on
+            // that assumption against a server that IS wrapping puts every coordinate out by
+            // the arena scale. Leave the range alone until the server has actually said.
+            if (!nm.IsServer && !DashFallMod.Net.WrapSync.ServerStatusKnown)
+            {
+                if (!_loggedNoWrapStatus)
+                {
+                    _loggedNoWrapStatus = true;
+                    CompetitiveAdjustments.ConfigManager.Log(
+                        "Holding the wire range at vanilla until the server reports whether it "
+                        + "wraps positions. Deciding now would use a default, not a fact.");
+                }
+                return;
+            }
+            _loggedNoWrapStatus = false;
+
             _loggedVanillaServerSkip = false;
 
             // Widen the wire's position range to match the resized rink.
@@ -1207,8 +1226,21 @@ namespace DashFallMod
             // the two ends in step after an admin change rather than only on connect.
             SyncRangePatch.Enable();
 
+            // Keep the LOD bands rink-relative. Server-side only: these are the server's own
+            // send-planning inputs, and on a resized rink the metre-absolute defaults put
+            // every object in the farthest band at a fraction of the tick rate.
+            if (nm.IsServer)
+            {
+                if (GoalNetTweaks.TryGetEffectiveArenaScale(out float lodX, out float lodZ))
+                    WrapSyncLod.Apply(Mathf.Max(lodX, lodZ));
+                else
+                    WrapSyncLod.Restore();
+            }
+
             LogWireFit();
         }
+
+        private static bool _loggedNoWrapStatus;
 
         internal static void RemoveNetworkBoundsPatches()
         {
@@ -1217,6 +1249,7 @@ namespace DashFallMod
             // modded server keeps a widened range and mis-decodes every position on the
             // next vanilla server it joins.
             SyncRangePatch.Disable();
+            WrapSyncLod.Restore();
         }
 
         // Vanilla WIRE half-extent along world X / Z, used to derive required chunk

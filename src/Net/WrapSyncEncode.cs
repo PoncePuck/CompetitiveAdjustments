@@ -38,12 +38,62 @@ namespace DashFallMod.Net
     internal static class WrapSyncEncode
     {
         /// <summary>
-        /// Step 4 ships with this hard false. Step 5 replaces it with a synced config flag
-        /// gated on the runtime self-test passing.
+        /// Wrapped positions are ALWAYS ON. There is no operator switch, because there is no
+        /// case where the old behaviour is preferable: widening the wire range degrades
+        /// precision linearly with arena scale forever, and wrapping holds vanilla precision
+        /// at any scale. A setting whose every value but one is worse is not a setting.
+        ///
+        /// What remains are correctness gates, not preferences:
+        ///
+        ///   installed    the hooks resolved on this build
+        ///   not disarmed no hook has thrown; one throw kills this permanently and for good
+        ///   self-test    the arithmetic, the precision claim, and the wire-length
+        ///                neutrality of the marker bit all verified against THIS runtime and
+        ///                THIS build's own serializer
+        ///
+        /// Each of those answers "can this build do it correctly", and each fails safe to
+        /// plain vanilla encoding. Per-peer capability is enforced separately in WritePrefix,
+        /// so a peer that cannot decode the marker is still served absolute coordinates.
         /// </summary>
-        private const bool ArmedConst = false;
+        public static bool Armed =>
+            _installed && !_disarmed && WrapSync.SelfTestPassed && ScaleNeedsWrapping;
 
-        public static bool Armed => ArmedConst && !_disarmed && _installed;
+        // Memoised per frame. Armed is evaluated once per RECORD in CtorPrefix, so this
+        // cannot afford to walk config every time, but it must not go stale either.
+        private static int _scaleFrame = -1;
+        private static bool _scaleNeedsWrap;
+
+        /// <summary>
+        /// Wrapping is an identity transform at arena scale 1: every coordinate already fits
+        /// the vanilla window, so k is always 0 and local == world. Everything built on top
+        /// still runs though: a seed for every object in every reliable batch, teleport
+        /// detection, and Forget calls that reschedule vanilla sends. That is real bandwidth
+        /// and real churn bought for exactly nothing.
+        ///
+        /// Gating here rather than with a setting keeps the two ends in agreement, because
+        /// this feeds the same bit-23 status the clients read. It is emphatically NOT a
+        /// second switch each end evaluates for itself.
+        /// </summary>
+        private static bool ScaleNeedsWrapping
+        {
+            get
+            {
+                int f = Time.frameCount;
+                if (f == _scaleFrame) return _scaleNeedsWrap;
+                _scaleFrame = f;
+                try
+                {
+                    _scaleNeedsWrap =
+                        GoalNetTweaks.TryGetEffectiveArenaScale(out float sx, out float sz)
+                        && (sx > 1.001f || sz > 1.001f);
+                }
+                catch { _scaleNeedsWrap = false; }
+                return _scaleNeedsWrap;
+            }
+        }
+
+        // Tracks the arming edge so the baseline wipe happens exactly once per transition.
+        private static bool _wasArmed;
 
         private const string HarmonyId = "compadjust.wrapsync.encode";
         private static Harmony _harmony;
@@ -55,6 +105,29 @@ namespace DashFallMod.Net
         // because Write has no idea who it is writing for.
         private static ulong _targetClientId;
         private static bool _hasTarget;
+
+        // World position of each object the last time a record for it was actually WRITTEN,
+        // and whether we have one. This is the quantity the unwrap margin really depends on.
+        //
+        // The teleport guard compares consecutive CAPTURES, but vanilla only plans an object
+        // once every TickRateDivisor ticks (SynchronizedObjectSendPlanner.PlanSend), and the
+        // divisor is a byte chosen from absolute-metre LOD bands, so on a rink scaled 10x
+        // essentially everything sits in the farthest band. An object can therefore move a
+        // long way between two records the client actually applies while never once tripping
+        // the per-capture guard. Unwrap is exact only while the predictor is within P/2, so a
+        // large enough gap silently lands the object a whole period away.
+        //
+        // Comparing against the last SENT position closes that: it accumulates across all the
+        // ticks the object was skipped, and unreliable loss only makes the real gap larger
+        // than what this measures, never smaller.
+        private const int TableSize = 65536;
+        private static readonly Vector3[] _lastSentWorld = new Vector3[TableSize];
+        private static readonly bool[] _lastSentValid = new bool[TableSize];
+
+        // A quarter period, so there is still half a period of slack for the loss and
+        // reordering this cannot see.
+        private static readonly Vector3 DriftGuard =
+            new Vector3(WrapSync.PeriodX * 0.25f, WrapSync.PeriodY * 0.25f, WrapSync.PeriodZ * 0.25f);
 
         // Ids whose pose jumped far enough this tick that the client's predictor cannot be
         // trusted. Drained in the Server_SynchronizePlayer prefix.
@@ -77,6 +150,7 @@ namespace DashFallMod.Net
                 var removeObject = AccessTools.Method(typeof(SynchronizedObjectManager), "RemoveSynchronizedObject");
                 var registryClear = AccessTools.Method(typeof(SynchronizedObjectRegistry), "Clear");
                 var forceSync = AccessTools.Method(typeof(SynchronizedObjectManager), "Server_ForceSynchronizeClientId");
+                var serverTick = AccessTools.Method(typeof(SynchronizedObjectManager), "Server_Tick");
 
                 var all = new Dictionary<string, System.Reflection.MethodBase>
                 {
@@ -86,6 +160,7 @@ namespace DashFallMod.Net
                     { "Write", write },
                     { "RemoveSynchronizedObject", removeObject }, { "Registry.Clear", registryClear },
                     { "Server_ForceSynchronizeClientId", forceSync },
+                    { "Server_Tick", serverTick },
                 };
                 foreach (var kv in all)
                 {
@@ -111,10 +186,19 @@ namespace DashFallMod.Net
                 _harmony.Patch(write, prefix: new HarmonyMethod(typeof(WrapSyncEncode), nameof(WritePrefix)));
                 _harmony.Patch(removeObject, postfix: new HarmonyMethod(typeof(WrapSyncEncode), nameof(RemoveObjectPostfix)));
                 _harmony.Patch(registryClear, postfix: new HarmonyMethod(typeof(WrapSyncEncode), nameof(RegistryClearPostfix)));
+                _harmony.Patch(serverTick, postfix: new HarmonyMethod(typeof(WrapSyncEncode), nameof(ServerTickPostfix)));
 
                 _installed = true;
+
+                // Run the sweeps HERE, at plugin load, not lazily from the first Armed
+                // query. That query happens inside SynchronizedObjectSnapshot.Capture on a
+                // live server tick, and SynchronizedObject.OnAfterSimulate wraps the tick in
+                // a catch, so a stall or throw there is invisible. Doing it now also means
+                // the result is already logged before anything can arm.
+                bool selfTest = WrapSync.SelfTestPassed;
+
                 CompetitiveAdjustments.ConfigManager.Log(
-                    $"WrapSync encode installed, ARMED={Armed}. "
+                    $"WrapSync encode installed, selfTest={selfTest}, ARMED={Armed}. "
                     + $"Periods X={WrapSync.PeriodX} Y={WrapSync.PeriodY} Z={WrapSync.PeriodZ}, "
                     + $"fingerprint {WrapSyncSeed.Fingerprint():X8}.");
                 return true;
@@ -148,13 +232,19 @@ namespace DashFallMod.Net
         {
             try
             {
+                TrackArmingEdge();
+
                 WrapSync.BumpGeneration();
 
-                // Cleared HERE, at the start of the tick, not in the per-client finalizer.
-                // Server_Tick calls Server_SynchronizePlayer once per client and each of
-                // them must see the same teleport list; clearing it after the first client
-                // meant everyone else silently missed the correction.
-                _teleported.Clear();
+                // _teleported is NOT cleared here. Capture has two call sites:
+                // SynchronizedObjectManager.Server_Tick and Server_ForceSynchronizeClientId
+                // (the join path). Only the first leads to Server_SynchronizePlayer, which is
+                // where the list is drained. Clearing on every capture meant a teleport
+                // noticed by the join snapshot was queued and then wiped before anything
+                // could act on it, and the join batch is exactly when a client has no
+                // predictor to fall back on. It is cleared in the Server_Tick postfix
+                // instead, after every player state has been drained, which still gives
+                // every client in a tick the same list.
             }
             catch (Exception ex) { Disarm("Capture", ex); }
         }
@@ -187,6 +277,23 @@ namespace DashFallMod.Net
                     if (teleported) _teleported.Add(id);
                 }
 
+                // Accumulated drift since the last record actually SENT for this object.
+                // The guard above only sees one tick; this sees every tick the object was
+                // skipped because of its TickRateDivisor, which on a large rink is most of
+                // them. Both funnel into the same correction: Forget the send state, which
+                // makes the next send a reliable full send carrying a fresh seed.
+                if (wrap && !teleported && _lastSentValid[id])
+                {
+                    Vector3 sd = trueWorld - _lastSentWorld[id];
+                    if (Mathf.Abs(sd.x) > DriftGuard.x
+                        || Mathf.Abs(sd.y) > DriftGuard.y
+                        || Mathf.Abs(sd.z) > DriftGuard.z)
+                    {
+                        _teleported.Add(id);
+                        WrapSync.TxDriftForces++;
+                    }
+                }
+
                 if (wrap)
                 {
                     position = WrapSync.Wrap(trueWorld, out _, out _, out _);
@@ -195,7 +302,7 @@ namespace DashFallMod.Net
                 // UNCONDITIONAL, and above every arming test on purpose. A record that was
                 // built while disarmed must still leave a stamp saying so, or Write cannot
                 // tell "not wrapped" from "stale entry from when we were armed".
-                WrapSync.StampServer(id, trueWorld, wrap, teleported);
+                WrapSync.StampServer(id, trueWorld, wrap);
             }
             catch (Exception ex) { Disarm("SynchronizedObjectData..ctor", ex); }
         }
@@ -218,12 +325,25 @@ namespace DashFallMod.Net
                 // IsFullSendDue true, which routes the object to a reliable full send
                 // carrying a fresh seed. Safe here because PlanObject rewrites the LOD
                 // selection before PlanSend reads the divisor.
+                // ABOVE the Armed gate, deliberately. A wipe is queued from exactly two
+                // places: WipeSendBaseline, which is itself Armed-gated, and the arming
+                // edge. The disarm edge is the case that matters here, because by the time
+                // it drains Armed is already false. Leaving it below the gate meant turning
+                // wrapping OFF never re-sent anything, so every stationary object kept its
+                // wrapped baseline and sat a whole period out of place indefinitely.
+                //
+                // This stays inert in a never-armed build: nothing ever queues a wipe, so
+                // DrainPendingWipe returns on its first line without touching vanilla state.
+                DrainPendingWipe(synchronizedPlayerState);
+
                 if (!Armed) return;   // never touch vanilla send state while disarmed
 
-                DrainPendingWipe(synchronizedPlayerState);
                 for (int i = 0; i < _teleported.Count; i++)
                 {
-                    synchronizedPlayerState.Forget(_teleported[i]);
+                    ushort tid = _teleported[i];
+                    synchronizedPlayerState.Forget(tid);
+                    // Re-anchoring, so the drift baseline is meaningless until it is sent again.
+                    _lastSentValid[tid] = false;
                     WrapSync.TxTeleportForces++;
                 }
             }
@@ -280,6 +400,32 @@ namespace DashFallMod.Net
         private static float MaxY => SyncRangePatch.IsPatched ? SyncRangePatch.GetMaxY() : 50f;
         private static float MinZ => SyncRangePatch.IsPatched ? SyncRangePatch.GetMinZ() : -50f;
         private static float MaxZ => SyncRangePatch.IsPatched ? SyncRangePatch.GetMaxZ() : 50f;
+
+        private static bool _loggedSaturatingDowngrade;
+
+        /// <summary>
+        /// A peer that cannot decode the marker gets absolute coordinates, re-encoded against
+        /// the CURRENT window. While wrapping holds that window at vanilla, a rink larger
+        /// than the window means those coordinates saturate: everything that peer sees
+        /// collapses into the vanilla box. It self-corrects the moment the peer announces
+        /// capability, so this is normally a fraction of a second at join, but a peer that
+        /// never announces (wrong build, failed patches) stays broken and nothing said so.
+        /// </summary>
+        private static void WarnIfDowngradeWillSaturate(Vector3 world)
+        {
+            if (_loggedSaturatingDowngrade) return;
+            if (Mathf.Abs(world.x) <= MaxX && Mathf.Abs(world.y) <= MaxY && Mathf.Abs(world.z) <= MaxZ)
+                return;
+
+            _loggedSaturatingDowngrade = true;
+            Debug.LogWarning(
+                $"[COMPADJUST] A peer is being served absolute positions it cannot represent: "
+                + $"{world} lies outside the wire window (X +/-{MaxX}, Y +/-{MaxY}, Z +/-{MaxZ}), "
+                + "so its coordinates saturate and the rink collapses into the vanilla box for "
+                + "that peer. This is expected for the moment between joining and announcing "
+                + "wrapped-position support. If it persists, that peer is running a build that "
+                + "cannot decode wrapped positions and should be updated. Logged once.");
+        }
 
         private static bool TryWorldOf(ushort id, out Vector3 world)
         {
@@ -357,6 +503,9 @@ namespace DashFallMod.Net
                     // cannot change the record's length. That length-neutrality is the
                     // whole reason this design cannot desynchronise the reader.
                     __instance.ChangeMask |= WrapSync.MaskWrapped;
+                    WrapSync.TxWrapped++;
+                    _lastSentWorld[id] = trueWorld;
+                    _lastSentValid[id] = true;
                     return;
                 }
 
@@ -366,6 +515,8 @@ namespace DashFallMod.Net
                 // decompressing the wrapped short and adding an offset, which would carry
                 // any stale state straight into the output. This is bit-for-bit what an
                 // unmodded server would have sent for this pose, saturation included.
+                WrapSync.TxDowngraded++;
+                WarnIfDowngradeWillSaturate(trueWorld);
                 __instance.X = NetworkingUtils.CompressFloatToShort(trueWorld.x, MinX, MaxX);
                 __instance.Y = NetworkingUtils.CompressFloatToShort(trueWorld.y, MinY, MaxY);
                 __instance.Z = NetworkingUtils.CompressFloatToShort(trueWorld.z, MinZ, MaxZ);
@@ -400,6 +551,7 @@ namespace DashFallMod.Net
                 ulong wide = synchronizedObject.NetworkObjectId;
                 if (wide > ushort.MaxValue) return;
                 WrapSync.EvictServer((ushort)wide);
+                _lastSentValid[(ushort)wide] = false;
             }
             catch (Exception ex) { Disarm("RemoveSynchronizedObject", ex); }
         }
@@ -410,6 +562,24 @@ namespace DashFallMod.Net
         /// runs the client-side teardown paths, so hanging session cleanup off the registry
         /// is what makes it fire at all.
         /// </summary>
+        /// <summary>
+        /// End of the server tick, after every player state has been serialized and had the
+        /// teleport list drained. This is where _teleported is cleared.
+        ///
+        /// It used to be cleared at the start of every Capture, but Capture has two call
+        /// sites and only one of them (Server_Tick) reaches the drain. Ids flagged by the
+        /// join-path capture (Server_ForceSynchronizeClientId) were queued and then wiped by
+        /// the next capture without anything acting on them, which is worst precisely at a
+        /// join, when the client has no predictor to fall back on. Clearing here keeps the
+        /// property the old placement protected, that every client in one tick sees the same
+        /// list, without depending on which snapshot triggered the capture.
+        /// </summary>
+        private static void ServerTickPostfix()
+        {
+            try { _teleported.Clear(); }
+            catch (Exception ex) { Disarm("Server_Tick postfix", ex); }
+        }
+
         private static void RegistryClearPostfix()
         {
             try
@@ -419,6 +589,10 @@ namespace DashFallMod.Net
                 WrapSyncSeed.ClearPending();
                 _hasTarget = false;
                 _teleported.Clear();
+                _pendingWipe.Clear();   // session-scoped like everything else here; client
+                                        // ids are recycled, so a leftover id would wipe a
+                                        // different client's baseline in the next session
+                System.Array.Clear(_lastSentValid, 0, TableSize);
             }
             catch (Exception ex) { Disarm("SynchronizedObjectRegistry.Clear", ex); }
         }
@@ -472,6 +646,75 @@ namespace DashFallMod.Net
             catch (Exception ex) { Disarm("WipeSendBaseline", ex); return false; }
         }
 
+        /// <summary>
+        /// Watch for the moment wrapping turns on or off and force a complete resend to
+        /// every connected client.
+        ///
+        /// This is required, not tidy-up. Vanilla only re-sends a component when it moved
+        /// past POSITION_CHANGE_THRESHOLD, so an object that is stationary at the instant
+        /// the mode changes would never be re-sent, and would sit a whole period out of
+        /// place indefinitely. The per-client announce cannot cover this: those announces
+        /// already happened, long before the operator flipped the flag.
+        /// </summary>
+        private static void TrackArmingEdge()
+        {
+            bool armed = Armed;
+            if (armed == _wasArmed) return;
+            _wasArmed = armed;
+
+            int n = 0;
+            try
+            {
+                var nm = Unity.Netcode.NetworkManager.Singleton;
+                if (nm != null && nm.IsServer)
+                {
+                    foreach (var id in nm.ConnectedClientsIds)
+                    {
+                        if (id == Unity.Netcode.NetworkManager.ServerClientId) continue;
+                        _pendingWipe.Add(id);   // added directly: WipeSendBaseline gates on
+                        n++;                    // Armed, which is mid-transition right now
+                    }
+                }
+            }
+            catch { }
+
+            // The range depends on whether wrapping is live, so recompute it on the edge.
+            // Without this a live toggle leaves the old bounds in place: arming would keep
+            // the widened range (wrapping then buys nothing, because the folded coordinate
+            // is still compressed against the large window), and disarming would keep the
+            // vanilla range on a big arena (which saturates and pins everything).
+            try { SyncRangePatch.Enable(); } catch { }
+
+            // Push the new status to every client immediately.
+            //
+            // The server has just changed its own wire range. Clients derive theirs from the
+            // synced status bit, so until they receive it the two ends disagree and every
+            // coordinate is out by the widen ratio. Nothing else forces a config sync on this
+            // edge: the regular fan-out is throttled and driven by puck spawns, so a disarm
+            // in open play could otherwise go unannounced for an entire period.
+            try
+            {
+                var nmc = Unity.Netcode.NetworkManager.Singleton;
+                if (nmc != null && nmc.IsServer)
+                {
+                    foreach (var cid in nmc.ConnectedClientsIds)
+                    {
+                        if (cid == Unity.Netcode.NetworkManager.ServerClientId) continue;
+                        CompetitivePuckTweaks.src.PluginCore.ManualSync(cid);
+                    }
+                }
+            }
+            catch { }
+
+            CompetitiveAdjustments.ConfigManager.Log(
+                $"Wrapped positions {(armed ? "ARMED" : "DISARMED")}. "
+                + $"Queued a full resend for {n} connected client(s). "
+                + (armed
+                    ? $"Wire window stays vanilla at any arena scale; periods X={WrapSync.PeriodX} "
+                      + $"Y={WrapSync.PeriodY} Z={WrapSync.PeriodZ}."
+                    : "Positions revert to absolute vanilla encoding."));
+        }
+
         private static readonly HashSet<ulong> _pendingWipe = new HashSet<ulong>();
         private static System.Reflection.FieldInfo _sendStatesField;
         private static bool _sendStatesFieldResolved;
@@ -487,7 +730,7 @@ namespace DashFallMod.Net
             var player = state?.Player;
             if (player == null) return false;
             ulong owner = player.OwnerClientId;
-            if (!_pendingWipe.Remove(owner)) return false;
+            if (!_pendingWipe.Contains(owner)) return false;
 
             if (!_sendStatesFieldResolved)
             {
@@ -503,6 +746,10 @@ namespace DashFallMod.Net
             {
                 int n = dict.Count;
                 dict.Clear();
+                // Consume only now that it has actually happened. Removing it up front meant
+                // an unresolved field or an unexpected type dropped the request silently,
+                // while the caller had already logged that the baseline was wiped.
+                _pendingWipe.Remove(owner);
                 WrapSync.TxBaselineWipes++;
                 CompetitiveAdjustments.ConfigManager.Log(
                     $"WrapSync: dropped {n} cached send states for client {owner}; "

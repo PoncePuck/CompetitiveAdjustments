@@ -49,6 +49,23 @@ namespace DashFallMod.Net
         public static bool Install()
         {
             if (_installed) return true;
+
+            // The same runtime evidence the server requires before it will encode.
+            //
+            // This used to install unconditionally, so the whole verification story applied
+            // to the sender while the receiver -- the side where a wrong latch actually
+            // moves a body -- proved nothing. Worse, ClientVersionCheck announces capability
+            // straight off Installed, so an unverified client was telling servers "send me
+            // wrapped records". Now a client that cannot prove bit 14 is unreachable on its
+            // own build announces incapable and is served plain vanilla coordinates.
+            if (!WrapSync.SelfTestPassed)
+            {
+                Debug.LogWarning("[COMPADJUST] WrapSyncDecode NOT installed: the wrap self-test "
+                                 + "failed on this build, so this client will not honour wrapped "
+                                 + "records and will announce itself incapable.");
+                return false;
+            }
+
             try
             {
                 var tryMerge = AccessTools.Method(typeof(SynchronizedObjectClientReceiver), "TryMergeReceivedData");

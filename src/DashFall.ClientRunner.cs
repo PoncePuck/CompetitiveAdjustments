@@ -164,6 +164,10 @@ namespace DashFallMod.Client
             // server (which may be vanilla), RefreshAll() doesn't re-apply the old
             // server's EnableArenaTweaks=true via _hasSyncedTweaks.
             GoalNetTweaks.ClearSyncedTweaks();
+            // Same reason as ClearSyncedTweaks above: the next server has to prove its own
+            // settings, and without this the retry loop would consider the job already done
+            // and the client would carry the last server's FreeBlade/ball mode/wrap status.
+            CompetitiveCompanion.PluginCore.ResetConfigSyncState();
             // Drop per-body InstanceID-keyed state. PlayerBodyV2.OnNetworkDespawn
             // normally clears these per-player on disconnect, but a hard session
             // teardown skips OnNetworkDespawn and these IDs are never reused
@@ -410,6 +414,23 @@ namespace DashFallMod.Client
                         RefreshRole();
                         EnsurePositionSelectHook();
                     }
+                }
+
+                // Re-request the CPT_sync_config package until it actually arrives.
+                // Unlike the ConfigFull retry below this is NOT gated on any UI: the
+                // package carries FreeBlade, ball mode, puck scale, the spin limiter and
+                // the server-wrapping status, all of which are wrong until it lands, and
+                // the player has no way to know they are missing it. The one-shot request
+                // in Companion.LoadSyncHandler fires on Event_OnClientStarted, before the
+                // connection exists, so on a join where the server's own push is also
+                // missed the client sat on local defaults until some unrelated puck spawn
+                // happened to ask again (86 seconds, in the log that produced this).
+                if (nm != null && nm.IsConnectedClient && !nm.IsServer && _cmm != null
+                    && !CompetitiveCompanion.PluginCore.HasReceivedConfigSync
+                    && Time.unscaledTime >= _nextConfigSyncRetry)
+                {
+                    _nextConfigSyncRetry = Time.unscaledTime + 2f;
+                    CompetitiveCompanion.PluginCore.RequestConfigSyncFromServer("retry");
                 }
 
                 // Only while the player is actually viewing the SERVER tab,

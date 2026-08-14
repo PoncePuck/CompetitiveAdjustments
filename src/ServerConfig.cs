@@ -1,4 +1,4 @@
-﻿// ServerConfig.cs
+// ServerConfig.cs
 // Unified server-side configuration for CompetitiveAdjustments.
 // Nested JSON: { "ConfigVersion": 12, "Dashfall": { ... }, "CompAdjust": { ... }, "CompTweaks": { ... } }
 // Uses JsonUtility with comment-stripping (DashFall pattern).
@@ -38,7 +38,11 @@ namespace CompetitiveAdjustments
         public float SlideTwistForceScale = 1.0f;
 
         // --- Feature Flags ---
-        public bool SkaterDashEnabled = false;
+        // SkaterDashEnabled used to sit here. The skater dash itself was already dead
+        // (DashFallGameMod.OnClientAction ignores dashleft/dashright outright), so the
+        // flag only ever set a wire bit nothing acted on. Removing the field is safe for
+        // existing files: JsonUtility ignores JSON keys with no matching field, so an old
+        // ServerConfig.json carrying "SkaterDashEnabled" still loads.
         public bool SkaterDiveEnabled = true;
         public bool EnableTwistWhileSliding = true;
         public bool EnableSlideInfluence = true;
@@ -102,20 +106,6 @@ namespace CompetitiveAdjustments
         public float ArenaOffsetX = 0f;
         public float ArenaOffsetY = 0.0108f;
         public float ArenaOffsetZ = 0f;
-
-        // Chunked network positions. Puck quantises positions into a fixed box, world X
-        // to +/-25 m and Y and Z to +/-50 m, and the compression SATURATES rather than
-        // wrapping, so an object past the edge is pinned exactly at it. On a rink scaled
-        // past that box, clients see remote objects stop dead on an invisible plane while
-        // the server simulates correctly. Chunking gives each object a per-axis offset so
-        // the wire only ever carries a chunk-local coordinate, which keeps positions
-        // correct at any arena scale with bit-identical vanilla precision.
-        //
-        // Off by default. It changes what goes on the wire (one extra UInt16 on records
-        // that need it), so every peer must run this mod. A client that has not announced
-        // chunk capability is served vanilla-shaped records and simply sees the old
-        // clipping, rather than a corrupted stream.
-        public bool EnableChunkedPositions = false;
 
         // --- Free Blade ---
         public bool FreeBladeEnabled = false;
@@ -425,7 +415,6 @@ namespace CompetitiveAdjustments
         {
             // Force every feature toggle to false so master-off silences
             // dives, dashes, twists, slide influence, goalie features etc.
-            SkaterDashEnabled                  = false,
             SkaterDiveEnabled                  = false,
             EnableTwistWhileSliding            = false,
             EnableSlideInfluence               = false,

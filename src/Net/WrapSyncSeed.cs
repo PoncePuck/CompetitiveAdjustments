@@ -226,7 +226,11 @@ namespace DashFallMod.Net
                     reader.ReadValueSafe(out float x);
                     reader.ReadValueSafe(out float y);
                     reader.ReadValueSafe(out float z);
-                    WrapSync.ApplySeed(id, new Vector3(x, y, z));
+                    // BEFORE applying: the gap between the server's truth and what we would
+                    // have unwrapped against is the live safety margin.
+                    var seedWorld = new Vector3(x, y, z);
+                    WrapSync.NoteSeedResidual(id, seedWorld);
+                    WrapSync.ApplySeed(id, seedWorld);
                     WrapSync.RxSeeds++;
                 }
             }

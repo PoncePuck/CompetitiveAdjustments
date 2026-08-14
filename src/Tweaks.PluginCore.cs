@@ -272,16 +272,49 @@ namespace CompetitivePuckTweaks.src
             }
         }
 
-        private void RegisterSyncRequestHandler()
+        // The CustomMessagingManager the request handler is currently registered against,
+        // so a NetworkManager swap re-registers instead of leaving a handler on a dead one.
+        private static CustomMessagingManager _syncCmm;
+
+        /// <summary>
+        /// Register the CPT_request_sync handler against the live CustomMessagingManager.
+        /// Idempotent, and safe to call every frame; ServerBridge's Runner does exactly that.
+        /// </summary>
+        /// <remarks>
+        /// This used to be a one-shot from OnEnable that silently gave up when the CMM was
+        /// null, and it was never retried. That is fatal on a DEDICATED server and harmless
+        /// on a host, which is why the symptom only ever showed up on dedicated:
+        ///
+        ///   Dedicated: headless, so canRunServer is true at plugin load and OnEnable runs
+        ///              immediately -- minutes of mod loading BEFORE the server starts
+        ///              listening. NetworkManager.Singleton.CustomMessagingManager is null,
+        ///              the register silently no-ops, and every CPT_request_sync a client
+        ///              ever sends is dropped for the life of the process.
+        ///   Host:      not headless and IsServer is false at plugin load, so OnEnable bails
+        ///              and is retried from StartHostPatch, by which time the CMM exists.
+        ///
+        /// With the request channel dead and the Event_OnClientConnected push not firing on
+        /// B1231 either, the only surviving delivery was Tweaks.PuckPatch's fan-out on puck
+        /// spawn. That is the "I can only free blade after spawning a puck with a completely
+        /// different mod" report, exactly: the sync arrives when, and only when, some puck
+        /// happens to spawn.
+        ///
+        /// Retrying is the fix, and the push added to ServerBridge.SendInitialStateToClient
+        /// is the belt to this braces: that one rides on PPKB/Hello, which the client already
+        /// retries every two seconds until it lands.
+        /// </remarks>
+        public static void EnsureSyncRequestHandler()
         {
-            if (_syncRequestHandlerRegistered) return;
-            var cmm = NetworkManager.Singleton?.CustomMessagingManager;
-            if (cmm == null) return;
+            var nm = NetworkManager.Singleton;
+            if (nm == null || !nm.IsServer) return;
+
+            var cmm = nm.CustomMessagingManager;
+            if (cmm == null || cmm == _syncCmm) return;
 
             try
             {
                 cmm.RegisterNamedMessageHandler(CMM_SYNC_REQUEST, OnSyncRequestReceived);
-                _syncRequestHandlerRegistered = true;
+                _syncCmm = cmm;
                 Log("Registered config sync request handler.");
             }
             catch (Exception e)
@@ -290,22 +323,25 @@ namespace CompetitivePuckTweaks.src
             }
         }
 
+        private void RegisterSyncRequestHandler()
+        {
+            EnsureSyncRequestHandler();
+            _syncRequestHandlerRegistered = _syncCmm != null;
+        }
+
         private void UnregisterSyncRequestHandler()
         {
-            if (!_syncRequestHandlerRegistered) return;
-            var cmm = NetworkManager.Singleton?.CustomMessagingManager;
-            if (cmm == null) return;
-
-            try
+            if (_syncCmm != null)
             {
-                cmm.UnregisterNamedMessageHandler(CMM_SYNC_REQUEST);
+                try { _syncCmm.UnregisterNamedMessageHandler(CMM_SYNC_REQUEST); }
+                catch { }
+                _syncCmm = null;
             }
-            catch { }
 
             _syncRequestHandlerRegistered = false;
         }
 
-        private void OnSyncRequestReceived(ulong senderId, FastBufferReader reader)
+        private static void OnSyncRequestReceived(ulong senderId, FastBufferReader reader)
         {
             ManualSync(senderId);
         }

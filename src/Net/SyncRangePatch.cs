@@ -145,6 +145,22 @@ namespace DashFallMod.Net
         /// </summary>
         public static void RefreshRange()
         {
+            // Wrapping wins. It exists to make widening unnecessary, so while it is live the
+            // window stays vanilla and every axis keeps full Int16 resolution no matter how
+            // large the rink. Widening as well would fold the coordinate into +/-25 and then
+            // spend a tenth of the codes representing it.
+            if (WrapSync.WrappingGovernsRange)
+            {
+                if (IsWidened)
+                    CompetitiveAdjustments.ConfigManager.Log(
+                        "Wrapped positions are live, so the wire range returns to vanilla "
+                        + "instead of growing with the arena. Quantisation goes back to "
+                        + $"{(50f / 65535f) * 1000f:F2}mm on X and {(100f / 65535f) * 1000f:F2}mm "
+                        + "on Y/Z, at any arena scale.");
+                ResetRange();
+                return;
+            }
+
             if (!GoalNetTweaks.TryGetEffectiveArenaScale(out float scaleX, out float scaleZ))
             {
                 // Not synced, or arena tweaks are off. Vanilla numbers.

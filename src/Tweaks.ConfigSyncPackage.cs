@@ -1,4 +1,4 @@
-﻿using Unity.Netcode;
+using Unity.Netcode;
 
 namespace CompetitivePuckTweaks.src
 {
@@ -79,6 +79,18 @@ namespace CompetitivePuckTweaks.src
             // absent fields alone, so a client on an older server would otherwise have kept
             // its own default of ON and rate-limited its blade while nobody else was.
             if (df?.StickSpinFatigueEnabled   == true) b |= 1u << 22;
+            // Wrapped ("chunked") positions. Must be synced: the client only honours the
+            // marker bit when it knows the server is sending it, and a one-sided belief
+            // here displaces every object by a whole period.
+            // The EFFECTIVE state, not the raw config value. If the operator asked for
+            // wrapping but this build declined to arm (self-test failed, hooks missing),
+            // advertising the raw flag would have clients drop to the vanilla range while
+            // the server kept widening, putting every position out by the range ratio.
+            // Pure STATUS now, not an operator setting: "this server is wrapping positions,
+            // so hold your wire range at vanilla". The client cannot work this out for
+            // itself, and if the two ends disagree every position is out by the ratio
+            // between the two ranges, so it has to travel.
+            if (DashFallMod.Net.WrapSync.WrappingGovernsRange) b |= 1u << 23;
             return b;
         }
 
@@ -111,6 +123,10 @@ namespace CompetitivePuckTweaks.src
             df.HighStickingMaxAngle         = pkg.HighStickingMaxAngle;
             df.BallMode                     = (pkg.BoolFlags & (1u << 20)) != 0;
             df.StickBodyCollision           = (pkg.BoolFlags & (1u << 21)) != 0;
+            // Server wrapping status. Deliberately NOT stored on the config object: it is
+            // replicated state, and a config field would also travel in the ConfigFull JSON
+            // carrying the server's stale on-disk value, clobbering this one.
+            DashFallMod.Net.WrapSync.SetServerWrapping((pkg.BoolFlags & (1u << 23)) != 0);
             df.StickSpinFatigueEnabled      = (pkg.BoolFlags & (1u << 22)) != 0;
         }
     }

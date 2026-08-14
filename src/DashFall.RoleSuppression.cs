@@ -16,7 +16,8 @@ namespace DashFallMod.Client
         private CustomMessagingManager _cmm;
         private bool _helloSent;
         private float _nextHelloRetry;
-        private float _nextConfigReqRetry; // re-request the full config until it arrives
+        private float _nextConfigReqRetry;  // re-request the full config until it arrives
+        private float _nextConfigSyncRetry; // re-request CPT_sync_config until it arrives
 
         // Role probe cache
         private bool _cachedIsGoalie;

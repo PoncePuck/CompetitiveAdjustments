@@ -605,6 +605,18 @@ namespace DashFallMod.Client
             }
         }
         
+        // Reliable, not Unreliable. These are EDGES, not samples: the server keeps the held
+        // set in ServerBridge._held and nothing ever re-states it, so one lost packet is not
+        // one lost frame of input, it is the whole press. A dropped "down" means a CONTINUOUS
+        // bind such as slide influence does nothing for as long as the key is held, and a
+        // dropped "up" leaves the action held on the server after the player let go.
+        //
+        // This could only ever go wrong on a dedicated server. On a listen host the send is
+        // loopback and cannot be dropped whatever the delivery mode says, which is why the
+        // same binds behave on a host and misbehave across a real connection.
+        //
+        // The volume is a handful of messages per key press, so reliability costs nothing
+        // worth measuring here.
         private void SendSingleAction(Unity.Netcode.CustomMessagingManager cmm, string action, bool isDown)
         {
             // Create a fresh writer for each message
@@ -612,7 +624,7 @@ namespace DashFallMod.Client
             {
                 writer.WriteValueSafe(action);
                 writer.WriteValueSafe((byte)(isDown ? 0 : 1));
-                cmm.SendNamedMessage("PPKB/Action", Unity.Netcode.NetworkManager.ServerClientId, writer, Unity.Netcode.NetworkDelivery.Unreliable);
+                cmm.SendNamedMessage("PPKB/Action", Unity.Netcode.NetworkManager.ServerClientId, writer, Unity.Netcode.NetworkDelivery.Reliable);
             }
         }
 

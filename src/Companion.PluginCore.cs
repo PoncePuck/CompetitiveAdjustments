@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -19,6 +19,33 @@ namespace CompetitiveCompanion
         public static DashFallClientConfig config;
         private static float _lastSyncRequestTime = -999f;
         private bool EventListenersPresent = false;
+
+        /// <summary>
+        /// True once a CPT_sync_config has actually been received and applied this session.
+        /// </summary>
+        /// <remarks>
+        /// This exists because the sync had no retry and could simply never arrive. The
+        /// client asks once, from LoadSyncHandler, which runs on Event_OnClientStarted --
+        /// before the connection is established, so the request goes nowhere -- and the
+        /// server's own push rides on Event_OnClientConnected, which is not guaranteed to
+        /// reach a client whose handler is not registered yet. In a captured join both
+        /// halves missed: nine "Requested config sync" lines between 23:15:57 and 23:16:17
+        /// and no reply, and the first "Synced server config" landed at 23:17:45, only
+        /// because a puck spawn happened to ask again.
+        ///
+        /// For those 86 seconds the client held its LOCAL defaults for everything the
+        /// package carries: FreeBladeEnabled false while the server had it on (the blade
+        /// stops dead at the vanilla +/-4 -- this is the "freeblade doesn't work when you
+        /// join for a bit" report), plus puck scale, ball mode, stick body collision, the
+        /// spin limiter, and the server-wrapping status that decides the decode range.
+        ///
+        /// DashFallClientRunner.Update re-requests every couple of seconds until this
+        /// flips, the same shape as the PPKB/ConfigFull retry beside it.
+        /// </remarks>
+        public static bool HasReceivedConfigSync { get; private set; }
+
+        /// <summary>Forget this session's sync so the next connection asks for its own.</summary>
+        public static void ResetConfigSyncState() => HasReceivedConfigSync = false;
 
         /// <summary>
         /// Core plugin enable function.
@@ -144,6 +171,9 @@ namespace CompetitiveCompanion
                 catch (Exception e) { Debug.LogWarning($"[{CompetitiveAdjustments.SharedConstants.MOD_NAME}] UnloadSyncHandler unregister failed: {e.Message}"); }
             }
             Debug.Log($"[{CompetitiveAdjustments.SharedConstants.MOD_NAME}] Unregistered config sync message handler");
+            // Session-scoped: the next server has to send its own before this client may
+            // act on one, and the retry loop is what makes sure it asks for it.
+            HasReceivedConfigSync = false;
             ResetPuckScale();
         }
 
@@ -224,6 +254,17 @@ namespace CompetitiveCompanion
                 // Unpack CompAdjust config so client visuals match the server
                 var df = CompetitiveAdjustments.ConfigManager.Config?.CompAdjust;
                 CompetitivePuckTweaks.src.ConfigSyncPackage.UnpackDashfall(receivedPackage, df);
+
+                // Re-derive the wire range NOW. The unpack above may have just changed
+                // WrapSync.ServerIsWrapping, and that decides whether this client's decode
+                // window stays vanilla or grows with the arena. RefreshRange's only other
+                // caller is the arena refresh, which is driven by body spawns, so without
+                // this the new status sits unread until some unrelated event happens to fire
+                // one. The window that matters is a mid-session DISARM: the server widens
+                // immediately, and until the client follows it decodes wide-encoded
+                // coordinates against the vanilla window and everything collapses toward
+                // rink centre. Enable() is idempotent and re-derives the range.
+                try { DashFallMod.Net.SyncRangePatch.Enable(); } catch { }
                 // Refresh player clip brushes with the newly-applied collider shape
                 if (DashFallMod.Client.DashFallConfigLoader.ClientConfig?.ShowPlayerClipBrushes == true)
                     CompetitivePuckTweaks.src.ClientClipBrushes.ApplyPlayer(true);
@@ -231,6 +272,11 @@ namespace CompetitiveCompanion
                 // Refresh ball mode and free blade for existing objects
                 CompetitiveAdjustments.BallModeHelper.RefreshAllPucks();
                 CompetitivePuckTweaks.src.StickAngleRefs.RefreshFreeBladeForAllPlayers();
+
+                // Set only once every field of the package has been applied. A sync that
+                // threw part way through leaves this false, so the retry loop asks again
+                // rather than settling for a half-applied config.
+                HasReceivedConfigSync = true;
 
                 Debug.Log($"[{CompetitiveAdjustments.SharedConstants.MOD_NAME}] Synced server config (PuckScale={receivedPackage.PuckScale}, LegPadOffset={receivedPackage.LegPadOffset}, flags=0x{receivedPackage.BoolFlags:X4})");
                 

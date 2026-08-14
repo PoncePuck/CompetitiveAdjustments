@@ -13,7 +13,9 @@ namespace PoncePuck.Keybinds
     /// </summary>
     public class ServerFeatures
     {
-        public bool SkaterDashEnabled = true;
+        // Bit 1 used to be SkaterDashEnabled. The skater dash is gone, and the bit is left
+        // vacant rather than reused: every other flag keeps its slot, so an old client and
+        // a new server still agree on what the remaining bits mean.
         public bool SkaterDiveEnabled = true;
         public bool SkaterSlideInfluenceEnabled = true;
         public bool SkaterTwistEnabled = true;
@@ -29,7 +31,6 @@ namespace PoncePuck.Keybinds
         public ushort ToUShort()
         {
             ushort b = 0;
-            if (SkaterDashEnabled) b |= 1;
             if (SkaterDiveEnabled) b |= 2;
             if (SkaterSlideInfluenceEnabled) b |= 4;
             if (SkaterTwistEnabled) b |= 8;
@@ -51,7 +52,6 @@ namespace PoncePuck.Keybinds
         {
             return new ServerFeatures
             {
-                SkaterDashEnabled = (b & 1) != 0,
                 SkaterDiveEnabled = (b & 2) != 0,
                 SkaterSlideInfluenceEnabled = (b & 4) != 0,
                 SkaterTwistEnabled = (b & 8) != 0,
@@ -291,10 +291,22 @@ namespace PoncePuck.Keybinds
                     }
                 }
 
+                // Keep the config-sync request handler bound to the live CMM. Hung off this
+                // Update for the same reason everything else here is: on a dedicated server
+                // this object is the only thing that polls until the NetworkManager actually
+                // exists, and CPT's own one-shot registration ran long before it did. Cheap
+                // and idempotent -- it returns on the first comparison once bound.
+                CompetitivePuckTweaks.src.PluginCore.EnsureSyncRequestHandler();
+
                 // Announce our build as a client, and sweep for silent ones as a server.
                 // Hung off this Update rather than a new runner because this is the object
                 // that already owns _cmm and already ticks on every role.
                 CompetitiveAdjustments.ClientVersionCheck.Tick(nm);
+
+                // Periodic wrapped-position report. Hung here for the same reason as the
+                // version check: this object already ticks on every role, and the RX half
+                // of these numbers only exists on a client.
+                DashFallMod.Net.WrapSync.MaybeLogStats();
             }
 
             private void OnDestroy() { TryUnregister(); }
@@ -495,7 +507,6 @@ namespace PoncePuck.Keybinds
 
             return new ServerFeatures
             {
-                SkaterDashEnabled = cfg.SkaterDashEnabled,
                 SkaterDiveEnabled = cfg.SkaterDiveEnabled,
                 SkaterSlideInfluenceEnabled = cfg.EnableSlideInfluence,
                 SkaterTwistEnabled = cfg.EnableTwistWhileSliding,
@@ -539,6 +550,14 @@ namespace PoncePuck.Keybinds
 
             SendGoalTweaksToClient(clientId);
             SendConfigFullToClient(clientId);
+
+            // The CPT config sync package too (puck scale, FreeBlade, ball mode, the spin
+            // limiter, the wrapping status). It has its own request channel and its own
+            // connect-time push, and on B1231 dedicated NEITHER was delivering. This one
+            // rides on PPKB/Hello, which the client retries until it lands, so the sync now
+            // gets there on the same schedule as the features it sits beside.
+            try { CompetitivePuckTweaks.src.PluginCore.ManualSync(clientId); }
+            catch (Exception e) { Debug.LogError($"[COMPADJUST] ManualSync on Hello failed: {e}"); }
         }
 
         public static void SendGoalTweaksToClient(ulong clientId)
