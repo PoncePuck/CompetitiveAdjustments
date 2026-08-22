@@ -382,6 +382,14 @@ namespace DashFallMod.Client
             _versionShowRequested = false;
             _versionBackdrop?.RemoveFromHierarchy();
             _versionBackdrop = null;
+
+            // Only hand the cursor back if nothing else still wants it. The config panel can be
+            // open underneath this popup, and SuppressPlayerInput is guarded so the popup's call
+            // was a no-op in that case; restoring here regardless would re-lock the cursor with the
+            // panel still on screen. RestorePlayerInput asks the game to recompute the flag, and
+            // returns false only on the fallback path where the cursor snapshot is still needed.
+            if (IsDashFallPanelOpen) return;
+            if (!RestorePlayerInput()) RestoreCursorState();
         }
 
         /// <summary>
@@ -455,33 +463,49 @@ namespace DashFallMod.Client
             if (root == null) return;
 
             // Modal backdrop: dim the screen and swallow clicks so the game behind is inert.
-            _versionBackdrop = new UITK.VisualElement { name = "COMPADJUST_VersionBackdrop" };
-            _versionBackdrop.style.position = UITK.Position.Absolute;
-            _versionBackdrop.style.left = 0; _versionBackdrop.style.top = 0;
-            _versionBackdrop.style.right = 0; _versionBackdrop.style.bottom = 0;
-            _versionBackdrop.style.backgroundColor = new UITK.StyleColor(new Color(0, 0, 0, 0.72f));
+            // ModalBackdrop rather than the config panel's lighter Backdrop, because both can be
+            // on screen at once and this one has to out-dim the panel or it stops reading as a
+            // stop sign.
+            _versionBackdrop = DashFallTheme.MakeBackdrop("COMPADJUST_VersionBackdrop");
+            _versionBackdrop.style.backgroundColor = DashFallTheme.ModalBackdrop;
             _versionBackdrop.style.alignItems = UITK.Align.Center;
             _versionBackdrop.style.justifyContent = UITK.Justify.Center;
-            _versionBackdrop.pickingMode = UITK.PickingMode.Position;
+
+            // This popup owns the cursor while it is up. Its main trigger is OnJoinedModdedServer,
+            // which fires with the player on the ice where the game keeps the cursor locked and
+            // hidden, so without this its two buttons render but cannot be clicked at all and only
+            // the ESC path responds. Suppressing player input as well stops the keystrokes aimed at
+            // a modal warning from also driving the skater.
+            SuppressPlayerInput();
+            UnityEngine.Cursor.lockState = CursorLockMode.None;
+            UnityEngine.Cursor.visible = true;
+            // The shared backdrop starts hidden because the panel's copy is built long before it
+            // is shown. This one is built at the moment it is wanted, so it shows immediately.
+            _versionBackdrop.style.display = UITK.DisplayStyle.Flex;
             _versionBackdrop.RegisterCallback<UITK.PointerUpEvent>(e => e.StopPropagation());
 
-            var accent = new Color32(224, 122, 63, 255);   // warm amber warning accent
-
-            var panel = new UITK.VisualElement();
+            // The card is ordinary panel chrome with one deliberate exception: the 3px top edge is
+            // Danger rather than the accent.
+            //
+            // That band, plus the red headline and the red rule under it, is the whole answer to a
+            // problem the retheme created. This popup used to carry its urgency in a warm colour,
+            // which worked only while nothing else in the mod was warm. Orange is now the ambient
+            // accent on every surface, so warmth no longer means "pay attention" and red has to.
+            // Red is spent on exactly those three things; the section bar and both buttons stay on
+            // the ordinary orange, so the card still reads as this mod's rather than as a system
+            // error dialog.
+            var panel = new UITK.VisualElement { name = "COMPADJUST_VersionCard" };
             panel.style.width = 560;
             panel.style.maxWidth = new UITK.Length(92, UITK.LengthUnit.Percent);
-            panel.style.backgroundColor = new UITK.StyleColor(new Color32(38, 38, 40, 255));
+            panel.style.backgroundColor = DashFallTheme.PanelBg;
             panel.style.flexDirection = UITK.FlexDirection.Column;
             panel.style.paddingLeft = 28; panel.style.paddingRight = 28;
             panel.style.paddingTop = 24; panel.style.paddingBottom = 22;
-            panel.style.borderTopLeftRadius = 10; panel.style.borderTopRightRadius = 10;
-            panel.style.borderBottomLeftRadius = 10; panel.style.borderBottomRightRadius = 10;
-            // Subtle outline with a thicker coloured accent along the top edge.
-            var edge = new UITK.StyleColor(new Color(1f, 1f, 1f, 0.10f));
+            DashFallTheme.SetUniformRadius(panel, DashFallTheme.PANEL_RADIUS);
+            DashFallTheme.SetUniformBorder(panel, 1f, DashFallTheme.PanelBorder);
             panel.style.borderTopWidth = 3;
-            panel.style.borderLeftWidth = 1; panel.style.borderRightWidth = 1; panel.style.borderBottomWidth = 1;
-            panel.style.borderTopColor = new UITK.StyleColor(accent);
-            panel.style.borderLeftColor = edge; panel.style.borderRightColor = edge; panel.style.borderBottomColor = edge;
+            panel.style.borderTopColor = DashFallTheme.Danger;
+            DashFallTheme.ForceUIFont(panel);
 
             // The two cases need different instructions. "Close the game so Steam can finish
             // updating" is actively wrong once the files are ALREADY updated, which is the
@@ -491,17 +515,36 @@ namespace DashFallMod.Client
             bool alreadyDownloaded = _staleReason == StaleReason.FilesReplaced;
             bool serverRejected = _staleReason == StaleReason.ServerRejected;
 
+            // Kicker, in the family's 11px letterSpacing 3 grammar. The titles below say what is
+            // wrong but never say who is saying it, and a red headline that appears unannounced
+            // mid-match is worth one line of attribution.
+            var kicker = new UITK.Label("COMPADJUST");
+            kicker.style.fontSize = 11;
+            kicker.style.color = DashFallTheme.TextDim;
+            kicker.style.unityFontStyleAndWeight = FontStyle.Bold;
+            kicker.style.letterSpacing = 3;
+            kicker.style.marginBottom = 6;
+            DashFallTheme.ForceUIFont(kicker);
+            panel.Add(kicker);
+
             var title = new UITK.Label(
                 serverRejected ? "THIS SERVER NEEDS A NEWER BUILD"
                 : alreadyDownloaded ? "RESTART TO FINISH UPDATING"
                 : "MOD OUT OF DATE");
             title.style.fontSize = 32;
             title.style.unityFontStyleAndWeight = FontStyle.Bold;
-            title.style.color = new UITK.StyleColor(accent);
-            title.style.marginBottom = 14;
+            title.style.color = DashFallTheme.Danger;
+            title.style.marginBottom = 12;
             title.style.whiteSpace = UITK.WhiteSpace.Normal;
-            ForceUIFont(title);
+            DashFallTheme.ForceUIFont(title);
             panel.Add(title);
+
+            // The header rule, which is AccentDim everywhere else in the mod. Painted Danger it
+            // becomes a full-width severity band for no extra layout, and the swap is legible
+            // precisely because the same 2px rule sits under the config panel's title in orange.
+            var rule = DashFallTheme.MakeSeparator();
+            rule.style.backgroundColor = DashFallTheme.Danger;
+            panel.Add(rule);
 
             // Careful with the middle paragraph. This variant only ever reaches a client that
             // ANSWERED the server's version handshake, which is the same thing as saying it
@@ -528,26 +571,32 @@ namespace DashFallMod.Client
                   + "Playing on the old build while the Workshop files have already changed can "
                   + "cause bugs (physics glitches, desync, crashes).");
             body.style.whiteSpace = UITK.WhiteSpace.Normal;
-            body.style.fontSize = 16;
-            body.style.color = new UITK.StyleColor(new Color(0.85f, 0.85f, 0.86f));
-            body.style.marginBottom = 22;
-            ForceUIFont(body);
-            panel.Add(body);
+            body.style.fontSize = 14;
+            // TextPrimary, not muted. This paragraph is the actual instruction and it is the one
+            // thing on the card that has to be read rather than glanced at.
+            body.style.color = DashFallTheme.TextPrimary;
+            // The section card's own bottom padding is 4, on the assumption that whatever sits in
+            // it carries 8 below itself, so this is what makes the gap read as 12.
+            body.style.marginBottom = 8;
+            DashFallTheme.ForceUIFont(body);
 
-            var buttonRow = new UITK.VisualElement();
-            buttonRow.style.flexDirection = UITK.FlexDirection.Row;
-            buttonRow.style.alignItems = UITK.Align.Center;
-            buttonRow.style.justifyContent = UITK.Justify.SpaceBetween;
+            // The instructions live in an ordinary section card, so the part of this surface the
+            // player has to act on sits in the same container their settings do. Its bar is the
+            // ordinary orange: red is reserved for the band and the title above, and an accent bar
+            // here is what keeps the card in the family instead of turning it into an alarm.
+            var section = DashFallTheme.MakeSection("What to do");
+            section.Add(body);
+            panel.Add(section);
 
-            var hint = new UITK.Label("Press ESC to dismiss");
-            hint.style.fontSize = 13;
-            hint.style.color = new UITK.StyleColor(new Color(0.55f, 0.55f, 0.57f));
-            ForceUIFont(hint);
+            var buttonRow = DashFallTheme.MakeFooter();
+
+            // TextMuted rather than TextDim: at 13px the dim tone disappears, and this line is the
+            // only thing telling the player how to get rid of the popup.
+            var hint = DashFallTheme.MakeLabel("Press ESC to dismiss", 13, DashFallTheme.TextMuted);
+            hint.style.flexShrink = 1;
             buttonRow.Add(hint);
-
-            var btnContainer = new UITK.VisualElement();
-            btnContainer.style.flexDirection = UITK.FlexDirection.Row;
-            btnContainer.style.alignItems = UITK.Align.Center;
+            // Pushes the two buttons to the right edge, which is the family's footer shape.
+            buttonRow.Add(DashFallTheme.MakeSpacer());
 
             // Both variants open the Workshop item, and only the caption differs.
             //
@@ -561,7 +610,7 @@ namespace DashFallMod.Client
             //
             // An earlier comment here claimed there was nothing worth opening. There is.
             var updateBtn = MakeVersionButton(alreadyDownloaded ? "Quit to Update" : "Open Workshop & Quit",
-                new Color32(176, 58, 52, 255), new Color32(208, 76, 68, 255));
+                true);
             updateBtn.clicked += () =>
             {
                 try
@@ -579,13 +628,11 @@ namespace DashFallMod.Client
                 Application.Quit();
             };
 
-            var dismissBtn = MakeVersionButton("Dismiss",
-                new Color32(70, 70, 74, 255), new Color32(96, 96, 100, 255));
+            var dismissBtn = MakeVersionButton("Dismiss", false);
             dismissBtn.clicked += () => DismissVersionPopup();
 
-            btnContainer.Add(updateBtn);
-            btnContainer.Add(dismissBtn);
-            buttonRow.Add(btnContainer);
+            buttonRow.Add(updateBtn);
+            buttonRow.Add(dismissBtn);
             panel.Add(buttonRow);
 
             _versionBackdrop.Add(panel);
@@ -594,31 +641,28 @@ namespace DashFallMod.Client
             Debug.Log($"[COMPADJUST] Version popup shown (root children={root.childCount}).");
         }
 
-        private static UITK.Button MakeVersionButton(string text, Color32 bg, Color32 hover)
+        /// <summary>
+        /// One of the popup's two footer buttons.
+        ///
+        /// The primary gets the mod's ordinary accent pair, an AccentDim fill inside an Accent
+        /// border that hovers further toward Accent, which is the same treatment the config panel
+        /// gives its one affirmative action. The secondary stays neutral and is deliberately not
+        /// accent tinted, because Dismiss is the path away from the fix and should never look like
+        /// the thing to click. Neither is red: the alarm on this card belongs to the title and the
+        /// band, and a red button next to a red headline would put two reds on one surface and stop
+        /// either of them meaning anything.
+        /// </summary>
+        private static UITK.Button MakeVersionButton(string text, bool primary)
         {
             var b = new UITK.Button { text = text };
-            // Height comes from symmetric vertical padding (not a fixed height) and the text
-            // is explicitly middle-centred, so the label sits dead-centre and both buttons,
-            // sharing the same font and padding, end up identical in height and aligned.
-            b.style.minWidth = 110;
-            b.style.marginTop = 0; b.style.marginBottom = 0; b.style.marginRight = 0;
-            b.style.marginLeft = 12;
-            b.style.paddingLeft = 20; b.style.paddingRight = 20;
-            b.style.paddingTop = 10; b.style.paddingBottom = 10;
-            b.style.fontSize = 17;
-            b.style.unityFontStyleAndWeight = FontStyle.Bold;
-            b.style.unityTextAlign = TextAnchor.MiddleCenter;
+            if (primary) DashFallTheme.StylePrimaryButton(b);
+            else DashFallTheme.StyleSecondaryButton(b);
+            // These captions are sentences rather than the one-word verbs a panel footer carries,
+            // so they get extra room and are pinned against both wrapping and being squeezed by
+            // the ESC hint sharing their row.
+            b.style.paddingLeft = 18; b.style.paddingRight = 18;
             b.style.whiteSpace = UITK.WhiteSpace.NoWrap;
-            b.style.color = Color.white;
-            b.style.backgroundColor = new UITK.StyleColor(bg);
-            b.style.borderTopLeftRadius = 6; b.style.borderTopRightRadius = 6;
-            b.style.borderBottomLeftRadius = 6; b.style.borderBottomRightRadius = 6;
-            // Strip the default UITK button border so the fill reads cleanly.
-            b.style.borderTopWidth = 0; b.style.borderBottomWidth = 0;
-            b.style.borderLeftWidth = 0; b.style.borderRightWidth = 0;
-            ForceUIFont(b);
-            b.RegisterCallback<UITK.MouseEnterEvent>(_ => b.style.backgroundColor = new UITK.StyleColor(hover));
-            b.RegisterCallback<UITK.MouseLeaveEvent>(_ => b.style.backgroundColor = new UITK.StyleColor(bg));
+            b.style.flexShrink = 0;
             return b;
         }
     }

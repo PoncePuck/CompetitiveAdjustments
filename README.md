@@ -99,8 +99,9 @@ src/                            all source
   Tweaks.PuckPatch.cs           puck-side patches
   Tweaks.StickPatch.cs          stick-side patches
   SprintShoulderTrail.cs        sprint shoulder trail visual
-  ModMenuHub.cs                 in-game settings menu integration
+  ModMenuHub.cs                 shared Ponce mod-menu hub, no longer used by this mod (see below)
   ServerConfig.cs               nested JSON config (Dashfall / CompAdjust / CompTweaks)
+  DashFall.Theme.cs             shared design system: palette, geometry, widget factories
   DashFall.{Config,UI,HUD,Input,ClientRunner,RoleSuppression,ServerBridge,Parsing}.cs   DashFall-side runtime
   Companion.PluginCore.cs       companion (client-only) plugin
   Tweaks.PluginCore.cs          comp-tweaks plugin core
@@ -152,9 +153,13 @@ JSON line comments (`// ...`) are stripped on load.
 
 ### Client config
 
-Per-user file owned by `DashFallMod.Client.DashFallConfigLoader`. The toggle UI lives in the in-game ModMenu and writes back on every change. Notable client-side options:
+Per-user file owned by `DashFallMod.Client.DashFallConfigLoader`. The toggle UI writes back on every change.
 
-- `FreeBladeSpinLockEnabled`, `FreeBladeSpinMin`, `FreeBladeSpinMax`. **On by default at +/-4, which is vanilla's own blade range**, so a stock client plays like vanilla even on a server running FreeBlade. Free spin is opt-in: turn the lock off, or widen the range with the two-handled slider, which reaches +/-127. Because the default range is exactly vanilla's limit, leaving the lock on means FreeBlade has no visible effect. That is intended, not a bug; it is the same behaviour once reported as "the blade locks at max twist", now a stated default with a switch next to it.
+**Press F4 to open it.** The key is hardcoded and toggles the panel; ESC closes it. There are no on-screen buttons: the panel used to be reached through the shared Ponce mod-menu hub, and that entry point was removed, so [ModMenuHub.cs](src/ModMenuHub.cs) is still in the tree only because the other Ponce mods ship the same file. This mod no longer registers with it, which means its copy can never become the hub's primary runner. F4 was chosen because the rest of the family already had its own key: OWP is F1, MOTD is F2, MaxPractice is F3.
+
+Notable client-side options:
+
+- `FreeBladeSpinLockEnabled{Skater,Goalie}`, `FreeBladeSpinMin{Skater,Goalie}`, `FreeBladeSpinMax{Skater,Goalie}`. **Per role since client config version 2**, edited on the SKATER and GOALIE tabs rather than in SETTINGS, because a goalie holding an angle across the crease and a skater carrying the puck are not asking the same thing of the blade. Which pair applies is decided from `Player.Role` on the input itself, so a position change takes effect on the next input. An older config is migrated once by copying its single pre-split setting onto both roles, so a deliberate choice is not reset. **Both roles are on by default at +/-4, which is vanilla's own blade range**, so a stock client plays like vanilla even on a server running FreeBlade. Free spin is opt-in: turn the lock off, or widen the range with the two-handled slider, which reaches +/-127. Because the default range is exactly vanilla's limit, leaving the lock on means FreeBlade has no visible effect. That is intended, not a bug; it is the same behaviour once reported as "the blade locks at max twist", now a stated default with a switch next to it.
 
   The two settings are not the same knob at different strengths. Widening the range still clamps, and +/-127 is as far as it goes, because `BladeAngleInput` travels the wire as an `sbyte`; at 12.5 degrees per step that is about four and two fifths turns from centre and then the blade stops. Turning the lock **off** wraps the value instead, so the blade turns without end. The rollover is 144 steps, exactly five turns, so it lands on the same pose and nothing jumps on screen (`BladeSpinWrap` in [StickAnglePatch.cs](src/StickAnglePatch.cs)).
 

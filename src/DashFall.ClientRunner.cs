@@ -5,7 +5,6 @@ using System.Collections;
 using System.Linq;
 using System.Reflection;
 using UnityEngine;
-using UnityEngine.UIElements;
 using UITK = UnityEngine.UIElements;
 
 namespace DashFallMod.Client
@@ -14,13 +13,23 @@ namespace DashFallMod.Client
     {
         private static DashFallClientRunner _instance;
 
-        // UI elements (menu buttons now handled by ModMenuHub)
+        /// <summary>
+        /// True when the local client has the config panel up, from a static context.
+        /// Exists for the chat-suppression Harmony patch, which runs on UIManager and has no
+        /// instance of this runner to ask. Safe before the runner exists and on a dedicated
+        /// server, where _instance is never assigned.
+        /// </summary>
+        public static bool IsPanelOpenStatic =>
+            _instance != null && _instance.IsDashFallPanelOpen;
+
+        // UI elements. There are no on-screen entry points any more: the panel is opened
+        // and closed with F4 only (see TickPanelHotkeys), so nothing here has to survive
+        // a menu rebuild except the UIDocument root the panel is parented to.
         private UITK.VisualElement _lastRoot;
         private UITK.UIDocument _doc;
         private UIManager _cachedUIManager; // Cache to avoid expensive lookups
 
         private float _nextUIProbeAt = 0f;
-        private bool _buttonsWiredForThisRoot;
 
         // Cursor state for panel
         private bool _savedCursorState = false;
@@ -38,12 +47,6 @@ namespace DashFallMod.Client
         // Update because Singleton can be null when the runner is created at mod-enable.
         private Unity.Netcode.NetworkManager _clientStoppedSubscribedNm;
 
-        // Reflection fields for menu buttons
-        private static readonly FieldInfo _fiMainSettings =
-            typeof(UIMainMenu).GetField("settingsButton", BindingFlags.Instance | BindingFlags.NonPublic);
-        private static readonly FieldInfo _fiPauseSettings =
-            typeof(UIPauseMenu).GetField("settingsButton", BindingFlags.Instance | BindingFlags.NonPublic);
-
         // Vanilla UIMinimap private VisualElements, resolved once at type init (the fields are
         // type-level, so caching is safe and avoids re-reflecting on every spawn/sync).
         private static readonly FieldInfo _fiMinimapEl =
@@ -51,8 +54,6 @@ namespace DashFallMod.Client
         private static readonly FieldInfo _fiMinimapContentEl =
             typeof(UIMinimap).GetField("content", BindingFlags.NonPublic | BindingFlags.Instance);
         private static bool _warnedMinimapReflectionFailed;
-
-        private static readonly Color32 ButtonBg = new Color32(57, 57, 57, 255);
 
         void Awake()
         {
@@ -107,8 +108,12 @@ namespace DashFallMod.Client
                 Stances.Enabled = features.GoalieStancesEnabled;
             }
             
-            // Refresh the UI to show enabled/disabled states
-            if (_dfPanel != null && _dfPanel.style.display == UITK.DisplayStyle.Flex)
+            // Refresh the UI to show enabled/disabled states. Gated on the logical open flag rather
+            // than the panel's display, which disagree while a rebind overlay has the panel hidden.
+            // The extra _isCapturing check is not redundant with it: rebuilding the rows mid-capture
+            // would detach the very BIND button _captureButton still points at, so the refresh is
+            // deferred to the end of the capture instead.
+            if (IsDashFallPanelOpen && !_isCapturing)
             {
                 RefreshActionsUI();
             }
@@ -332,11 +337,25 @@ namespace DashFallMod.Client
         
         void OnDisable()
         {
-            // Unregister when disabled (mod toggle in game settings)
+            // The panel used to be reachable from the shared mod-menu hub, which put it away
+            // for us when the mod was toggled off in the game settings. F4 is the only entry
+            // point now, and a disabled component stops ticking Update, so without this the
+            // panel would stay on screen with no key left to close it.
             try
             {
-                PonceMods.Shared.ModMenuHub.UnregisterMod("DashFall");
-                ConfigManager.Dbg("OnDisable - unregistered from ModMenuHub");
+                // A rebind in flight owns the keyboard, and CloseDashFallPanel answers that by
+                // cancelling the capture instead of closing, so retire the capture first.
+                if (_isCapturing) CancelChordCapture();
+
+                if (IsDashFallPanelOpen)
+                {
+                    // Route through the real close instead of hiding the elements by hand. The
+                    // panel now raises the game's mouse-required flag while it is up and only
+                    // CloseDashFallPanel lowers it again; left raised with no panel on screen it
+                    // also costs the player their stick, because StickAnglePatch reads that flag.
+                    CloseDashFallPanel();
+                    ConfigManager.Dbg("OnDisable - closed the config panel and restored input");
+                }
             }
             catch (Exception e) { ConfigManager.Dbg("OnDisable failed: " + e.Message); }
         }
@@ -356,18 +375,19 @@ namespace DashFallMod.Client
 
                 // CleanupHUD(); //TODO: Re-enable when HUD is ready
 
+                // Picker lists live on the UIDocument root, not inside the panel, so removing the
+                // panel does not take them with it. Without this, toggling the mod off with a
+                // trigger list open strands it over the game for the rest of the session with no
+                // key left to dismiss it.
+                DashFallTheme.CloseAllPickers();
+
                 _dfPanel?.RemoveFromHierarchy();
                 _dfBackdrop?.RemoveFromHierarchy();
                 _captureOverlay?.RemoveFromHierarchy();
 
-                // Unregister from ModMenuHub
-                PonceMods.Shared.ModMenuHub.UnregisterMod("DashFall");
-                PonceMods.Shared.ModMenuHub.Cleanup("DashFall");
-
                 _dfPanel = null;
                 _dfBackdrop = null;
                 _captureOverlay = null;
-                _buttonsWiredForThisRoot = false;
             }
             catch (Exception e) { ConfigManager.Dbg("OnDestroy failed: " + e.Message); }
 
@@ -462,22 +482,8 @@ namespace DashFallMod.Client
                 GoalieDashExtend.EnsureCMMRegistered();
                 Stances.EnsureCMMRegistered();
                 
-                // Handle ESC key to fully close DashFall panel (suppressed while the
-                // out-of-date popup is showing, so ESC there only dismisses the popup).
-                if (_dfPanel != null && _dfPanel.style.display == UITK.DisplayStyle.Flex && !_isCapturing
-                    && _versionBackdrop == null)
-                {
-                    var kb = UnityEngine.InputSystem.Keyboard.current;
-                    if (kb != null && kb.escapeKey.wasPressedThisFrame)
-                    {
-                        // Save config and close completely
-                        DashFallConfigLoader.SaveSkaterConfig(_skater);
-                        DashFallConfigLoader.SaveGoalieConfig(_goalie);
-                        RebuildLookups();
-                        ResetInputActions();
-                        FullCloseDashFallPanel();
-                    }
-                }
+                // F4 opens and closes the config panel; ESC closes it.
+                TickPanelHotkeys();
 
                 // Probe UI periodically
                 if (Time.unscaledTime >= _nextUIProbeAt)
@@ -496,7 +502,90 @@ namespace DashFallMod.Client
             }
         }
 
-        // ===== UI Button Creation =====
+        /// <summary>
+        /// F4 toggles the config panel, ESC closes it. Both are hardcoded.
+        ///
+        /// This is polled from Update rather than registered anywhere on purpose. On a
+        /// dedicated server the plugin's OnEnable runs BEFORE NetworkManager exists, while on
+        /// a host it runs after, so anything wired once at enable time binds on one role and
+        /// silently no-ops on the other (that is what killed CPT_request_sync and FreeBlade).
+        /// A per-frame Keyboard.current read needs no NetworkManager, no CustomMessagingManager
+        /// and no UIDocument, so it cannot half-register. It also cannot run where there is no
+        /// UI at all: Awake destroys this whole component on batch mode or a null graphics
+        /// device, so the runner only exists on a joined client or a listen host.
+        /// </summary>
+        private void TickPanelHotkeys()
+        {
+            var kb = UnityEngine.InputSystem.Keyboard.current;
+            if (kb == null) return;
+
+            // The out-of-date warning is modal and owns ESC (TickVersionPopup dismisses on it),
+            // so neither key does anything while it is up. Without this F4 would open the panel
+            // underneath a surface the player is being told to act on.
+            if (_versionBackdrop != null) return;
+
+            // A rebind in progress owns the whole keyboard. F4 has to stay bindable like any
+            // other key, and the capture routine handles its own ESC-to-cancel.
+            if (_isCapturing) return;
+
+            // Ask the panel whether it is open instead of reading its display. The two disagree
+            // in both directions: a rebind overlay hides the panel while it is still logically
+            // open, and a UIDocument root swap nulls the element out from under us.
+            bool panelOpen = IsDashFallPanelOpen;
+
+            // Only act on our own key, and only when the game is not eating keystrokes. Chat
+            // focus is checked through the mod's existing AnyTextInputFocused so the panel
+            // hotkey agrees with the bind dispatcher about what "typing" means.
+            if (kb.f4Key.wasPressedThisFrame && !AnyTextInputFocused())
+            {
+                // No SavePanelEdits here: ToggleDashFallPanel commits the keybinds on its own
+                // close branch. Saving here as well would rewrite both config files and rebuild
+                // the input actions twice on a single keypress.
+
+                // The panel is built against the UIDocument root that the 0.5s probe resolves,
+                // so a press in the window right after a root swap would be a silent no-op.
+                // Probe now instead of losing the press.
+                if (!panelOpen && _doc == null) TryWireButtonIfNeeded();
+
+                ToggleDashFallPanel();
+                ConfigManager.Dbg(panelOpen ? "F4 - closing the config panel" : "F4 - opening the config panel");
+                return;
+            }
+
+            if (!panelOpen) return;
+
+            if (kb.escapeKey.wasPressedThisFrame)
+            {
+                SavePanelEdits();
+                FullCloseDashFallPanel();
+                ConfigManager.Dbg("ESC - closing the config panel");
+                return;
+            }
+
+            // Hold the mouse-required flag rather than re-asserting the cursor. The cursor was
+            // never re-locking itself: ApplicationManager.SetMouseVisibility is the only writer of
+            // Cursor.lockState in the game and it only ever reacts to this flag changing. What was
+            // actually happening is that UIManager recomputed the flag off whenever one of its own
+            // views opened or closed, and the cursor followed. Fixing the flag fixes the cursor,
+            // and it also stops the skater receiving the keystrokes meant for the panel.
+            HoldPlayerInputSuppressed();
+        }
+
+        // Writes the keybind edits made in the panel and rebuilds the dispatch tables from
+        // them. Every close path runs this; opening does not, so an abandoned session that
+        // ends in a crash leaves the on-disk config alone.
+        private void SavePanelEdits()
+        {
+            DashFallConfigLoader.SaveSkaterConfig(_skater);
+            DashFallConfigLoader.SaveGoalieConfig(_goalie);
+            RebuildLookups();
+            ResetInputActions();
+        }
+
+        // Resolves the UIDocument root the panel, capture overlay, HUD and version popup are
+        // all parented to, and rebuilds them when the game swaps roots (menu to in-game, and
+        // back). Named after the menu buttons it used to create; those are gone with the hub,
+        // but the root probe is still what everything else depends on.
         private void TryWireButtonIfNeeded()
         {
             try
@@ -510,8 +599,14 @@ namespace DashFallMod.Client
 
                 if (_lastRoot != root)
                 {
+                    // None of the panel's elements survive the swap, so close it before they go.
+                    // Open state is tracked in a flag rather than on the element, and the cursor
+                    // snapshot and mouse-required flag taken on open are only handed back by the
+                    // close path, so tearing the panel down silently would strand both.
+                    if (_isCapturing) CancelChordCapture();
+                    if (IsDashFallPanelOpen) CloseDashFallPanel();
+
                     _lastRoot = root;
-                    _buttonsWiredForThisRoot = false;
 
                     // Rebuild elements on new root
                     _dfBackdrop?.RemoveFromHierarchy();
@@ -527,72 +622,11 @@ namespace DashFallMod.Client
                     BuildHUD();
                 }
 
-                if (!_buttonsWiredForThisRoot) TryWireButtonsOnce(root);
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"[COMPADJUST] Error wiring button: {e.Message}");
+                Debug.LogWarning($"[COMPADJUST] Error resolving the UI root: {e.Message}");
             }
-        }
-
-        private static void CopyClasses(UITK.VisualElement from, UITK.VisualElement to)
-        {
-            if (from == null || to == null) return;
-            foreach (var cls in from.GetClasses()) to.AddToClassList(cls);
-        }
-
-        private UITK.Button MakeSiblingButton(UITK.Button reference, string text, Action onClick)
-        {
-            var b = new UITK.Button(onClick) { text = text };
-            CopyClasses(reference, b);
-            b.name = text.Replace(" ", "_") + "_DashFall";
-            b.pickingMode = UITK.PickingMode.Position;
-
-            b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
-            b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleLeft);
-            b.style.width = reference.style.width;
-            b.style.minWidth = reference.style.minWidth;
-            b.style.maxWidth = reference.style.maxWidth;
-            b.style.height = reference.style.height;
-            b.style.minHeight = reference.style.minHeight;
-            b.style.maxHeight = reference.style.maxHeight;
-            b.style.marginTop = 8f;
-            b.style.paddingTop = 8f;
-            b.style.paddingBottom = 8f;
-            b.style.paddingLeft = 15f;
-
-            // Add hover effect
-            b.RegisterCallback<PointerEnterEvent>(_ =>
-            {
-                b.style.backgroundColor = Color.white;
-                b.style.color = Color.black;
-            });
-            b.RegisterCallback<PointerLeaveEvent>(_ =>
-            {
-                b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
-                b.style.color = Color.white;
-            });
-
-            return b;
-        }
-
-        private void TryWireButtonsOnce(UITK.VisualElement root)
-        {
-            if (root == null || _buttonsWiredForThisRoot) return;
-
-            // Register with ModMenuHub instead of creating our own buttons
-            PonceMods.Shared.ModMenuHub.RegisterMod(
-                "DashFall",
-                "COMPADJUST",
-                OpenDashFallPanel,
-                20 // Priority - lower = higher in list
-            );
-            
-            // Initialize ModMenuHub (first mod to call this becomes owner)
-            PonceMods.Shared.ModMenuHub.Initialize("DashFall");
-
-            _buttonsWiredForThisRoot = true;
-            ConfigManager.Dbg("Registered with ModMenuHub.");
         }
 
         // Cursor state management

@@ -123,13 +123,17 @@ public sealed class DashFallGameMod
         try { GoalieDashExtend.Disable(); } catch (Exception e) { ConfigManager.Dbg("GoalieDashExtend.Disable failed: " + e.Message); }
         try { Stances.Disable(); } catch (Exception e) { ConfigManager.Dbg("Stances.Disable failed: " + e.Message); }
 
-        // Unregister from ModMenuHub
-        try
-        {
-            PonceMods.Shared.ModMenuHub.UnregisterMod("DashFall");
-            ConfigManager.Dbg("Unregistered from ModMenuHub");
-        }
-        catch (System.Exception e) { ConfigManager.Dbg("ModMenuHub.UnregisterMod failed: " + e.Message); }
+        // This mod no longer registers with the shared mod-menu hub: the config panel is opened
+        // with F4 (DashFallClientRunner.TickPanelHotkeys) and nothing else.
+        //
+        // src/ModMenuHub.cs is still compiled, but be clear about why, because the reason written
+        // here first was wrong. It does NOT participate in any cross-assembly pruning on our
+        // behalf: other assemblies only read _localCallbacks, and our permanently empty dictionary
+        // answers exactly what an absent type would. Nothing calls Initialize or RegisterMod any
+        // more, so our copy can never become the hub's primary runner, and the file is unreachable
+        // from this assembly. It stays purely because the other Ponce mods ship the same file and
+        // keeping the copies identical makes them easier to diff. It can be deleted whenever that
+        // stops being worth 48KB.
 
         // Destroy the client runner
         var clientRunner = UnityEngine.Object.FindFirstObjectByType<DashFallMod.Client.DashFallClientRunner>();

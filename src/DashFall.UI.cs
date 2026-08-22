@@ -1,4 +1,15 @@
-﻿// DashFall.UI.cs - Full UI Panel with keybind editing (copied from PlayerInput style)
+// DashFall.UI.cs - the client config panel, on the Ponce shared design system.
+//
+// Every colour and every widget recipe now comes from DashFallTheme, which is the same design
+// system OWP, MaxPractice and PonceArenaTweaks use. Only the accent differs between the four,
+// and ours is orange, so a player can tell which mod's panel is open at a glance. Nothing in
+// this file declares a palette of its own any more; if a colour is missing, it belongs in
+// DashFallTheme.
+//
+// The panel is opened and closed by F4 alone. It used to be a ModMenuHub entry, which meant the
+// hub owned the cursor and the vanilla menu buttons on our behalf; with the hub gone this file
+// owns both, so the open/close pair below snapshots and restores the cursor and the game's
+// mouse-required flag itself.
 
 using System;
 using System.Collections;
@@ -25,7 +36,7 @@ namespace DashFallMod.Client
         // the active tab whose label does not contain the query.
         private UITK.TextField _searchField;
         private string _searchQuery = "";
-        
+
         // Tab system
         private UITK.Button _skaterTabBtn;
         private UITK.Button _goalieTabBtn;
@@ -39,73 +50,29 @@ namespace DashFallMod.Client
         private bool _serverUserLocked;     // user pressed LOCK to drop back to read-only locally
         private string _serverStatusText = ""; // transient status under the lock bar
         private bool _serverPasswordRevealed; // host pressed SHOW to reveal the editor password
+        private bool _footerResetArmed;       // footer RESET pressed once; waiting for the confirm press
         private bool _serverResetArmed;       // RESET pressed once; waiting for the confirm press
         private CompetitiveAdjustments.ServerConfig _serverEditCfg; // isolated editor copy; null = re-clone from live
-        
+
         private Action<string> _onChordCaptured;
         private bool _panelHiddenForCapture;
-        private readonly List<UITK.VisualElement> _hiddenMenuButtons = new List<UITK.VisualElement>();
+        private UITK.Button _captureButton;   // the BIND button currently listening, so it can be un-painted
 
-        // UI palette (matching base game)
-        private static readonly Color32 TextFieldBg = new Color32(57, 57, 57, 255);
-        private static readonly Color32 RowBg = new Color32(61, 61, 61, 255);
-        private static readonly Color32 DisabledRowBg = new Color32(40, 40, 40, 255);
-        private static readonly Color32 PanelBg = new Color32(48, 48, 47, 255);
-        private static readonly Color32 TabActiveBg = new Color32(80, 80, 80, 255);
-        private static readonly Color32 TabInactiveBg = new Color32(66, 66, 66, 255);
-        private const int BTN_W = 80;
+        // Authoritative open/closed state. Deliberately NOT derived from the panel's display,
+        // because HidePanelDuringCapture hides the panel while it is logically still open, and a
+        // display-driven toggle would open a second session on top of a rebind.
+        private bool _panelVisible;
 
-        // Font
-        private static Font _uiFont;
-        private static Font GetUIFont()
-        {
-            if (_uiFont != null) return _uiFont;
-            try { _uiFont = Resources.GetBuiltinResource<Font>("Arial.ttf"); } catch { }
-            if (_uiFont == null)
-            {
-                try { _uiFont = Font.CreateDynamicFontFromOSFont(new[] { "Arial", "Segoe UI" }, 16); } catch { }
-            }
-            return _uiFont;
-        }
-        
-        private static void ForceUIFont(UITK.VisualElement ve)
-        {
-            var f = GetUIFont();
-            if (f != null) ve.style.unityFont = f;
-        }
+        // The game's own mouse-required flag, which ModMenuHub used to own for us. Typing in the
+        // SEARCH box or an admin field otherwise also drives the skater.
+        private bool _savedMouseRequired;
+        private bool _prevMouseRequired;
 
-        private static void MakeReadable(UITK.Label l)
-        {
-            l.style.color = Color.white;
-            ForceUIFont(l);
-        }
+        // Font. Kept as thin wrappers over DashFallTheme so the other partials that already call
+        // ForceUIFont (the version popup) keep compiling, and so there is one font resolve.
+        private static Font GetUIFont() => DashFallTheme.GetUIFont();
 
-        private static void MakeReadable(UITK.Button b)
-        {
-            b.style.color = Color.white;
-            ForceUIFont(b);
-        }
-
-        // PoncePlayerInput / PlayerQOL toggle look: recolor the checkbox frame to
-        // a dark fill with a medium-gray border so it reads clearly against the
-        // dark rows.  The default Unity USS draws a light box that disappears
-        // against this panel, which is why the SERVER toggles looked blank.
-        // Applied on AttachToPanel because the inner ".unity-toggle__input"
-        // element only exists once the toggle is parented.
-        private static void StyleConfigCheckbox(UITK.Toggle toggle)
-        {
-            if (toggle == null) return;
-            toggle.RegisterCallback<UITK.AttachToPanelEvent>(_ =>
-            {
-                var input = toggle.Q(className: "unity-toggle__input");
-                if (input == null) return;
-                input.style.backgroundColor   = new UITK.StyleColor(new Color(0.15f, 0.15f, 0.15f));
-                input.style.borderTopColor    = new UITK.StyleColor(new Color(0.4f, 0.4f, 0.4f));
-                input.style.borderBottomColor = new UITK.StyleColor(new Color(0.4f, 0.4f, 0.4f));
-                input.style.borderLeftColor   = new UITK.StyleColor(new Color(0.4f, 0.4f, 0.4f));
-                input.style.borderRightColor  = new UITK.StyleColor(new Color(0.4f, 0.4f, 0.4f));
-            });
-        }
+        private static void ForceUIFont(UITK.VisualElement ve) => DashFallTheme.ForceUIFont(ve);
 
         // Tags a row so the SEARCH box can show/hide it by its label text.  The
         // searchable text is stored in userData; the "cfg-row" class lets
@@ -116,6 +83,17 @@ namespace DashFallMod.Client
             if (row == null) return;
             row.userData = title ?? "";
             row.AddToClassList("cfg-row");
+        }
+
+        // A themed section card that the search filter understands: "cfg-section" on the card and
+        // "cfg-header" on the header block inside it, so a query can drop the header without
+        // losing the rows and drop the whole card when none of its rows match.
+        private static UITK.VisualElement AddCfgSection(UITK.VisualElement parent, string title, string subtitle = null)
+        {
+            var card = DashFallTheme.AddSection(parent, title, subtitle);
+            card.AddToClassList("cfg-section");
+            if (card.childCount > 0) card[0].AddToClassList("cfg-header");
+            return card;
         }
 
         // Filters the active tab's rows by the SEARCH query.  An empty query shows
@@ -135,8 +113,22 @@ namespace DashFallMod.Client
                 row.style.display = match ? UITK.DisplayStyle.Flex : UITK.DisplayStyle.None;
             }
 
-            foreach (var header in _actionsSection.Query(className: "cfg-header").ToList())
-                header.style.display = searching ? UITK.DisplayStyle.None : UITK.DisplayStyle.Flex;
+            // A card whose every row was filtered out would leave an empty stub of padding
+            // behind, so the card goes with its rows; only cards that still have a hit survive,
+            // and their headers stay hidden so the results read as one flat list.
+            foreach (var card in _actionsSection.Query(className: "cfg-section").ToList())
+            {
+                var header = card.childCount > 0 ? card[0] : null;
+                if (header != null && header.ClassListContains("cfg-header"))
+                    header.style.display = searching ? UITK.DisplayStyle.None : UITK.DisplayStyle.Flex;
+
+                bool anyVisible = false;
+                foreach (var row in card.Query(className: "cfg-row").ToList())
+                {
+                    if (row.style.display.value == UITK.DisplayStyle.Flex) { anyVisible = true; break; }
+                }
+                card.style.display = (!searching || anyVisible) ? UITK.DisplayStyle.Flex : UITK.DisplayStyle.None;
+            }
         }
 
         // ========== PANEL BUILD ==========
@@ -147,257 +139,147 @@ namespace DashFallMod.Client
             var root = _doc?.rootVisualElement ?? _lastRoot;
             if (root == null) return;
 
-            // Backdrop (semi-transparent overlay)
-            _dfBackdrop = new UITK.VisualElement { name = "DashFall_Backdrop" };
-            _dfBackdrop.style.position = UITK.Position.Absolute;
-            _dfBackdrop.style.left = 0;
-            _dfBackdrop.style.top = 0;
-            _dfBackdrop.style.right = 0;
-            _dfBackdrop.style.bottom = 0;
-            _dfBackdrop.style.backgroundColor = new UITK.StyleColor(new Color(0, 0, 0, 0.0f));
-            _dfBackdrop.style.display = UITK.DisplayStyle.None;
-            _dfBackdrop.pickingMode = UITK.PickingMode.Position;
-            _dfBackdrop.RegisterCallback<UITK.PointerUpEvent>(e =>
-            {
-                // Close panel when clicking backdrop
-                CloseDashFallPanel();
-            });
+            _dfBackdrop = DashFallTheme.MakeBackdrop();
+            _dfBackdrop.RegisterCallback<UITK.PointerUpEvent>(_ => CloseDashFallPanel());
 
-            // Main panel
-            _dfPanel = new UITK.VisualElement { name = "DashFall_Panel" };
-            _dfPanel.style.position = UITK.Position.Absolute;
-            _dfPanel.style.left = new UITK.Length(50, UITK.LengthUnit.Percent);
-            _dfPanel.style.top = new UITK.Length(50, UITK.LengthUnit.Percent);
-            _dfPanel.style.translate = new UITK.Translate(
-                new UITK.Length(-50, UITK.LengthUnit.Percent),
-                new UITK.Length(-50, UITK.LengthUnit.Percent), 0f);
-            int targetW = Mathf.Clamp(Mathf.RoundToInt(Screen.width * 0.58f), 680, 980);
-            _dfPanel.style.width = targetW;
-            _dfPanel.style.height = new UITK.Length(84, UITK.LengthUnit.Percent);
-            _dfPanel.style.minHeight = new UITK.Length(56, UITK.LengthUnit.Percent);
-            _dfPanel.style.maxHeight = new UITK.Length(56, UITK.LengthUnit.Percent);
-            _dfPanel.style.overflow = UITK.Overflow.Hidden;
-            _dfPanel.style.flexDirection = UITK.FlexDirection.Column;
-            _dfPanel.style.backgroundColor = new UITK.StyleColor(PanelBg);
-            _dfPanel.style.paddingLeft = 8; _dfPanel.style.paddingRight = 8;
-            _dfPanel.style.paddingTop = 8; _dfPanel.style.paddingBottom = 8;
-            _dfPanel.style.display = UITK.DisplayStyle.None;
-            _dfPanel.pickingMode = UITK.PickingMode.Position;
-            _dfPanel.RegisterCallback<UITK.PointerUpEvent>(e => e.StopPropagation());
+            // MakePanelRoot registers the inside-click StopPropagation itself, so a click on a row
+            // cannot reach the backdrop's close handler.
+            _dfPanel = DashFallTheme.MakePanelRoot();
 
-            // Title
-            var bigTitle = new UITK.Label("COMPADJUST");
-            bigTitle.style.fontSize = 50;
-            bigTitle.style.marginBottom = 16;
-            MakeReadable(bigTitle);
-            _dfPanel.Add(bigTitle);
+            // Search box: filters the rows on the active tab by label text. It lives in the header's
+            // top-right dead space rather than in a row of its own above the list, because the title
+            // block only fills the left half of the header and a full-width search row was spending
+            // a whole line of vertical space to say very little.
+            var searchAside = new UITK.VisualElement();
+            searchAside.style.flexDirection = UITK.FlexDirection.Row;
+            searchAside.style.alignItems = UITK.Align.Center;
 
-            // Tab bar
-            var tabBar = new UITK.VisualElement();
-            tabBar.style.flexDirection = UITK.FlexDirection.Row;
-            tabBar.style.marginBottom = 8;
-            tabBar.style.height = 50;
-
-            _skaterTabBtn = MakeTabButton("SKATER", true, () => SwitchToTab(ActiveTab.Skater));
-            _goalieTabBtn = MakeTabButton("GOALIE", false, () => SwitchToTab(ActiveTab.Goalie));
-            _serverTabBtn = MakeTabButton("SERVER", false, () => SwitchToTab(ActiveTab.Server));
-            _settingsTabBtn = MakeTabButton("SETTINGS", false, () => SwitchToTab(ActiveTab.Settings));
-            // MakeTabButton gives every tab an 8px right margin for spacing; the
-            // last tab must not, or SETTINGS sits 8px off the right edge while
-            // SKATER hugs the left.  Zero it so both ends are flush.
-            _settingsTabBtn.style.marginRight = 0;
-
-            tabBar.Add(_skaterTabBtn);
-            tabBar.Add(_goalieTabBtn);
-            tabBar.Add(_serverTabBtn);
-            tabBar.Add(_settingsTabBtn);
-            _dfPanel.Add(tabBar);
-
-            // Search box: filters the rows on the active tab by label text.  It
-            // sits above the scroll view so it stays put while the list scrolls.
-            // Styled as a row (RowBg + 12px inset) so SEARCH lines up with the
-            // row labels below it instead of sitting flush against the panel edge.
-            var searchRow = new UITK.VisualElement();
-            searchRow.style.flexDirection = UITK.FlexDirection.Row;
-            searchRow.style.alignItems = UITK.Align.Center;
-            searchRow.style.flexShrink = 0;
-            searchRow.style.height = 50;
-            searchRow.style.marginBottom = 8;
-            searchRow.style.paddingLeft = 12;
-            searchRow.style.paddingRight = 12;
-            searchRow.style.backgroundColor = new UITK.StyleColor(RowBg);
-
-            var searchLabel = new UITK.Label("SEARCH");
-            searchLabel.style.fontSize = 18;
+            var searchLabel = DashFallTheme.MakeLabel("SEARCH", 11, DashFallTheme.TextMuted);
+            searchLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
+            searchLabel.style.letterSpacing = 3;
             searchLabel.style.marginRight = 8;
-            MakeReadable(searchLabel);
-            searchRow.Add(searchLabel);
+            searchLabel.style.flexShrink = 0;
+            searchAside.Add(searchLabel);
 
-            _searchField = new TextField();
-            _searchField.value = _searchQuery;
-            _searchField.style.flexGrow = 1;
-            _searchField.style.height = 34;
-            _searchField.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
-            _searchField.style.color = Color.white;
-            ForceUIFont(_searchField);
+            _searchField = new TextField { value = _searchQuery };
+            _searchField.style.width = 200;
+            _searchField.style.height = 28;
+            _searchField.style.marginLeft = 0;
+            _searchField.style.marginRight = 0;
+            DashFallTheme.StyleTextField(_searchField);
             _searchField.RegisterValueChangedCallback(e =>
             {
                 _searchQuery = e.newValue ?? "";
                 ApplySearchFilter();
             });
-            searchRow.Add(_searchField);
-            _dfPanel.Add(searchRow);
+            searchAside.Add(_searchField);
 
-            // Scroll view for content
-            _scrollView = new UITK.ScrollView
-            {
-                verticalScrollerVisibility = UITK.ScrollerVisibility.Auto,
-                horizontalScrollerVisibility = UITK.ScrollerVisibility.Hidden
-            };
-            _scrollView.style.flexGrow = 1;
-            // A flex item's default min-height is its content size, so a long list
-            // keeps the scroll view tall and pushes the footer past the panel's
-            // clipped bottom (the buttons then overlap the window edge).  Pin
-            // min-height to 0 so the scroll view shrinks and the footer stays in.
-            _scrollView.style.flexShrink = 1;
-            _scrollView.style.minHeight = 0;
+            // "COMPADJUST" has no space, so the accent half is split explicitly rather than by the
+            // first-space rule, and it keeps its leading space because the two halves are separate
+            // Labels sitting flush against each other.
+            _dfPanel.Add(DashFallTheme.MakeHeader("COMP", " ADJUST",
+                DashFallTheme.SubtitleText("Keybinds and config", "F4"), searchAside));
+
+            // Tab strip
+            var tabStrip = DashFallTheme.MakeTabStrip();
+            _skaterTabBtn = DashFallTheme.MakeTab("SKATER", _activeTab == ActiveTab.Skater, () => SwitchToTab(ActiveTab.Skater));
+            _goalieTabBtn = DashFallTheme.MakeTab("GOALIE", _activeTab == ActiveTab.Goalie, () => SwitchToTab(ActiveTab.Goalie));
+            _serverTabBtn = DashFallTheme.MakeTab("SERVER", _activeTab == ActiveTab.Server, () => SwitchToTab(ActiveTab.Server));
+            _settingsTabBtn = DashFallTheme.MakeTab("SETTINGS", _activeTab == ActiveTab.Settings, () => SwitchToTab(ActiveTab.Settings));
+
+            DashFallTheme.AddTabHover(_skaterTabBtn, () => _activeTab == ActiveTab.Skater);
+            DashFallTheme.AddTabHover(_goalieTabBtn, () => _activeTab == ActiveTab.Goalie);
+            DashFallTheme.AddTabHover(_serverTabBtn, () => _activeTab == ActiveTab.Server);
+            DashFallTheme.AddTabHover(_settingsTabBtn, () => _activeTab == ActiveTab.Settings);
+
+            // Every tab carries a right margin for spacing; the last one must not, or SETTINGS
+            // sits short of the right edge while SKATER hugs the left.
+            _settingsTabBtn.style.marginRight = 0;
+
+            tabStrip.Add(_skaterTabBtn);
+            tabStrip.Add(_goalieTabBtn);
+            tabStrip.Add(_serverTabBtn);
+            tabStrip.Add(_settingsTabBtn);
+            _dfPanel.Add(tabStrip);
+
+            // Scrolling body. StyleScrollView pins min-height to 0, which is what stops a long
+            // list pushing the footer past the panel's clipped bottom edge.
+            _scrollView = new UITK.ScrollView();
+            DashFallTheme.StyleScrollView(_scrollView);
             _dfPanel.Add(_scrollView);
 
             _actionsSection = new UITK.VisualElement();
             _scrollView.Add(_actionsSection);
 
-            // Build the action rows
             BuildActionsUI();
 
-                // PlayerQoL footer buttons: no bottom margins of their own - the
-                // 8px gap under the row comes from the panel's bottom padding.
-                UITK.Button MakeDonateButton(string t, Action onClick)
+            // Footer: COFFEE alone on the left, then the closing actions on the right. Every footer
+            // button is neutral, including CLOSE. An accent fill there read as the thing to press
+            // when it is only the way out, and it put the loudest colour on the panel next to the
+            // one destructive action.
+            var footer = DashFallTheme.MakeFooter();
+
+            var donate = new UITK.Button(() => Application.OpenURL("https://buymeacoffee.com/amikiir")) { text = "Coffee?" };
+            DashFallTheme.StyleFooterButton(donate);
+            donate.style.marginLeft = 0;
+            DashFallTheme.AddButtonFlash(donate);
+            footer.Add(donate);
+            footer.Add(DashFallTheme.MakeSpacer());
+
+            // Two-click, matching the SERVER tab's reset. This wipes all seven skater bind lists,
+            // all nine goalie ones and every trigger type, and the next close on any path writes
+            // that to disk, so it cannot sit one misaimed click away from CLOSE looking identical
+            // to it. No accent flash for the same reason the SERVER one has none: the flash caches
+            // a base colour and repaints over the armed fill on the next pointer-leave.
+            UITK.Button resetBtn = null;
+            resetBtn = new UITK.Button(() =>
+            {
+                if (!_footerResetArmed)
                 {
-                    var b = new UITK.Button(onClick) { text = t.ToUpperInvariant() };
-                    b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-                    b.style.height = 50;
-                    b.style.paddingLeft = 18; b.style.paddingRight = 18;
-                    b.style.backgroundColor = new UITK.StyleColor(RowBg);
-                    MakeReadable(b);
-                    AddButtonFlash(b);
-                    return b;
-                }
-                UITK.Button MakeResetButton(string t, Action onClick)
-                {
-                    var b = new UITK.Button(onClick) { text = t.ToUpperInvariant() };
-                    b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-                    b.style.height = 50;
-                    b.style.marginLeft = 8;
-                    b.style.paddingLeft = 18; b.style.paddingRight = 18;
-                    b.style.backgroundColor = new UITK.StyleColor(RowBg);
-                    MakeReadable(b);
-                    AddButtonFlash(b);
-                    return b;
-                }
-                UITK.Button MakeCloseButton(string t, Action onClick)
-                {
-                    var b = new UITK.Button(onClick) { text = t.ToUpperInvariant() };
-                    b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-                    b.style.height = 50;
-                    b.style.marginLeft = 8;
-                    b.style.paddingLeft = 18; b.style.paddingRight = 182;
-                    b.style.backgroundColor = new UITK.StyleColor(RowBg);
-                    MakeReadable(b);
-                    AddButtonFlash(b);
-                    return b;
+                    _footerResetArmed = true;
+                    resetBtn.text = "Confirm reset";
+                    DashFallTheme.SetArmedLook(resetBtn, true);
+                    return;
                 }
 
-            var donate = MakeDonateButton("COFFEE?", () =>
-            {
-                Application.OpenURL("https://buymeacoffee.com/amikiir");
-            });
+                _footerResetArmed = false;
+                resetBtn.text = "Reset to defaults";
+                DashFallTheme.SetArmedLook(resetBtn, false);
 
-            var resetBtn = MakeResetButton("RESET TO DEFAULTS", () =>
-            {
                 ResetToDefaults();
                 ResetInputActions();
                 RefreshActionsUI();
-            });
+            }) { text = _footerResetArmed ? "Confirm reset" : "Reset to defaults" };
+            DashFallTheme.StyleFooterButton(resetBtn);
+            resetBtn.style.paddingLeft = 14; resetBtn.style.paddingRight = 14;
+            DashFallTheme.SetArmedLook(resetBtn, _footerResetArmed);
+            footer.Add(resetBtn);
 
-            var closeBtn = MakeCloseButton("CLOSE", () =>
+            var closeBtn = new UITK.Button(() =>
             {
                 DashFallConfigLoader.SaveSkaterConfig(_skater);
                 DashFallConfigLoader.SaveGoalieConfig(_goalie);
                 RebuildLookups();
                 ResetInputActions();
                 CloseDashFallPanel();
-            });
+            }) { text = "Close" };
+            DashFallTheme.StyleFooterButton(closeBtn);
+            DashFallTheme.AddButtonFlash(closeBtn);
+            footer.Add(closeBtn);
 
-            // Button row at bottom (PlayerQoL layout): COFFEE alone on the left;
-            // RESET + CLOSE grouped together on the right.
-            var buttonRow = new UITK.VisualElement();
-            buttonRow.style.flexDirection = UITK.FlexDirection.Row;
-            buttonRow.style.justifyContent = UITK.Justify.SpaceBetween;
-            buttonRow.style.marginTop = 8;
-            buttonRow.style.flexShrink = 0;   // footer keeps its size; the list shrinks instead
-            buttonRow.Add(donate);
-            var rightButtons = new UITK.VisualElement();
-            rightButtons.style.flexDirection = UITK.FlexDirection.Row;
-            rightButtons.Add(resetBtn);
-            rightButtons.Add(closeBtn);
-            buttonRow.Add(rightButtons);
-            _dfPanel.Add(buttonRow);
+            _dfPanel.Add(footer);
 
-            // Add to root
+            // Backdrop first so the panel paints on top of it; the panel is its child, so the two
+            // displays are flipped together.
             root.Add(_dfBackdrop);
             _dfBackdrop.Add(_dfPanel);
-        }
-
-        private UITK.Button MakeTabButton(string text, bool isActive, Action onClick)
-        {
-            var btn = new UITK.Button(onClick) { text = text };
-            btn.style.height = 50;
-            btn.style.flexGrow = 1;
-            btn.style.paddingLeft = 8;
-            btn.style.paddingRight = 8;
-            btn.style.marginRight = 8;
-            // Spacing below the tab strip is owned by tabBar.marginBottom; the
-            // button keeps no bottom margin of its own (it used to stack a second
-            // gap and bleed past the strip into the search row).
-            btn.style.marginBottom = 0;
-            btn.style.fontSize = 24;
-            btn.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-            btn.style.borderTopLeftRadius = 6;
-            btn.style.borderTopRightRadius = 6;
-            btn.style.borderBottomLeftRadius = 0;
-            btn.style.borderBottomRightRadius = 0;
-            btn.style.borderBottomWidth = isActive ? 3 : 0;
-            btn.style.borderBottomColor = new UITK.StyleColor(Color.white);
-            btn.style.backgroundColor = new UITK.StyleColor(isActive ? TabActiveBg : TabInactiveBg);
-            btn.style.color = isActive ? Color.white : new Color(0.7f, 0.7f, 0.7f);
-            ForceUIFont(btn);
-            
-            // Add hover effect - white background on hover (unless active)
-            btn.RegisterCallback<UITK.PointerEnterEvent>(_ => {
-                // Check if this tab is currently active by checking border
-                float borderWidth = btn.resolvedStyle.borderBottomWidth;
-                if (borderWidth < 1)
-                {
-                    btn.style.backgroundColor = new UITK.StyleColor(Color.white);
-                    btn.style.color = Color.black;
-                }
-            });
-            btn.RegisterCallback<UITK.PointerLeaveEvent>(_ => {
-                // Restore based on active state (check border)
-                float borderWidth = btn.resolvedStyle.borderBottomWidth;
-                if (borderWidth < 1)
-                {
-                    btn.style.backgroundColor = new UITK.StyleColor(TabInactiveBg);
-                    btn.style.color = new Color(0.7f, 0.7f, 0.7f);
-                }
-            });
-            
-            return btn;
         }
 
         private void SwitchToTab(ActiveTab tab)
         {
             _serverResetArmed = false; // leaving the tab cancels a pending reset confirm
+            _footerResetArmed = false; // and so does the footer's, since the footer is rebuilt too
+            DashFallTheme.CloseAllPickers(); // the rows a list was anchored to are about to be torn down
             _activeTab = tab;
             UpdateTabStyles();
             RefreshActionsUI();
@@ -405,114 +287,132 @@ namespace DashFallMod.Client
 
         private void UpdateTabStyles()
         {
-            if (_skaterTabBtn != null)
-            {
-                bool active = _activeTab == ActiveTab.Skater;
-                _skaterTabBtn.style.backgroundColor = new UITK.StyleColor(active ? TabActiveBg : TabInactiveBg);
-                _skaterTabBtn.style.color = active ? Color.white : new Color(0.7f, 0.7f, 0.7f);
-                _skaterTabBtn.style.borderBottomWidth = active ? 3 : 0;
-            }
-            if (_goalieTabBtn != null)
-            {
-                bool active = _activeTab == ActiveTab.Goalie;
-                _goalieTabBtn.style.backgroundColor = new UITK.StyleColor(active ? TabActiveBg : TabInactiveBg);
-                _goalieTabBtn.style.color = active ? Color.white : new Color(0.7f, 0.7f, 0.7f);
-                _goalieTabBtn.style.borderBottomWidth = active ? 3 : 0;
-            }
-            if (_serverTabBtn != null)
-            {
-                bool active = _activeTab == ActiveTab.Server;
-                _serverTabBtn.style.backgroundColor = new UITK.StyleColor(active ? TabActiveBg : TabInactiveBg);
-                _serverTabBtn.style.color = active ? Color.white : new Color(0.7f, 0.7f, 0.7f);
-                _serverTabBtn.style.borderBottomWidth = active ? 3 : 0;
-            }
-            if (_settingsTabBtn != null)
-            {
-                bool active = _activeTab == ActiveTab.Settings;
-                _settingsTabBtn.style.backgroundColor = new UITK.StyleColor(active ? TabActiveBg : TabInactiveBg);
-                _settingsTabBtn.style.color = active ? Color.white : new Color(0.7f, 0.7f, 0.7f);
-                _settingsTabBtn.style.borderBottomWidth = active ? 3 : 0;
-            }
+            DashFallTheme.SetTabVisual(_skaterTabBtn, _activeTab == ActiveTab.Skater);
+            DashFallTheme.SetTabVisual(_goalieTabBtn, _activeTab == ActiveTab.Goalie);
+            DashFallTheme.SetTabVisual(_serverTabBtn, _activeTab == ActiveTab.Server);
+            DashFallTheme.SetTabVisual(_settingsTabBtn, _activeTab == ActiveTab.Settings);
         }
 
-        private void DontWrap(UITK.Label l)
+        /// <summary>
+        /// The free blade rows for one role. Both tabs call this, so the two positions get the
+        /// same two controls backed by their own pair of fields.
+        ///
+        /// These used to be one shared pair on the SETTINGS tab. A goalie holding an angle across
+        /// the crease and a skater carrying the puck are not asking the same thing of the blade,
+        /// and one range had to serve both. They live on the role tabs now because that is where
+        /// the player is already thinking about that position.
+        /// </summary>
+        private void AddFreeBladeSection(bool goalie)
         {
-            l.style.whiteSpace = UITK.WhiteSpace.NoWrap;
-            l.style.textOverflow = UITK.TextOverflow.Ellipsis;
+            var clientConfig = DashFallConfigLoader.ClientConfig;
+            if (clientConfig == null) return;
+
+            string who = goalie ? "goalie" : "skater";
+            var blade = AddCfgSection(_actionsSection, "Blade",
+                "Applies only while playing " + who + ". The other position has its own pair.");
+
+            bool locked; float min, max;
+            clientConfig.GetFreeBlade(goalie, out locked, out min, out max);
+
+            blade.Add(MakeToggleRow("FREE BLADE SPIN LOCK",
+                "On (default) keeps the vanilla blade range. Turn OFF for endless spin with no stop at either end",
+                locked, (val) =>
+            {
+                if (goalie) clientConfig.FreeBladeSpinLockEnabledGoalie = val;
+                else        clientConfig.FreeBladeSpinLockEnabledSkater = val;
+                DashFallConfigLoader.SaveClientConfig(clientConfig);
+            }));
+
+            // One row, two draggers. Two independent float rows let the user push MIN above
+            // MAX, which produced an empty range that Mathf.Clamp resolves to a single
+            // value, and the blade froze there. A range control cannot express that state.
+            blade.Add(MakeRangeSliderRow(
+                "FREE BLADE SPIN RANGE",
+                "Lower and upper bound, used only while the lock above is on",
+                min, max,
+                FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax,
+                (lo, hi) =>
+                {
+                    if (goalie) { clientConfig.FreeBladeSpinMinGoalie = lo; clientConfig.FreeBladeSpinMaxGoalie = hi; }
+                    else        { clientConfig.FreeBladeSpinMinSkater = lo; clientConfig.FreeBladeSpinMaxSkater = hi; }
+                    DashFallConfigLoader.SaveClientConfig(clientConfig);
+                }));
         }
 
         private void BuildActionsUI()
         {
             _actionsSection.Clear();
-            
+
             // Get server features (if connected)
             var features = PoncePuck.Keybinds.ServerBridge.ReceivedFeatures;
             bool hasFeatures = PoncePuck.Keybinds.ServerBridge.HasReceivedFeatures;
 
             if (_activeTab == ActiveTab.Skater)
             {
-                // Skater section
-                _actionsSection.Add(MakeBindRow("DIVE", () => _skater.divekey, v => _skater.divekey = v,
+                AddFreeBladeSection(goalie: false);
+
+                var sec = AddCfgSection(_actionsSection, "Skater binds", "Used while skating out. A row greyed out is one the server has switched off.");
+                sec.Add(MakeBindRow("DIVE", () => _skater.divekey, v => _skater.divekey = v,
                     () => _skater.divekeytype, v => _skater.divekeytype = v, BindRowType.Pressable,
                     !hasFeatures || features.SkaterDiveEnabled));
-                _actionsSection.Add(MakeBindRow("TWIST LEFT", () => _skater.twistleftkey, v => _skater.twistleftkey = v,
+                sec.Add(MakeBindRow("TWIST LEFT", () => _skater.twistleftkey, v => _skater.twistleftkey = v,
                     () => _skater.twistleftkeytype, v => _skater.twistleftkeytype = v, BindRowType.Pressable,
                     !hasFeatures || features.SkaterTwistEnabled));
-                _actionsSection.Add(MakeBindRow("TWIST RIGHT", () => _skater.twistrightkey, v => _skater.twistrightkey = v,
+                sec.Add(MakeBindRow("TWIST RIGHT", () => _skater.twistrightkey, v => _skater.twistrightkey = v,
                     () => _skater.twistrightkeytype, v => _skater.twistrightkeytype = v, BindRowType.Pressable,
                     !hasFeatures || features.SkaterTwistEnabled));
-                _actionsSection.Add(MakeBindRow("SLIDE DI LEFT", () => _skater.slideinfluenceleftkey, v => _skater.slideinfluenceleftkey = v,
+                sec.Add(MakeBindRow("SLIDE DI LEFT", () => _skater.slideinfluenceleftkey, v => _skater.slideinfluenceleftkey = v,
                     () => _skater.slideinfluenceleftkeytype, v => _skater.slideinfluenceleftkeytype = v, BindRowType.Holdable,
                     !hasFeatures || features.SkaterSlideInfluenceEnabled));
-                _actionsSection.Add(MakeBindRow("SLIDE DI RIGHT", () => _skater.slideinfluencerightkey, v => _skater.slideinfluencerightkey = v,
+                sec.Add(MakeBindRow("SLIDE DI RIGHT", () => _skater.slideinfluencerightkey, v => _skater.slideinfluencerightkey = v,
                     () => _skater.slideinfluencerightkeytype, v => _skater.slideinfluencerightkeytype = v, BindRowType.Holdable,
                     !hasFeatures || features.SkaterSlideInfluenceEnabled));
-                _actionsSection.Add(MakeBindRow("SLIDE DI FORWARD", () => _skater.slideinfluenceforwardkey, v => _skater.slideinfluenceforwardkey = v,
+                sec.Add(MakeBindRow("SLIDE DI FORWARD", () => _skater.slideinfluenceforwardkey, v => _skater.slideinfluenceforwardkey = v,
                     () => _skater.slideinfluenceforwardkeytype, v => _skater.slideinfluenceforwardkeytype = v, BindRowType.Holdable,
                     !hasFeatures || features.SkaterSlideInfluenceEnabled));
-                _actionsSection.Add(MakeBindRow("SLIDE DI BACKWARD", () => _skater.slideinfluencebackwardkey, v => _skater.slideinfluencebackwardkey = v,
+                sec.Add(MakeBindRow("SLIDE DI BACKWARD", () => _skater.slideinfluencebackwardkey, v => _skater.slideinfluencebackwardkey = v,
                     () => _skater.slideinfluencebackwardkeytype, v => _skater.slideinfluencebackwardkeytype = v, BindRowType.Holdable,
                     !hasFeatures || features.SkaterSlideInfluenceEnabled));
             }
             else if (_activeTab == ActiveTab.Goalie)
             {
-                // Goalie section
-                _actionsSection.Add(MakeBindRow("DIVE", () => _goalie.divekey, v => _goalie.divekey = v,
+                AddFreeBladeSection(goalie: true);
+
+                var sec = AddCfgSection(_actionsSection, "Goalie binds", "Used while in net. A row greyed out is one the server has switched off.");
+                sec.Add(MakeBindRow("DIVE", () => _goalie.divekey, v => _goalie.divekey = v,
                     () => _goalie.divekeytype, v => _goalie.divekeytype = v, BindRowType.Pressable,
                     !hasFeatures || features.GoalieDiveEnabled));
-                _actionsSection.Add(MakeBindRow("STANDING DASH LEFT", () => _goalie.standingdashleftkey, v => _goalie.standingdashleftkey = v,
+                sec.Add(MakeBindRow("STANDING DASH LEFT", () => _goalie.standingdashleftkey, v => _goalie.standingdashleftkey = v,
                     () => _goalie.standingdashleftkeytype, v => _goalie.standingdashleftkeytype = v, BindRowType.Pressable,
                     !hasFeatures || features.GoalieStandingDashEnabled));
-                _actionsSection.Add(MakeBindRow("STANDING DASH RIGHT", () => _goalie.standingdashrightkey, v => _goalie.standingdashrightkey = v,
+                sec.Add(MakeBindRow("STANDING DASH RIGHT", () => _goalie.standingdashrightkey, v => _goalie.standingdashrightkey = v,
                     () => _goalie.standingdashrightkeytype, v => _goalie.standingdashrightkeytype = v, BindRowType.Pressable,
                     !hasFeatures || features.GoalieStandingDashEnabled));
-                _actionsSection.Add(MakeBindRow("TWIST LEFT", () => _goalie.twistleftkey, v => _goalie.twistleftkey = v,
+                sec.Add(MakeBindRow("TWIST LEFT", () => _goalie.twistleftkey, v => _goalie.twistleftkey = v,
                     () => _goalie.twistleftkeytype, v => _goalie.twistleftkeytype = v, BindRowType.Pressable,
                     !hasFeatures || features.GoalieTwistEnabled));
-                _actionsSection.Add(MakeBindRow("TWIST RIGHT", () => _goalie.twistrightkey, v => _goalie.twistrightkey = v,
+                sec.Add(MakeBindRow("TWIST RIGHT", () => _goalie.twistrightkey, v => _goalie.twistrightkey = v,
                     () => _goalie.twistrightkeytype, v => _goalie.twistrightkeytype = v, BindRowType.Pressable,
                     !hasFeatures || features.GoalieTwistEnabled));
-                _actionsSection.Add(MakeBindRow("SLIDE DI LEFT", () => _goalie.slideinfluenceleftkey, v => _goalie.slideinfluenceleftkey = v,
+                sec.Add(MakeBindRow("SLIDE DI LEFT", () => _goalie.slideinfluenceleftkey, v => _goalie.slideinfluenceleftkey = v,
                     () => _goalie.slideinfluenceleftkeytype, v => _goalie.slideinfluenceleftkeytype = v, BindRowType.Holdable,
                     !hasFeatures || features.GoalieSlideInfluenceEnabled));
-                _actionsSection.Add(MakeBindRow("SLIDE DI RIGHT", () => _goalie.slideinfluencerightkey, v => _goalie.slideinfluencerightkey = v,
+                sec.Add(MakeBindRow("SLIDE DI RIGHT", () => _goalie.slideinfluencerightkey, v => _goalie.slideinfluencerightkey = v,
                     () => _goalie.slideinfluencerightkeytype, v => _goalie.slideinfluencerightkeytype = v, BindRowType.Holdable,
                     !hasFeatures || features.GoalieSlideInfluenceEnabled));
-                _actionsSection.Add(MakeBindRow("SLIDE DI FORWARD", () => _goalie.slideinfluenceforwardkey, v => _goalie.slideinfluenceforwardkey = v,
+                sec.Add(MakeBindRow("SLIDE DI FORWARD", () => _goalie.slideinfluenceforwardkey, v => _goalie.slideinfluenceforwardkey = v,
                     () => _goalie.slideinfluenceforwardkeytype, v => _goalie.slideinfluenceforwardkeytype = v, BindRowType.Holdable,
                     !hasFeatures || features.GoalieSlideInfluenceEnabled));
-                _actionsSection.Add(MakeBindRow("SLIDE DI BACKWARD", () => _goalie.slideinfluencebackwardkey, v => _goalie.slideinfluencebackwardkey = v,
+                sec.Add(MakeBindRow("SLIDE DI BACKWARD", () => _goalie.slideinfluencebackwardkey, v => _goalie.slideinfluencebackwardkey = v,
                     () => _goalie.slideinfluencebackwardkeytype, v => _goalie.slideinfluencebackwardkeytype = v, BindRowType.Holdable,
                     !hasFeatures || features.GoalieSlideInfluenceEnabled));
             }
             else if (_activeTab == ActiveTab.Server)
             {
-                // Server config display
                 BuildServerConfigUI();
             }
             else if (_activeTab == ActiveTab.Settings)
             {
-                // Settings tab
                 BuildSettingsUI();
             }
 
@@ -532,13 +432,8 @@ namespace DashFallMod.Client
 
             if (!hasFeatures && !isServer)
             {
-                var noDataLabel = new UITK.Label("Not connected to a server with CompetitiveAdjustments.");
-                noDataLabel.style.fontSize = 24;
-                noDataLabel.style.marginTop = 20;
-                noDataLabel.style.marginBottom = 20;
-                noDataLabel.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-                MakeReadable(noDataLabel);
-                _actionsSection.Add(noDataLabel);
+                _actionsSection.Add(DashFallTheme.MakeNote(
+                    "Not connected to a server with CompetitiveAdjustments.", DashFallTheme.TextDim));
                 return;
             }
 
@@ -564,13 +459,7 @@ namespace DashFallMod.Client
                 // Nudge the server now (the Update loop also retries every 2s) so
                 // opening the tab pulls the config promptly instead of waiting.
                 PoncePuck.Keybinds.ServerBridge.RequestConfigFull();
-
-                var waitLabel = new UITK.Label("Waiting for server config...");
-                waitLabel.style.fontSize = 20;
-                waitLabel.style.marginTop = 16;
-                waitLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
-                MakeReadable(waitLabel);
-                _actionsSection.Add(waitLabel);
+                _actionsSection.Add(DashFallTheme.MakeNote("Waiting for server config...", DashFallTheme.TextDim));
                 return;
             }
 
@@ -595,61 +484,69 @@ namespace DashFallMod.Client
             // section to the bottom of a long list.
             var btnRow = new UITK.VisualElement();
             btnRow.style.flexDirection = UITK.FlexDirection.Row;
-            btnRow.style.marginTop = 4;
-            btnRow.style.marginBottom = 8;
-            btnRow.Add(MakeServerEditorButton("SAVE & APPLY", OnServerSaveApply));
-            btnRow.Add(MakeServerEditorButton("EXPORT", OnServerExport));
-            var resetBtn = MakeServerEditorButton(_serverResetArmed ? "CONFIRM RESET" : "RESET TO DEFAULTS", OnServerResetDefaults);
-            if (_serverResetArmed) // tint red on the armed/confirm press
-                resetBtn.style.backgroundColor = new UITK.StyleColor(new Color(0.6f, 0.25f, 0.25f));
+            btnRow.style.marginBottom = 12;
+            btnRow.Add(MakeServerEditorButton("Save & apply", OnServerSaveApply, DashFallTheme.ButtonVariant.Primary));
+            btnRow.Add(MakeServerEditorButton("Export", OnServerExport, DashFallTheme.ButtonVariant.Secondary));
+
+            // The reset button is the one two-click destructive action here, so it carries the
+            // armed fill rather than the accent flash: the flash caches a base colour and would
+            // repaint over the armed state on the next pointer-leave.
+            var resetBtn = MakeServerEditorButton(_serverResetArmed ? "Confirm reset" : "Reset to defaults",
+                OnServerResetDefaults, DashFallTheme.ButtonVariant.Secondary, addFlash: false);
+            DashFallTheme.SetArmedLook(resetBtn, _serverResetArmed);
             btnRow.Add(resetBtn);
             body.Add(btnRow);
 
-            AddSectionHeaderTo(body, "MASTER ENABLES");
-            body.Add(MakeEditorToggleRow("Enable Dashfall", cfg.EnableDashfall, v => cfg.EnableDashfall = v));
-            body.Add(MakeEditorToggleRow("Enable CompAdjust", cfg.EnableCompAdjust, v => cfg.EnableCompAdjust = v));
-            body.Add(MakeEditorToggleRow("Enable CompTweaks", cfg.EnableCompTweaks, v => cfg.EnableCompTweaks = v));
+            var masters = AddCfgSection(body, "Master enables");
+            masters.Add(MakeEditorToggleRow("Enable Dashfall", cfg.EnableDashfall, v => cfg.EnableDashfall = v));
+            masters.Add(MakeEditorToggleRow("Enable CompAdjust", cfg.EnableCompAdjust, v => cfg.EnableCompAdjust = v));
+            masters.Add(MakeEditorToggleRow("Enable CompTweaks", cfg.EnableCompTweaks, v => cfg.EnableCompTweaks = v));
 
-            AddSectionHeaderTo(body, "DASHFALL");
-            BuildEditableSection(body, cfg.Dashfall);
-            AddSectionHeaderTo(body, "COMPADJUST");
-            BuildEditableSection(body, cfg.CompAdjust);
-            AddSectionHeaderTo(body, "COMPTWEAKS");
-            BuildEditableSection(body, cfg.CompTweaks);
+            BuildEditableSection(AddCfgSection(body, "Dashfall"), cfg.Dashfall);
+            BuildEditableSection(AddCfgSection(body, "CompAdjust"), cfg.CompAdjust);
+            BuildEditableSection(AddCfgSection(body, "CompTweaks"), cfg.CompTweaks);
 
             _actionsSection.Add(body);
         }
 
-        // Lock/status bar at the top of the SERVER tab.
+        // Lock/status bar at the top of the SERVER tab. It is a section card rather than a row,
+        // because it is the header for everything below it, not a setting.
         private void BuildServerLockBar(bool unlocked, bool authed, bool isServer)
         {
             var bar = new UITK.VisualElement();
             bar.style.flexDirection = UITK.FlexDirection.Column;
-            bar.style.marginTop = 4;
-            bar.style.marginBottom = 8;
+            bar.style.marginBottom = 14;
             bar.style.paddingLeft = 12; bar.style.paddingRight = 12;
-            bar.style.paddingTop = 8; bar.style.paddingBottom = 8;
-            bar.style.backgroundColor = new UITK.StyleColor(RowBg);
-            bar.style.borderTopLeftRadius = 4; bar.style.borderTopRightRadius = 4;
-            bar.style.borderBottomLeftRadius = 4; bar.style.borderBottomRightRadius = 4;
+            bar.style.paddingTop = 12; bar.style.paddingBottom = 12;
+            bar.style.backgroundColor = DashFallTheme.SectionBg;
+            DashFallTheme.SetUniformRadius(bar, DashFallTheme.SECTION_RADIUS);
+            DashFallTheme.SetUniformBorder(bar, 1f, DashFallTheme.SectionBorder);
 
             var topRow = new UITK.VisualElement();
             topRow.style.flexDirection = UITK.FlexDirection.Row;
             topRow.style.alignItems = UITK.Align.Center;
 
-            var title = new UITK.Label(unlocked ? "ADMIN EDITOR - UNLOCKED" : "ADMIN EDITOR - LOCKED");
-            title.style.fontSize = 22;
+            // The lock state is carried twice on purpose, by the section bar's hue and by the
+            // pill, because the bar reads at a glance while the pill spells it out. Danger for
+            // locked rather than a second warm tone: with orange as the ambient accent a warm
+            // "locked" and an orange "unlocked" would be the same colour to a quick look.
+            topRow.Add(DashFallTheme.MakeAccentBar(unlocked ? DashFallTheme.Accent : DashFallTheme.Danger));
+
+            var title = DashFallTheme.MakeLabel("ADMIN EDITOR", 16, DashFallTheme.TextPrimary);
+            title.style.unityFontStyleAndWeight = FontStyle.Bold;
+            title.style.letterSpacing = 3;
             title.style.flexGrow = 1;
-            MakeReadable(title);
-            // Set the lock-state color AFTER MakeReadable, which forces white;
-            // otherwise the green/orange coding here is silently overwritten.
-            title.style.color = unlocked ? new Color(0.5f, 0.9f, 0.5f) : new Color(0.95f, 0.75f, 0.4f);
             topRow.Add(title);
+
+            var statePill = DashFallTheme.MakeStatePill(unlocked ? "UNLOCKED" : "LOCKED", unlocked);
+            statePill.style.minWidth = 76;
+            statePill.style.marginLeft = 8;
+            topRow.Add(statePill);
 
             if (unlocked)
             {
                 // Drop back to read-only locally without disconnecting.
-                topRow.Add(MakeCompactButton("LOCK", () =>
+                topRow.Add(MakeCompactButton("Lock", () =>
                 {
                     _serverUserLocked = true;
                     RefreshActionsUI();
@@ -658,7 +555,7 @@ namespace DashFallMod.Client
             else if (authed)
             {
                 // Locked only because the user pressed LOCK; no password needed.
-                topRow.Add(MakeCompactButton("UNLOCK", () =>
+                topRow.Add(MakeCompactButton("Unlock", () =>
                 {
                     _serverUserLocked = false;
                     RefreshActionsUI();
@@ -677,18 +574,16 @@ namespace DashFallMod.Client
                     var pwRow = new UITK.VisualElement();
                     pwRow.style.flexDirection = UITK.FlexDirection.Row;
                     pwRow.style.alignItems = UITK.Align.Center;
-                    pwRow.style.marginTop = 8;
+                    pwRow.style.marginTop = 10;
 
                     // Masked by default (fixed length, so it does not even leak how
                     // long the password is) until the host presses SHOW.
                     string shown = _serverPasswordRevealed ? pwd : "••••••••";
-                    var pwLabel = new UITK.Label("Editor password: " + shown);
-                    pwLabel.style.fontSize = 16;
+                    var pwLabel = DashFallTheme.MakeLabel("Editor password: " + shown, 12, DashFallTheme.TextMuted);
                     pwLabel.style.flexGrow = 1;
-                    MakeReadable(pwLabel);
                     pwRow.Add(pwLabel);
 
-                    pwRow.Add(MakeCompactButton(_serverPasswordRevealed ? "HIDE" : "SHOW", () =>
+                    pwRow.Add(MakeCompactButton(_serverPasswordRevealed ? "Hide" : "Show", () =>
                     {
                         _serverPasswordRevealed = !_serverPasswordRevealed;
                         RefreshActionsUI();
@@ -704,18 +599,15 @@ namespace DashFallMod.Client
                 var entry = new UITK.VisualElement();
                 entry.style.flexDirection = UITK.FlexDirection.Row;
                 entry.style.alignItems = UITK.Align.Center;
-                entry.style.marginTop = 8;
+                entry.style.marginTop = 10;
 
                 var pw = new TextField { isPasswordField = true };
                 pw.style.flexGrow = 1;
-                pw.style.height = 34;
-                pw.style.marginRight = 8;
-                pw.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
-                pw.style.color = Color.white;
-                ForceUIFont(pw);
+                pw.style.height = 28;
+                DashFallTheme.StyleTextField(pw);
                 entry.Add(pw);
 
-                entry.Add(MakeCompactButton("UNLOCK", () =>
+                entry.Add(MakeCompactButton("Unlock", () =>
                 {
                     _serverUserLocked = false;
                     _serverStatusText = "Checking...";
@@ -729,12 +621,11 @@ namespace DashFallMod.Client
                 : PoncePuck.Keybinds.ServerBridge.AdminAuthReason;
             if (!string.IsNullOrEmpty(status))
             {
-                var st = new UITK.Label(status);
-                st.style.fontSize = 16;
-                st.style.marginTop = 8;
-                st.style.whiteSpace = UITK.WhiteSpace.Normal;
-                st.style.color = new Color(0.8f, 0.8f, 0.8f);
-                MakeReadable(st);
+                // Muted, not danger: this line carries progress ("Checking...", "Applied.") as
+                // often as it carries a refusal, and painting it red either way would cry wolf.
+                var st = DashFallTheme.MakeNote(status, DashFallTheme.TextMuted);
+                st.style.marginTop = 10;
+                st.style.marginBottom = 0;
                 bar.Add(st);
             }
 
@@ -786,43 +677,29 @@ namespace DashFallMod.Client
         // rebuild the whole tab on change (the editor is batched until SAVE).
         private UITK.VisualElement MakeEditorToggleRow(string title, bool currentValue, Action<bool> onChanged)
         {
-            var row = new UITK.VisualElement();
+            var row = DashFallTheme.MakeRow();
             MarkSearchable(row, title);
-            row.style.flexDirection = UITK.FlexDirection.Row;
-            row.style.alignItems = UITK.Align.Center;
-            // Match MakeFloatRow (50 / 24) so toggle and value rows in the editor
-            // are the same height and the list reads consistently.
-            row.style.height = 50;
-            row.style.marginBottom = 8;
-            row.style.backgroundColor = new UITK.StyleColor(RowBg);
-            row.style.paddingLeft = 12;
-            row.style.paddingRight = 12;
-
-            var label = new UITK.Label(title);
-            label.style.flexGrow = 1;
-            label.style.fontSize = 24;
-            MakeReadable(label);
-            row.Add(label);
+            row.Add(DashFallTheme.MakeRowText(title, null));
 
             var toggle = new Toggle { value = currentValue };
-            StyleConfigCheckbox(toggle);
+            DashFallTheme.StyleToggle(toggle);
             toggle.RegisterValueChangedCallback(evt => onChanged?.Invoke(evt.newValue));
             row.Add(toggle);
 
             return row;
         }
 
-        private UITK.Button MakeServerEditorButton(string text, Action onClick)
+        private UITK.Button MakeServerEditorButton(string text, Action onClick,
+            DashFallTheme.ButtonVariant variant, bool addFlash = true)
         {
             var b = new UITK.Button(onClick) { text = text };
-            b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-            b.style.height = 50;
+            DashFallTheme.StyleButton(b, variant);
             b.style.flexGrow = 1;
-            b.style.marginLeft = 4; b.style.marginRight = 4;
-            b.style.paddingLeft = 18; b.style.paddingRight = 18;
-            b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
-            MakeReadable(b);
-            AddButtonFlash(b);
+            b.style.marginLeft = 0;
+            b.style.marginRight = DashFallTheme.GAP;
+            // StylePrimaryButton already carries the flash, so adding another would register a
+            // second pair of handlers on the same button.
+            if (addFlash && variant != DashFallTheme.ButtonVariant.Primary) DashFallTheme.AddButtonFlash(b);
             return b;
         }
 
@@ -831,15 +708,8 @@ namespace DashFallMod.Client
         private UITK.Button MakeCompactButton(string text, Action onClick)
         {
             var b = new UITK.Button(onClick) { text = text };
-            b.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-            b.style.height = 34;
-            b.style.flexGrow = 0;
-            b.style.flexShrink = 0;
-            b.style.minWidth = 110;
-            b.style.paddingLeft = 14; b.style.paddingRight = 14;
-            b.style.backgroundColor = new UITK.StyleColor(ButtonBg);
-            MakeReadable(b);
-            AddButtonFlash(b);
+            DashFallTheme.StyleCompactButton(b);
+            DashFallTheme.AddButtonFlash(b);
             return b;
         }
 
@@ -951,31 +821,16 @@ namespace DashFallMod.Client
         // the server for the full config.
         private bool IsServerTabOpen()
         {
-            return _activeTab == ActiveTab.Server
-                && _dfPanel != null
-                && _dfPanel.style.display == UITK.DisplayStyle.Flex;
+            return _activeTab == ActiveTab.Server && _panelVisible;
         }
 
         private void RefreshServerTabIfOpen()
         {
-            if (_activeTab == ActiveTab.Server
-                && _dfPanel != null
-                && _dfPanel.style.display == UITK.DisplayStyle.Flex)
-            {
-                RefreshActionsUI();
-            }
+            if (IsServerTabOpen()) RefreshActionsUI();
         }
 
         private void BuildSettingsUI()
         {
-            var header = new UITK.Label("SETTINGS");
-            header.style.fontSize = 24;
-            header.style.unityFontStyleAndWeight = FontStyle.Bold;
-            header.style.marginBottom = 16;
-            header.style.marginTop = 8;
-            MakeReadable(header);
-            _actionsSection.Add(header);
-
             var clientConfig = DashFallConfigLoader.ClientConfig;
 
             // MINIMAP TWEAKS, PUCK SCALE (+X/Y/Z) and BUTTERFLY PAD OFFSET used to sit here.
@@ -985,50 +840,30 @@ namespace DashFallMod.Client
             // while disagreeing with every other client in the meantime; the config fields
             // remain as the sync slots they always were.
 
-            _actionsSection.Add(MakeToggleRow("FREE BLADE SPIN LOCK", "On (default) keeps the vanilla blade range. Turn OFF for endless spin with no stop at either end", clientConfig.FreeBladeSpinLockEnabled, (val) =>
-            {
-                clientConfig.FreeBladeSpinLockEnabled = val;
-                DashFallConfigLoader.SaveClientConfig(clientConfig);
-            }));
+            var trail = AddCfgSection(_actionsSection, "Sprint shoulder trail");
 
-            // One row, two draggers. Two independent float rows let the user push MIN above
-            // MAX, which produced an empty range that Mathf.Clamp resolves to a single
-            // value, and the blade froze there. A range control cannot express that state.
-            _actionsSection.Add(MakeRangeSliderRow(
-                "FREE BLADE SPIN RANGE",
-                "Lower and upper bound, used only while the lock above is on",
-                clientConfig.FreeBladeSpinMin, clientConfig.FreeBladeSpinMax,
-                FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax,
-                (lo, hi) =>
-                {
-                    clientConfig.FreeBladeSpinMin = lo;
-                    clientConfig.FreeBladeSpinMax = hi;
-                    DashFallConfigLoader.SaveClientConfig(clientConfig);
-                }));
-
-            // Sprint shoulder trail toggle (client preference)
-            _actionsSection.Add(MakeToggleRow("SPRINT SHOULDER TRAIL", "Show white shoulder trails while sprinting", clientConfig.EnableSprintShoulderTrail, (val) =>
+            trail.Add(MakeToggleRow("SPRINT SHOULDER TRAIL", "Show white shoulder trails while sprinting", clientConfig.EnableSprintShoulderTrail, (val) =>
             {
                 clientConfig.EnableSprintShoulderTrail = val;
                 DashFallConfigLoader.SaveClientConfig(clientConfig);
             }));
 
-            _actionsSection.Add(MakeFloatRow("TRAIL TIME", "Seconds the trail persists", clientConfig.SprintShoulderTrailTime, 0.05f, 3f, (val) =>
+            trail.Add(MakeFloatRow("TRAIL TIME", "Seconds the trail persists", clientConfig.SprintShoulderTrailTime, 0.05f, 3f, (val) =>
             {
                 clientConfig.SprintShoulderTrailTime = val;
                 DashFallConfigLoader.SaveClientConfig(clientConfig);
             }));
 
-            _actionsSection.Add(MakeFloatRow("TRAIL WIDTH", "Trail width in meters", clientConfig.SprintShoulderTrailWidth, 0.01f, 0.5f, (val) =>
+            trail.Add(MakeFloatRow("TRAIL WIDTH", "Trail width in meters", clientConfig.SprintShoulderTrailWidth, 0.01f, 0.5f, (val) =>
             {
                 clientConfig.SprintShoulderTrailWidth = val;
                 DashFallConfigLoader.SaveClientConfig(clientConfig);
             }));
 
             // Colour and opacity are one choice, so they are one control: the swatch shows
-            // the colour at its actual alpha over a checkerboard, and the hex field stays as
+            // the colour at its actual alpha over a light plate, and the hex field stays as
             // the typeable path for someone matching an exact team colour.
-            _actionsSection.Add(MakeColorPickerRow(
+            trail.Add(MakeColorPickerRow(
                 "TRAIL START COLOR", "Colour and opacity at the trail head",
                 clientConfig.SprintShoulderTrailStartColorHex, clientConfig.SprintShoulderTrailStartAlpha,
                 (hex, alpha) =>
@@ -1038,7 +873,7 @@ namespace DashFallMod.Client
                     DashFallConfigLoader.SaveClientConfig(clientConfig);
                 }));
 
-            _actionsSection.Add(MakeColorPickerRow(
+            trail.Add(MakeColorPickerRow(
                 "TRAIL END COLOR", "Colour and opacity at the trail tail",
                 clientConfig.SprintShoulderTrailEndColorHex, clientConfig.SprintShoulderTrailEndAlpha,
                 (hex, alpha) =>
@@ -1052,7 +887,9 @@ namespace DashFallMod.Client
             // everything below it only appears once debug is on, because those toggles paint
             // collider geometry over the rink and exist for diagnosing this mod, not for
             // playing with.
-            _actionsSection.Add(MakeToggleRow("CLIENT DEBUG LOG", "Enable debug logging and show the debug tools below", clientConfig.EnableClientDebug, (val) =>
+            var debug = AddCfgSection(_actionsSection, "Debug", "Diagnostics for this mod. The clip brush rows paint collider geometry over the rink.");
+
+            debug.Add(MakeToggleRow("CLIENT DEBUG LOG", "Enable debug logging and show the debug tools below", clientConfig.EnableClientDebug, (val) =>
             {
                 clientConfig.EnableClientDebug = val;
 
@@ -1074,14 +911,14 @@ namespace DashFallMod.Client
 
             if (clientConfig.EnableClientDebug)
             {
-                _actionsSection.Add(MakeToggleRow("SHOW ARENA CLIP BRUSHES", "Visualise arena/board collider geometry (debug)", clientConfig.ShowArenaClipBrushes, (val) =>
+                debug.Add(MakeToggleRow("SHOW ARENA CLIP BRUSHES", "Visualise arena/board collider geometry (debug)", clientConfig.ShowArenaClipBrushes, (val) =>
                 {
                     clientConfig.ShowArenaClipBrushes = val;
                     DashFallConfigLoader.SaveClientConfig(clientConfig);
                     CompetitivePuckTweaks.src.ClientClipBrushes.ApplyArena(val);
                 }));
 
-                _actionsSection.Add(MakeToggleRow("SHOW PLAYER CLIP BRUSHES", "Visualise player body collider geometry (debug)", clientConfig.ShowPlayerClipBrushes, (val) =>
+                debug.Add(MakeToggleRow("SHOW PLAYER CLIP BRUSHES", "Visualise player body collider geometry (debug)", clientConfig.ShowPlayerClipBrushes, (val) =>
                 {
                     clientConfig.ShowPlayerClipBrushes = val;
                     DashFallConfigLoader.SaveClientConfig(clientConfig);
@@ -1089,79 +926,39 @@ namespace DashFallMod.Client
                 }));
 
                 // Preview the out-of-date version popup without a real Workshop update.
-                _actionsSection.Add(MakeButtonRow("TEST VERSION POPUP", "Preview the 'mod out of date' popup", "SHOW",
+                debug.Add(MakeButtonRow("TEST VERSION POPUP", "Preview the 'mod out of date' popup", "Show",
                     () => ForceShowVersionPopupForTest()));
 
                 // Its own row, because the server-rejected wording is not reachable by
                 // playing: see ForceShowServerRejectedForTest.
-                _actionsSection.Add(MakeButtonRow("TEST SERVER-REJECTED POPUP", "Preview the 'this server needs a newer build' popup", "SHOW",
+                debug.Add(MakeButtonRow("TEST SERVER-REJECTED POPUP", "Preview the 'this server needs a newer build' popup", "Show",
                     () => ForceShowServerRejectedForTest()));
             }
 
-            // Check if connected to server
-            var features = PoncePuck.Keybinds.ServerBridge.ReceivedFeatures;
+            // Closing note about where the rest of the settings live. Above the cards would be
+            // wrong here: it is a footnote, not a preamble.
             bool hasFeatures = PoncePuck.Keybinds.ServerBridge.HasReceivedFeatures;
-            
-            if (!hasFeatures)
-            {
-                var noServerLabel = new UITK.Label("Connect to a server to see settings.");
-                noServerLabel.style.fontSize = 18;
-                noServerLabel.style.marginTop = 20;
-                noServerLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
-                MakeReadable(noServerLabel);
-                _actionsSection.Add(noServerLabel);
-            }
-            else
-            {
-                var infoLabel = new UITK.Label("Keybinds for features are in the\nSKATER and GOALIE tabs.\n\nSee SERVER tab for enabled features.");
-                infoLabel.style.fontSize = 18;
-                infoLabel.style.marginTop = 20;
-                infoLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
-                infoLabel.style.whiteSpace = UITK.WhiteSpace.Normal;
-                MakeReadable(infoLabel);
-                _actionsSection.Add(infoLabel);
-            }
+            var note = hasFeatures
+                ? DashFallTheme.MakeNote(
+                    "Keybinds for features are in the SKATER and GOALIE tabs. The SERVER tab shows which features this server has enabled.",
+                    DashFallTheme.TextMuted)
+                : DashFallTheme.MakeNote("Connect to a server to see which features are enabled.", DashFallTheme.TextDim);
+            note.style.marginTop = 4;
+            _actionsSection.Add(note);
         }
 
         private UITK.VisualElement MakeToggleRow(string title, string description, bool currentValue, Action<bool> onChanged)
         {
-            var row = new UITK.VisualElement();
+            var row = DashFallTheme.MakeRow();
             MarkSearchable(row, title);
-            row.style.flexDirection = UITK.FlexDirection.Row;
-            row.style.alignItems = UITK.Align.Center;
-            row.style.height = 50;
-            row.style.marginBottom = 8;
-            row.style.backgroundColor = new UITK.StyleColor(RowBg);
-            row.style.paddingLeft = 12;
-            row.style.paddingRight = 12;
+            row.Add(DashFallTheme.MakeRowText(title, description));
 
-            var textContainer = new UITK.VisualElement();
-            textContainer.style.flexGrow = 1;
-            textContainer.style.flexDirection = UITK.FlexDirection.Column;
-            textContainer.style.justifyContent = UITK.Justify.Center;
-
-            var label = new UITK.Label(title);
-            label.style.fontSize = 24;
-            MakeReadable(label);
-            textContainer.Add(label);
-
-            if (!string.IsNullOrEmpty(description))
+            var toggle = new Toggle { value = currentValue };
+            DashFallTheme.StyleToggle(toggle);
+            toggle.RegisterValueChangedCallback(evt =>
             {
-                var descLabel = new UITK.Label(description);
-                descLabel.style.fontSize = 16;
-                descLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
-                ForceUIFont(descLabel);
-                textContainer.Add(descLabel);
-            }
-            
-            row.Add(textContainer);
-
-            var toggle = new Toggle();
-            toggle.value = currentValue;
-            StyleConfigCheckbox(toggle);
-            toggle.RegisterValueChangedCallback(evt => {
                 onChanged?.Invoke(evt.newValue);
-                RefreshActionsUI(); // Refresh to show/hide keybind section
+                RefreshActionsUI(); // Refresh to show/hide dependent rows
             });
             row.Add(toggle);
 
@@ -1172,44 +969,13 @@ namespace DashFallMod.Client
         // frame as MakeToggleRow but the control is a Button instead of a checkbox.
         private UITK.VisualElement MakeButtonRow(string title, string description, string buttonText, Action onClick)
         {
-            var row = new UITK.VisualElement();
+            var row = DashFallTheme.MakeRow();
             MarkSearchable(row, title);
-            row.style.flexDirection = UITK.FlexDirection.Row;
-            row.style.alignItems = UITK.Align.Center;
-            row.style.height = 50;
-            row.style.marginBottom = 8;
-            row.style.backgroundColor = new UITK.StyleColor(RowBg);
-            row.style.paddingLeft = 12;
-            row.style.paddingRight = 12;
+            row.Add(DashFallTheme.MakeRowText(title, description));
 
-            var textContainer = new UITK.VisualElement();
-            textContainer.style.flexGrow = 1;
-            textContainer.style.flexDirection = UITK.FlexDirection.Column;
-            textContainer.style.justifyContent = UITK.Justify.Center;
-
-            var label = new UITK.Label(title);
-            label.style.fontSize = 24;
-            MakeReadable(label);
-            textContainer.Add(label);
-
-            if (!string.IsNullOrEmpty(description))
-            {
-                var descLabel = new UITK.Label(description);
-                descLabel.style.fontSize = 16;
-                descLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
-                ForceUIFont(descLabel);
-                textContainer.Add(descLabel);
-            }
-
-            row.Add(textContainer);
-
-            var btn = new UITK.Button { text = buttonText };
-            btn.style.height = 34;
-            btn.style.minWidth = 90;
-            btn.style.backgroundColor = new UITK.StyleColor(TabInactiveBg);
-            btn.style.color = Color.white;
-            ForceUIFont(btn);
-            btn.clicked += () => onClick?.Invoke();
+            var btn = new UITK.Button(() => onClick?.Invoke()) { text = buttonText };
+            DashFallTheme.StyleCompactButton(btn);
+            DashFallTheme.AddButtonFlash(btn);
             row.Add(btn);
 
             return row;
@@ -1217,52 +983,13 @@ namespace DashFallMod.Client
 
         private UITK.VisualElement MakeFloatRow(string title, string description, float currentValue, float min, float max, Action<float> onChanged)
         {
-            var row = new UITK.VisualElement();
+            var row = DashFallTheme.MakeRow();
             MarkSearchable(row, title);
-            row.style.flexDirection = UITK.FlexDirection.Row;
-            row.style.alignItems = UITK.Align.Center;
-            row.style.height = 50;
-            row.style.marginBottom = 8;
-            row.style.backgroundColor = new UITK.StyleColor(RowBg);
-            row.style.paddingLeft = 12;
-            row.style.paddingRight = 12;
-
-            var textContainer = new UITK.VisualElement();
-            textContainer.style.flexGrow = 1;
-            textContainer.style.flexShrink = 1;
-            textContainer.style.minWidth = 0;
-            textContainer.style.flexDirection = UITK.FlexDirection.Column;
-            textContainer.style.justifyContent = UITK.Justify.Center;
-
-            var label = new UITK.Label(title);
-            label.style.fontSize = 24;
-            MakeReadable(label);
-            textContainer.Add(label);
-
-            if (!string.IsNullOrEmpty(description))
-            {
-                var descLabel = new UITK.Label(description);
-                descLabel.style.fontSize = 16;
-                descLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
-                descLabel.style.whiteSpace = UITK.WhiteSpace.NoWrap;
-                descLabel.style.textOverflow = UITK.TextOverflow.Ellipsis;
-                ForceUIFont(descLabel);
-                textContainer.Add(descLabel);
-            }
-
-            row.Add(textContainer);
+            row.Add(DashFallTheme.MakeRowText(title, description));
 
             var input = new TextField();
             input.value = currentValue.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
-            input.style.width = 110;
-            input.style.minWidth = 110;
-            input.style.flexShrink = 0;
-            input.style.height = 34;
-            input.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-            input.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
-            input.style.color = Color.white;
-            ForceUIFont(input);
-            input.RegisterCallback<FocusInEvent>(_ => input.schedule.Execute(() => input.SelectAll()));
+            DashFallTheme.StyleValueField(input, 96f, true);
             input.RegisterCallback<FocusOutEvent>(_ =>
             {
                 if (!float.TryParse(input.value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
@@ -1281,11 +1008,7 @@ namespace DashFallMod.Client
             return row;
         }
 
-        // MakeSliderRow was the single-value slider row. Its last callers were the trail alpha
-        // rows, which are now part of MakeColorPickerRow. StyleSliderControl survives
-        // because the colour picker's channel sliders use it.
-
-                /// <summary>
+        /// <summary>
         /// One row carrying BOTH ends of a range on a single track with two draggers.
         ///
         /// This replaces the pair of independent float rows that used to set the free blade
@@ -1304,40 +1027,9 @@ namespace DashFallMod.Client
             float limitMin, float limitMax,
             Action<float, float> onChanged)
         {
-            var row = new UITK.VisualElement();
+            var row = DashFallTheme.MakeRow();
             MarkSearchable(row, title);
-            row.style.flexDirection = UITK.FlexDirection.Row;
-            row.style.alignItems = UITK.Align.Center;
-            row.style.height = 50;
-            row.style.marginBottom = 8;
-            row.style.backgroundColor = new UITK.StyleColor(RowBg);
-            row.style.paddingLeft = 12;
-            row.style.paddingRight = 12;
-
-            // Same 300px label column the other value rows use, so controls line up down the page.
-            var textContainer = new UITK.VisualElement();
-            textContainer.style.minWidth = 300;
-            textContainer.style.maxWidth = 300;
-            textContainer.style.flexDirection = UITK.FlexDirection.Column;
-            textContainer.style.justifyContent = UITK.Justify.Center;
-
-            var label = new UITK.Label(title);
-            label.style.fontSize = 24;
-            MakeReadable(label);
-            textContainer.Add(label);
-
-            if (!string.IsNullOrEmpty(description))
-            {
-                var descLabel = new UITK.Label(description);
-                descLabel.style.fontSize = 16;
-                descLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
-                descLabel.style.whiteSpace = UITK.WhiteSpace.NoWrap;
-                descLabel.style.textOverflow = UITK.TextOverflow.Ellipsis;
-                ForceUIFont(descLabel);
-                textContainer.Add(descLabel);
-            }
-
-            row.Add(textContainer);
+            row.Add(DashFallTheme.MakeRowText(title, description));
 
             // Order the incoming pair rather than trusting it: a config written by the old
             // two-row UI can already be crossed, and that saved state is exactly the bug.
@@ -1352,9 +1044,17 @@ namespace DashFallMod.Client
             slider.style.flexBasis = 0;
             // Wider than the single sliders' 6, because each handle overhangs its end of the
             // track by half its width and would otherwise touch the number fields.
-            slider.style.marginLeft = RangeThumbSize / 2f + 2f;
-            slider.style.marginRight = RangeThumbSize / 2f + 2f;
-            StyleMinMaxSliderControl(slider);
+            slider.style.marginLeft = DashFallTheme.SLIDER_THUMB / 2f + 2f;
+            slider.style.marginRight = DashFallTheme.SLIDER_THUMB / 2f + 2f;
+            DashFallTheme.StyleMinMaxSlider(slider);
+
+            // A fixed-width control cluster, because a MinMaxSlider maps pointer x to a value
+            // and needs a stable track; the text column takes whatever is left.
+            var controls = new UITK.VisualElement();
+            controls.style.flexDirection = UITK.FlexDirection.Row;
+            controls.style.alignItems = UITK.Align.Center;
+            controls.style.flexShrink = 0;
+            controls.style.width = 330;
 
             bool syncing = false;
 
@@ -1403,9 +1103,10 @@ namespace DashFallMod.Client
                 Commit(slider.value.x, parsed, writeSlider: true);
             });
 
-            row.Add(lowField);
-            row.Add(slider);
-            row.Add(highField);
+            controls.Add(lowField);
+            controls.Add(slider);
+            controls.Add(highField);
+            row.Add(controls);
 
             // Normalise a crossed or out-of-range config on first build, so the file stops
             // carrying the bad state as soon as the user opens the settings page.
@@ -1429,168 +1130,8 @@ namespace DashFallMod.Client
         {
             var field = new TextField();
             field.value = FormatRangeNumber(initial);
-            field.style.minWidth = 58;
-            field.style.maxWidth = 58;
-            field.style.maxHeight = 30;
-            field.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleRight);
-            field.style.marginLeft = 6;
-            field.style.marginRight = 6;
-            field.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
-            field.style.color = Color.white;
-            ForceUIFont(field);
+            DashFallTheme.StyleValueField(field, 54f, true);
             return field;
-        }
-
-        // Geometry for the range slider, shared so the thumb offsets stay derived from the
-        // rail rather than hand-tuned against it.
-        private const float RangeRowHeight = 26f;
-        private const float RangeRailHeight = 4f;
-        private const float RangeThumbSize = 16f;
-        private const float RangeRailTop = (RangeRowHeight - RangeRailHeight) / 2f;              // 11
-        private const float RangeThumbTop = -(RangeThumbSize - RangeRailHeight) / 2f;            // -6
-
-        /// <summary>
-        /// MinMaxSlider styled to match the single-value sliders: a 4px translucent rail,
-        /// the selected span filled on top of it, and a round white handle at each end.
-        ///
-        /// The part names are the five the shipped runtime theme actually defines
-        /// (unity-min-max-slider__input/tracker/dragger/min-thumb/max-thumb). The __input
-        /// container matters and was the thing making this look wrong: it is the box the
-        /// other three are positioned inside, so leaving it at its default height left the
-        /// rail measuring against something other than the 26px row and the handles sitting
-        /// off the rail.
-        ///
-        /// The two thumbs are children of the DRAGGER, not of the input, so they inherit the
-        /// dragger's box. That is why the dragger cannot simply be made handle-height: it
-        /// would drag the thumbs with it. The dragger is kept at rail height and the thumbs
-        /// are pulled back out to centre with an explicit negative top, and anchored half
-        /// their width past each edge so they sit centred on the ends of the span.
-        /// </summary>
-        private static void StyleMinMaxSliderControl(UITK.MinMaxSlider s)
-        {
-            s.style.height = RangeRowHeight;
-
-            var input = s.Q<UITK.VisualElement>(className: "unity-min-max-slider__input")
-                     ?? s.Q<UITK.VisualElement>(className: "unity-base-field__input");
-            if (input != null)
-            {
-                input.style.height = RangeRowHeight;
-                input.style.flexGrow = 1;
-                input.style.marginLeft = 0;
-                input.style.marginRight = 0;
-                input.style.paddingLeft = 0;
-                input.style.paddingRight = 0;
-                // The handles overhang the span by half their width at each end, and the
-                // input is their clipping box.
-                input.style.overflow = UITK.Overflow.Visible;
-            }
-
-            var tracker = s.Q<UITK.VisualElement>(className: "unity-min-max-slider__tracker");
-            if (tracker != null)
-            {
-                tracker.style.position = UITK.Position.Absolute;
-                tracker.style.left = 0;
-                tracker.style.right = 0;
-                tracker.style.top = RangeRailTop;
-                tracker.style.height = RangeRailHeight;
-                tracker.style.marginTop = 0;
-                tracker.style.backgroundColor = new UITK.StyleColor(new Color(1f, 1f, 1f, 0.35f));
-                SetUniformRadius(tracker, RangeRailHeight / 2f);
-                SetNoBorder(tracker);
-            }
-
-            // The selected span. Left/right are owned by the drag logic and must not be
-            // touched here, only the vertical box and the paint.
-            var dragger = s.Q<UITK.VisualElement>(className: "unity-min-max-slider__dragger");
-            if (dragger != null)
-            {
-                dragger.style.top = RangeRailTop;
-                dragger.style.height = RangeRailHeight;
-                dragger.style.marginTop = 0;
-                dragger.style.backgroundColor = new UITK.StyleColor(Color.white);
-                SetUniformRadius(dragger, RangeRailHeight / 2f);
-                SetNoBorder(dragger);
-                dragger.style.overflow = UITK.Overflow.Visible;
-            }
-
-            StyleRangeHandle(s.Q<UITK.VisualElement>(className: "unity-min-max-slider__min-thumb"), isMin: true);
-            StyleRangeHandle(s.Q<UITK.VisualElement>(className: "unity-min-max-slider__max-thumb"), isMin: false);
-        }
-
-        private static void StyleRangeHandle(UITK.VisualElement handle, bool isMin)
-        {
-            if (handle == null) return;
-
-            handle.style.position = UITK.Position.Absolute;
-            handle.style.width = RangeThumbSize;
-            handle.style.height = RangeThumbSize;
-            handle.style.top = RangeThumbTop;
-
-            // Centred on its end of the span rather than butted against it, so the pair
-            // reads as two grab points on one bar.
-            if (isMin) handle.style.left = -RangeThumbSize / 2f;
-            else handle.style.right = -RangeThumbSize / 2f;
-
-            handle.style.backgroundColor = new UITK.StyleColor(Color.white);
-            SetUniformRadius(handle, RangeThumbSize / 2f);
-            SetNoBorder(handle);
-        }
-
-        private static void SetUniformRadius(UITK.VisualElement element, float radius)
-        {
-            element.style.borderTopLeftRadius = radius;
-            element.style.borderTopRightRadius = radius;
-            element.style.borderBottomLeftRadius = radius;
-            element.style.borderBottomRightRadius = radius;
-        }
-
-        // The theme gives these parts a border that reads as a grey outline against the
-        // row background once they are recoloured white.
-        private static void SetNoBorder(UITK.VisualElement element)
-        {
-            element.style.borderTopWidth = 0;
-            element.style.borderBottomWidth = 0;
-            element.style.borderLeftWidth = 0;
-            element.style.borderRightWidth = 0;
-        }
-
-        // PlayerQoL slider look: thin translucent white rail with a large round
-        // white thumb.
-        private static void StyleSliderControl(UITK.Slider s)
-        {
-            s.style.height = 26;
-            s.style.marginLeft = 6;
-            s.style.marginRight = 6;
-
-            // Cover legacy, current, and base-slider USS class names - Unity
-            // renames these between versions and only one will match per build.
-            var tracker = s.Q<UITK.VisualElement>(className: "unity-base-slider__tracker")
-                       ?? s.Q<UITK.VisualElement>(className: "unity-slider__tracker")
-                       ?? s.Q<UITK.VisualElement>(className: "unity-tracker");
-            var dragger = s.Q<UITK.VisualElement>(className: "unity-base-slider__dragger")
-                       ?? s.Q<UITK.VisualElement>(className: "unity-slider__dragger")
-                       ?? s.Q<UITK.VisualElement>(className: "unity-dragger");
-            if (tracker != null)
-            {
-                tracker.style.height = 4;
-                tracker.style.marginTop = 11; // vertically center the 4px rail in 26px
-                tracker.style.backgroundColor = new UITK.StyleColor(new Color(1f, 1f, 1f, 0.35f));
-                tracker.style.borderTopLeftRadius = 2;
-                tracker.style.borderTopRightRadius = 2;
-                tracker.style.borderBottomLeftRadius = 2;
-                tracker.style.borderBottomRightRadius = 2;
-            }
-            if (dragger != null)
-            {
-                dragger.style.width = 18;
-                dragger.style.height = 18;
-                dragger.style.marginTop = 4; // center on the rail
-                dragger.style.backgroundColor = new UITK.StyleColor(Color.white);
-                dragger.style.borderTopLeftRadius = 9;
-                dragger.style.borderTopRightRadius = 9;
-                dragger.style.borderBottomLeftRadius = 9;
-                dragger.style.borderBottomRightRadius = 9;
-            }
         }
 
         /// <summary>
@@ -1616,53 +1157,30 @@ namespace DashFallMod.Client
             Color startColor = ParseHexOrWhite(currentHex);
             float alpha = Mathf.Clamp01(currentAlpha);
 
-            // The row is a column: the header line, then the picker that expands under it.
-            var container = new UITK.VisualElement();
-            MarkSearchable(container, title);
+            // The row is a column: the header line, then the picker that expands under it. The
+            // hover swap is left off, because a row that grows a panel under it is already
+            // signposted by its PICK button.
+            var container = DashFallTheme.MakeRow(false);
             container.style.flexDirection = UITK.FlexDirection.Column;
-            container.style.marginBottom = 8;
-            container.style.backgroundColor = new UITK.StyleColor(RowBg);
-            container.style.paddingLeft = 12;
-            container.style.paddingRight = 12;
+            container.style.alignItems = UITK.Align.Stretch;
+            MarkSearchable(container, title);
 
             var header = new UITK.VisualElement();
             header.style.flexDirection = UITK.FlexDirection.Row;
             header.style.alignItems = UITK.Align.Center;
-            header.style.height = 50;
-
-            var textContainer = new UITK.VisualElement();
-            textContainer.style.flexGrow = 1;
-            textContainer.style.flexShrink = 1;
-            textContainer.style.minWidth = 0;
-            textContainer.style.flexDirection = UITK.FlexDirection.Column;
-            textContainer.style.justifyContent = UITK.Justify.Center;
-
-            var label = new UITK.Label(title);
-            label.style.fontSize = 24;
-            MakeReadable(label);
-            textContainer.Add(label);
-
-            if (!string.IsNullOrEmpty(description))
-            {
-                var descLabel = new UITK.Label(description);
-                descLabel.style.fontSize = 16;
-                descLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
-                descLabel.style.whiteSpace = UITK.WhiteSpace.NoWrap;
-                descLabel.style.textOverflow = UITK.TextOverflow.Ellipsis;
-                ForceUIFont(descLabel);
-                textContainer.Add(descLabel);
-            }
-
-            header.Add(textContainer);
+            header.Add(DashFallTheme.MakeRowText(title, description));
 
             // Alpha is shown by layering the colour over a light plate: at alpha 0 the
             // swatch reads as the plate, which is the honest preview of an invisible trail.
+            // The plate is TextMuted rather than a chrome tone because its job is to be light
+            // enough for a translucent colour to visibly sit on.
             var swatchPlate = new UITK.VisualElement();
-            swatchPlate.style.width = 54;
-            swatchPlate.style.height = 34;
+            swatchPlate.style.width = 48;
+            swatchPlate.style.height = 28;
             swatchPlate.style.flexShrink = 0;
-            swatchPlate.style.backgroundColor = new UITK.StyleColor(new Color(0.55f, 0.55f, 0.55f));
-            StyleSwatchBorder(swatchPlate);
+            swatchPlate.style.backgroundColor = DashFallTheme.TextMuted;
+            DashFallTheme.SetUniformRadius(swatchPlate, 4f);
+            DashFallTheme.SetUniformBorder(swatchPlate, 1f, DashFallTheme.PanelBorder);
 
             var swatchFill = new UITK.VisualElement();
             swatchFill.style.flexGrow = 1;
@@ -1670,24 +1188,13 @@ namespace DashFallMod.Client
 
             var hexField = new TextField();
             hexField.value = NormalizeHex(currentHex) ?? "#FFFFFF";
-            hexField.style.width = 110;
-            hexField.style.minWidth = 110;
-            hexField.style.flexShrink = 0;
-            hexField.style.height = 34;
-            hexField.style.marginLeft = 8;
-            hexField.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-            hexField.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
-            hexField.style.color = Color.white;
+            DashFallTheme.StyleValueField(hexField, 88f, true);
             hexField.style.whiteSpace = UITK.WhiteSpace.NoWrap;
-            ForceUIFont(hexField);
 
-            var toggleButton = new Button { text = "PICK" };
-            toggleButton.style.width = 76;
-            toggleButton.style.height = 34;
-            toggleButton.style.flexShrink = 0;
-            toggleButton.style.marginLeft = 8;
-            toggleButton.style.marginRight = 0;
-            ForceUIFont(toggleButton);
+            var toggleButton = new Button { text = "Pick" };
+            DashFallTheme.StyleCompactButton(toggleButton);
+            toggleButton.style.minWidth = 76;
+            DashFallTheme.AddButtonFlash(toggleButton);
 
             header.Add(swatchPlate);
             header.Add(hexField);
@@ -1697,7 +1204,7 @@ namespace DashFallMod.Client
             var picker = new UITK.VisualElement();
             picker.style.flexDirection = UITK.FlexDirection.Column;
             picker.style.display = UITK.DisplayStyle.None;
-            picker.style.paddingBottom = 10;
+            picker.style.marginTop = 8;
             container.Add(picker);
 
             Color.RGBToHSV(startColor, out float h, out float s, out float v);
@@ -1717,7 +1224,7 @@ namespace DashFallMod.Client
                 string hex = "#" + ColorUtility.ToHtmlStringRGB(rgb);
 
                 syncing = true;
-                swatchFill.style.backgroundColor = new UITK.StyleColor(new Color(rgb.r, rgb.g, rgb.b, a));
+                swatchFill.style.backgroundColor = new Color(rgb.r, rgb.g, rgb.b, a);
                 if (writeHexField) hexField.value = hex;
                 if (writeSliders)
                 {
@@ -1770,7 +1277,7 @@ namespace DashFallMod.Client
 
             // Paint the initial swatch without reporting a change, so merely opening the
             // settings page does not rewrite the config file.
-            swatchFill.style.backgroundColor = new UITK.StyleColor(new Color(startColor.r, startColor.g, startColor.b, alpha));
+            swatchFill.style.backgroundColor = new Color(startColor.r, startColor.g, startColor.b, alpha);
 
             return container;
         }
@@ -1782,19 +1289,6 @@ namespace DashFallMod.Client
             return Color.white;
         }
 
-        private static void StyleSwatchBorder(UITK.VisualElement element)
-        {
-            element.style.borderTopWidth = 2;
-            element.style.borderBottomWidth = 2;
-            element.style.borderLeftWidth = 2;
-            element.style.borderRightWidth = 2;
-            var border = new UITK.StyleColor(new Color(1f, 1f, 1f, 0.45f));
-            element.style.borderTopColor = border;
-            element.style.borderBottomColor = border;
-            element.style.borderLeftColor = border;
-            element.style.borderRightColor = border;
-        }
-
         /// <summary>One labelled channel slider inside an expanded colour picker.</summary>
         private UITK.Slider MakePickerSlider(
             string caption, float value, float min, float max, UITK.VisualElement parent)
@@ -1802,21 +1296,20 @@ namespace DashFallMod.Client
             var line = new UITK.VisualElement();
             line.style.flexDirection = UITK.FlexDirection.Row;
             line.style.alignItems = UITK.Align.Center;
-            line.style.height = 34;
+            line.style.height = 30;
 
-            var caLabel = new UITK.Label(caption);
-            caLabel.style.fontSize = 16;
-            caLabel.style.minWidth = 120;
-            caLabel.style.maxWidth = 120;
-            caLabel.style.color = new Color(0.7f, 0.7f, 0.7f);
-            ForceUIFont(caLabel);
+            var caLabel = DashFallTheme.MakeLabel(caption, 11, DashFallTheme.TextMuted);
+            caLabel.style.unityFontStyleAndWeight = FontStyle.Bold;
+            caLabel.style.letterSpacing = 1;
+            caLabel.style.minWidth = 96;
+            caLabel.style.maxWidth = 96;
             line.Add(caLabel);
 
             var slider = new UITK.Slider(min, max);
             slider.style.flexGrow = 1;
             slider.style.flexBasis = 0;
             slider.value = Mathf.Clamp(value, min, max);
-            StyleSliderControl(slider);
+            DashFallTheme.StyleSlider(slider);
             line.Add(slider);
 
             parent.Add(line);
@@ -1826,7 +1319,7 @@ namespace DashFallMod.Client
         // MakeHexColorRow was replaced by MakeColorPickerRow, which keeps the same hex field
         // and the same NormalizeHex round-trip but adds the swatch and the HSV sliders.
 
-                // MirrorPuckScaleToCompanion and ApplyLocalPuckScale lived here to give the puck
+        // MirrorPuckScaleToCompanion and ApplyLocalPuckScale lived here to give the puck
         // scale sliders live feedback while dragging. Both existed only for those rows.
         // The sync receive path in Companion.PluginCore does its own mirroring and its own
         // re-apply, so nothing else needed them.
@@ -1838,34 +1331,6 @@ namespace DashFallMod.Client
             if (!normalized.StartsWith("#")) normalized = "#" + normalized;
             if (!ColorUtility.TryParseHtmlString(normalized, out var parsed)) return null;
             return "#" + ColorUtility.ToHtmlStringRGB(parsed);
-        }
-
-        private void AddSectionHeader(string text) => AddSectionHeaderTo(_actionsSection, text);
-
-        private void AddSectionHeaderTo(UITK.VisualElement parent, string text)
-        {
-            var header = new UITK.Label(text);
-            header.AddToClassList("cfg-header");
-            header.style.fontSize = 24;
-            header.style.marginTop = 16;
-            header.style.marginBottom = 8;
-            header.style.color = new Color(0.9f, 0.9f, 0.5f);
-            ForceUIFont(header);
-            parent.Add(header);
-        }
-
-        private void AddSubHeader(string text) => AddSubHeaderTo(_actionsSection, text);
-
-        private void AddSubHeaderTo(UITK.VisualElement parent, string text)
-        {
-            var header = new UITK.Label(text);
-            header.style.fontSize = 24;
-            header.style.marginTop = 10;
-            header.style.marginBottom = 6;
-            header.style.marginLeft = 8;
-            header.style.color = new Color(0.7f, 0.7f, 0.9f);
-            ForceUIFont(header);
-            parent.Add(header);
         }
 
         // Turns a config field name into a readable label (also used for float /
@@ -1897,45 +1362,38 @@ namespace DashFallMod.Client
         // Enum to distinguish between pressable (action) and holdable (movement) controls
         private enum BindRowType { Pressable, Holdable }
 
-        private UITK.VisualElement MakeBindRow(string action, Func<List<string>> getter, Action<List<string>> setter, 
+        private UITK.VisualElement MakeBindRow(string action, Func<List<string>> getter, Action<List<string>> setter,
             Func<string> typeGetter, Action<string> typeSetter, BindRowType rowType, bool enabled = true)
         {
-            var row = new UITK.VisualElement();
+            // Hover only when the row is live: a disabled row that lights up under the cursor
+            // invites a click, and the hover swap would also repaint over the disabled fill.
+            var row = DashFallTheme.MakeRow(enabled);
             MarkSearchable(row, action);
-            row.style.flexDirection = UITK.FlexDirection.Row;
-            row.style.alignItems = UITK.Align.Center;
-            row.style.height = 50;
-            row.style.marginBottom = 8;
-            row.style.backgroundColor = new UITK.StyleColor(enabled ? RowBg : DisabledRowBg);
-            row.style.paddingLeft = 12; row.style.paddingRight = 12;
-            row.style.paddingTop = 8; row.style.paddingBottom = 8;
-            row.style.opacity = enabled ? 1f : 0.5f;
+            DashFallTheme.SetRowEnabledLook(row, enabled);
 
-            // Label
-            var lab = new UITK.Label(action + (enabled ? "" : " <size=12><color=red><b>DISABLED BY SERVER</b></color></size>"));
-            lab.style.fontSize = 24;
-            // 220 min keeps the chip column aligned for short names; let long
-            // names ("STANDING DASH RIGHT") grow rather than ellipsis-truncate at
-            // 24px, so no maxWidth and no shrink.
-            lab.style.minWidth = 220;
-            lab.style.flexShrink = 0;
-            lab.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleLeft);
-            lab.style.color = enabled ? Color.white : new Color(0.6f, 0.6f, 0.6f);
-            lab.style.whiteSpace = UITK.WhiteSpace.NoWrap;
-            lab.style.textOverflow = UITK.TextOverflow.Ellipsis;
-            ForceUIFont(lab);
-            row.Add(lab);
+            var text = DashFallTheme.MakeRowText(action, null);
+            text.style.minWidth = 150;
+            if (!enabled)
+            {
+                // The one place a row description is Danger: the server has taken this bind away
+                // and no amount of local editing will bring it back.
+                var why = DashFallTheme.MakeRowDescription("DISABLED BY SERVER");
+                why.style.color = DashFallTheme.DangerFaded;
+                why.style.unityFontStyleAndWeight = FontStyle.Bold;
+                text.Add(why);
+            }
+            row.Add(text);
 
             // Chips container (shows bound keys)
             var chipsRoot = new UITK.VisualElement();
             chipsRoot.style.flexDirection = UITK.FlexDirection.Row;
+            chipsRoot.style.flexWrap = UITK.Wrap.Wrap;
             chipsRoot.style.justifyContent = UITK.Justify.FlexEnd;
             chipsRoot.style.alignItems = UITK.Align.Center;
             chipsRoot.style.flexGrow = 1;
             chipsRoot.style.flexShrink = 1;
             chipsRoot.style.minWidth = 0;
-            chipsRoot.style.marginLeft = 4;
-            chipsRoot.style.marginRight = 8;
+            chipsRoot.style.marginRight = 4;
             row.Add(chipsRoot);
 
             // Buttons container
@@ -1946,7 +1404,8 @@ namespace DashFallMod.Client
             row.Add(right);
 
             // BIND button
-            var bindBtn = new UITK.Button(() =>
+            UITK.Button bindBtn = null;
+            bindBtn = new UITK.Button(() =>
             {
                 if (!enabled) return;
                 StartChordCapture($"Press keys for {action}", spec =>
@@ -1959,9 +1418,9 @@ namespace DashFallMod.Client
                         setter(cur);
                         RefreshChips();
                     }
-                });
+                }, bindBtn);
             });
-            StyleRowButton(bindBtn, BTN_W, "BIND");
+            DashFallTheme.StyleRowButton(bindBtn, 84f, "BIND");
             bindBtn.SetEnabled(enabled);
             right.Add(bindBtn);
 
@@ -1981,18 +1440,13 @@ namespace DashFallMod.Client
             int currentIndex = choices.IndexOf(currentType);
             if (currentIndex < 0) currentIndex = 0;
 
-            var dropdown = new UITK.DropdownField(choices, currentIndex);
-            dropdown.style.width = 206;
-            dropdown.style.height = 34;
-            dropdown.style.marginLeft = 4;
+            // MakePicker, not a real DropdownField: this row is exactly the case that broke one.
+            // The trigger names are long ("DOUBLE PRESS") and the slot is narrow because the row
+            // already carries a label column, a chip strip and BIND, so the built-in control's
+            // unlaid-out arrow ended up printed on top of the value text, and its popup list came
+            // up as unstyled light grey. See the MakePicker docs in DashFall.Theme.cs.
+            var dropdown = DashFallTheme.MakePicker(choices, currentIndex, typeSetter, 150f);
             dropdown.SetEnabled(enabled);
-            StyleDropdown(dropdown);
-            
-            // Wire up value change using INotifyValueChanged interface
-            dropdown.RegisterCallback<UITK.ChangeEvent<string>>(evt =>
-            {
-                typeSetter(evt.newValue);
-            });
             right.Add(dropdown);
 
             void RefreshChips()
@@ -2002,7 +1456,7 @@ namespace DashFallMod.Client
                 for (int i = 0; i < list.Count; i++)
                 {
                     var idx = i;
-                    chipsRoot.Add(MakeChip(list[i], enabled, () =>
+                    chipsRoot.Add(DashFallTheme.MakeChip(list[i], enabled, () =>
                     {
                         if (!enabled) return;
                         var cur = getter() ?? new List<string>();
@@ -2017,128 +1471,60 @@ namespace DashFallMod.Client
             return row;
         }
 
-        private void StyleRowButton(UITK.Button btn, int width, string text)
-        {
-            btn.text = text;
-            btn.style.width = width;
-            btn.style.height = 34;
-            btn.style.marginLeft = 4;
-            btn.style.backgroundColor = new UITK.StyleColor(ButtonBg);
-            btn.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-            MakeReadable(btn);
-            AddButtonFlash(btn);
-        }
-
-        private void StyleDropdown(UITK.DropdownField dropdown)
-        {
-            dropdown.style.backgroundColor = new UITK.StyleColor(TextFieldBg);
-            dropdown.style.color = Color.white;
-            ForceUIFont(dropdown);
-            
-            // Style the label inside the dropdown using Query
-            var label = UITK.UQueryExtensions.Q<UITK.Label>(dropdown);
-            if (label != null)
-            {
-                label.style.color = Color.white;
-                ForceUIFont(label);
-            }
-        }
-
-        private UITK.VisualElement MakeChip(string text, bool enabled, Action onRemove)
-        {
-            var chip = new UITK.VisualElement();
-            chip.style.flexDirection = UITK.FlexDirection.Row;
-            chip.style.alignItems = UITK.Align.Center;
-            chip.style.backgroundColor = new UITK.StyleColor(new Color32(80, 80, 80, 255));
-            chip.style.paddingLeft = 8; chip.style.paddingRight = 4;
-            chip.style.paddingTop = 4; chip.style.paddingBottom = 4;
-            chip.style.marginRight = 4;
-            chip.style.borderTopLeftRadius = 4; chip.style.borderTopRightRadius = 4;
-            chip.style.borderBottomLeftRadius = 4; chip.style.borderBottomRightRadius = 4;
-            chip.style.opacity = enabled ? 1f : 0.6f;
-
-            var label = new UITK.Label(text);
-            label.style.fontSize = 14;
-            MakeReadable(label);
-            chip.Add(label);
-
-            var xBtn = new UITK.Button(onRemove) { text = "×" };
-            xBtn.style.width = 20; xBtn.style.height = 20;
-            xBtn.style.marginLeft = 4;
-            xBtn.style.backgroundColor = new UITK.StyleColor(new Color32(100, 100, 100, 255));
-            xBtn.style.fontSize = 14;
-            xBtn.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-            xBtn.style.paddingLeft = 0; xBtn.style.paddingRight = 0;
-            xBtn.style.paddingTop = 0; xBtn.style.paddingBottom = 0;
-            xBtn.SetEnabled(enabled);
-            MakeReadable(xBtn);
-            if (enabled) AddChipButtonFlash(xBtn);
-            chip.Add(xBtn);
-
-            return chip;
-        }
-
-        private static readonly Color32 ChipXBg = new Color32(100, 100, 100, 255);
-        
-        private static void AddChipButtonFlash(UITK.Button btn)
-        {
-            btn.RegisterCallback<UITK.PointerEnterEvent>(_ =>
-            {
-                btn.style.backgroundColor = new UITK.StyleColor(new Color32(180, 80, 80, 255));
-                btn.style.color = Color.white;
-            });
-            btn.RegisterCallback<UITK.PointerLeaveEvent>(_ =>
-            {
-                btn.style.backgroundColor = new UITK.StyleColor(ChipXBg);
-                btn.style.color = Color.white;
-            });
-        }
-
-        private static void AddButtonFlash(UITK.Button btn)
-        {
-            btn.RegisterCallback<UITK.PointerEnterEvent>(_ =>
-            {
-                btn.style.backgroundColor = Color.white;
-                btn.style.color = Color.black;
-            });
-            btn.RegisterCallback<UITK.PointerLeaveEvent>(_ =>
-            {
-                btn.style.backgroundColor = new UITK.StyleColor(ButtonBg);
-                btn.style.color = Color.white;
-            });
-        }
-
+        /// <summary>
+        /// The shipped bind set. Everything is unbound except the two dives and the goalie's two
+        /// standing dashes.
+        ///
+        /// This used to seed F, Z, C, W and S across twists and slide influence. Those keys are not
+        /// free: Z and C were handed to both twist and slide influence at once, and W and S are the
+        /// player's own forward and back. A new player got a set of double-press and continuous
+        /// binds layered onto movement keys they were already using, without having asked for any of
+        /// it. Dives and standing dashes are the two everyone wants bound, so they are the two that
+        /// ship bound, and the rest is opt in from the panel.
+        ///
+        /// Trigger types are still filled in. They cost nothing while a list is empty and they mean
+        /// the first key a player binds behaves the way that action is meant to behave, rather than
+        /// falling back to PRESS on something that wants CONTINUOUS.
+        /// </summary>
         private void ResetToDefaults()
         {
-            // Skater keybinds
+            // Skater keybinds. Dive is the only one that ships bound.
             _skater.divekey = new List<string> { "F" };
-            _skater.twistleftkey = new List<string> { "Z" };
-            _skater.twistrightkey = new List<string> { "C" };
-            _skater.slideinfluenceleftkey = new List<string> { "Z" };
-            _skater.slideinfluencerightkey = new List<string> { "C" };
-            _skater.slideinfluenceforwardkey = new List<string> { "W" };
-            _skater.slideinfluencebackwardkey = new List<string> { "S" };
-            
+
+            _skater.dashleftkey = new List<string>();
+            _skater.dashrightkey = new List<string>();
+            _skater.powercarvekey = new List<string>();
+            _skater.twistleftkey = new List<string>();
+            _skater.twistrightkey = new List<string>();
+            _skater.slideinfluenceleftkey = new List<string>();
+            _skater.slideinfluencerightkey = new List<string>();
+            _skater.slideinfluenceforwardkey = new List<string>();
+            _skater.slideinfluencebackwardkey = new List<string>();
+
             // Skater action types
             _skater.divekeytype = "PRESS";
+            _skater.dashleftkeytype = "PRESS";
+            _skater.dashrightkeytype = "PRESS";
+            _skater.powercarvekeytype = "HOLD";
             _skater.twistleftkeytype = "DOUBLE PRESS";
             _skater.twistrightkeytype = "DOUBLE PRESS";
             _skater.slideinfluenceleftkeytype = "CONTINUOUS";
             _skater.slideinfluencerightkeytype = "CONTINUOUS";
             _skater.slideinfluenceforwardkeytype = "CONTINUOUS";
             _skater.slideinfluencebackwardkeytype = "CONTINUOUS";
-            
-            // Goalie keybinds
+
+            // Goalie keybinds. Dive plus the two standing dashes ship bound.
             _goalie.divekey = new List<string> { "F" };
             _goalie.standingdashleftkey = new List<string> { "Q" };
             _goalie.standingdashrightkey = new List<string> { "E" };
-            _goalie.twistleftkey = new List<string> { "Z" };
-            _goalie.twistrightkey = new List<string> { "C" };
-            _goalie.slideinfluenceleftkey = new List<string> { "Z" };
-            _goalie.slideinfluencerightkey = new List<string> { "C" };
-            _goalie.slideinfluenceforwardkey = new List<string> { "W" };
-            _goalie.slideinfluencebackwardkey = new List<string> { "S" };
-            
+
+            _goalie.twistleftkey = new List<string>();
+            _goalie.twistrightkey = new List<string>();
+            _goalie.slideinfluenceleftkey = new List<string>();
+            _goalie.slideinfluencerightkey = new List<string>();
+            _goalie.slideinfluenceforwardkey = new List<string>();
+            _goalie.slideinfluencebackwardkey = new List<string>();
+
             // Goalie action types
             _goalie.divekeytype = "PRESS";
             _goalie.standingdashleftkeytype = "PRESS";
@@ -2152,13 +1538,56 @@ namespace DashFallMod.Client
         }
 
         // ========== PANEL OPEN/CLOSE ==========
-        private void OpenDashFallPanel()
+        //
+        // The panel is its own way in and out now, so it owns the cursor and the game's
+        // mouse-required flag on both edges. ModMenuHub used to do that for us, which is why the
+        // old close paths handed control back to it instead of restoring anything themselves.
+
+        /// <summary>
+        /// True while the panel is logically open, including while a rebind overlay is covering
+        /// it. Do not read the panel's display for this: a capture hides the panel without
+        /// closing it.
+        /// </summary>
+        public bool IsDashFallPanelOpen => _panelVisible;
+
+        /// <summary>
+        /// The F4 handler. Safe to call before the panel has ever been built, and a no-op while a
+        /// rebind is listening, so F4 can be captured as a keybind instead of toggling the panel
+        /// out from under the capture overlay.
+        /// </summary>
+        public void ToggleDashFallPanel()
         {
+            if (_isCapturing) return;
+
+            if (_panelVisible)
+            {
+                // Same commit sequence the CLOSE button and the ESC path use, so a panel closed
+                // with F4 cannot silently drop edited keybinds.
+                DashFallConfigLoader.SaveSkaterConfig(_skater);
+                DashFallConfigLoader.SaveGoalieConfig(_goalie);
+                RebuildLookups();
+                ResetInputActions();
+                FullCloseDashFallPanel();
+            }
+            else
+            {
+                OpenDashFallPanel();
+            }
+        }
+
+        public void OpenDashFallPanel()
+        {
+            // The 0.5s UI probe is what normally assigns _doc and _lastRoot, so a press in the
+            // window right after a root swap would otherwise be a silent no-op.
+            EnsureUIRoot();
+
             BuildDashFallPanel();
             if (_dfPanel == null) return;
 
             _dfBackdrop.style.display = UITK.DisplayStyle.Flex;
             _dfPanel.style.display = UITK.DisplayStyle.Flex;
+            _dfBackdrop.BringToFront();
+            _panelVisible = true;
 
             // Fresh panel session: re-attempt auto-unlock and clear any prior
             // local LOCK / status so the SERVER tab reflects current auth.
@@ -2167,18 +1596,27 @@ namespace DashFallMod.Client
             _serverStatusText = "";
             _serverEditCfg = null; // re-clone editor copy from live on next build
 
+            // SHOW is a per-session reveal, not a preference. Without this a host who revealed the
+            // editor password once reopens the panel with it still printed in clear, which is a
+            // shoulder-surfing leak rather than a convenience.
+            _serverPasswordRevealed = false;
+
+            // Both armed states are per-session too, and their explanatory status line is cleared
+            // just above, so leaving either armed would present a confirm button with nothing left
+            // on screen saying what it is about to confirm.
+            _serverResetArmed = false;
+            _footerResetArmed = false;
+
             // Refresh chips to show current bindings
             RefreshActionsUI();
 
-            // Unlock cursor
             SaveCursorState();
+            SuppressPlayerInput();
             UnityEngine.Cursor.lockState = CursorLockMode.None;
             UnityEngine.Cursor.visible = true;
-
-            // Menu buttons are already hidden by hub, no need to hide them again
         }
 
-        private void CloseDashFallPanel()
+        public void CloseDashFallPanel()
         {
             if (_isCapturing)
             {
@@ -2186,34 +1624,36 @@ namespace DashFallMod.Client
                 return;
             }
 
-            // Check if panel is already closed - don't re-open hub if so
-            bool wasVisible = _dfPanel != null && _dfPanel.style.display == UITK.DisplayStyle.Flex;
+            // Before anything is hidden. A picker's list lives on the UIDocument root rather than
+            // inside the panel, so hiding the panel would strand it over the game with an invisible
+            // full-rect click catcher still live.
+            DashFallTheme.CloseAllPickers();
+
+            // A pending "Confirm reset" must not outlive the session that armed it, or the next
+            // open presents a footer button one click away from wiping every bind.
+            _footerResetArmed = false;
 
             if (_dfPanel != null) _dfPanel.style.display = UITK.DisplayStyle.None;
             if (_dfBackdrop != null) _dfBackdrop.style.display = UITK.DisplayStyle.None;
 
-            // Only return to hub if the panel was actually visible
-            if (!wasVisible) return;
+            // Guard the restore, not the hide: a second close must not replay a cursor snapshot
+            // that the first one already consumed.
+            if (!_panelVisible) return;
+            _panelVisible = false;
 
-            // Don't restore cursor state or menu buttons - hub will manage them
-            ConfigManager.Dbg("Panel closed, returning to hub");
-            
-            // Return to ModMenuHub
-            try
-            {
-                PonceMods.Shared.ModMenuHub.OpenPanel();
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogError($"[COMPADJUST] Failed to open hub: {e}");
-                // Fallback: restore state manually
-                RestoreCursorState();
-                HideBackgroundMenuButtons(false);
-            }
+            // Hand the mouse-required flag back to the game and let it drive the cursor. When the
+            // recompute lands, SetMouseVisibility has already set the cursor to match whatever the
+            // game's own views now want, so replaying our snapshot on top of that would undo it.
+            // The snapshot restore is only for the fallback path where the recompute is unavailable.
+            if (!RestorePlayerInput()) RestoreCursorState();
+
+            ConfigManager.Dbg("Panel closed");
         }
-        
+
         /// <summary>
-        /// Fully close panel without returning to hub (ESC behavior).
+        /// The ESC path. Identical teardown to CloseDashFallPanel now that there is no hub to
+        /// hand control back to; kept as its own name because ESC is a distinct intent and the
+        /// ClientRunner's key handler calls it by that name.
         /// </summary>
         private void FullCloseDashFallPanel()
         {
@@ -2223,62 +1663,141 @@ namespace DashFallMod.Client
                 return;
             }
 
-            if (_dfPanel != null) _dfPanel.style.display = UITK.DisplayStyle.None;
-            if (_dfBackdrop != null) _dfBackdrop.style.display = UITK.DisplayStyle.None;
+            CloseDashFallPanel();
+        }
 
-            ConfigManager.Dbg("Panel fully closed via ESC");
-            
-            // Use ModMenuHub's FullClose to handle cursor and menu buttons properly
+        // Resolves the UIDocument root on demand, the same way the periodic probe does, so the
+        // first F4 press after a scene or root change opens the panel instead of doing nothing.
+        // _lastRoot is written too, or the next probe would see a changed root and tear the
+        // freshly built panel back down.
+        private void EnsureUIRoot()
+        {
+            if (_doc != null && _doc.rootVisualElement != null) return;
+            if (_lastRoot != null) return;
+
             try
             {
-                PonceMods.Shared.ModMenuHub.FullClose();
+                var uiMgr = UnityEngine.Object.FindFirstObjectByType<UIManager>(UnityEngine.FindObjectsInactive.Include);
+                _doc = uiMgr != null
+                    ? uiMgr.UIDocument
+                    : UnityEngine.Object.FindFirstObjectByType<UITK.UIDocument>(UnityEngine.FindObjectsInactive.Include);
+                var root = _doc != null ? _doc.rootVisualElement : null;
+                if (root != null) _lastRoot = root;
             }
-            catch (System.Exception e)
-            {
-                Debug.LogError($"[COMPADJUST] Failed to full close: {e}");
-                // Fallback: restore state manually
-                RestoreCursorState();
-                HideBackgroundMenuButtons(false);
-            }
+            catch (Exception e) { ConfigManager.Dbg("EnsureUIRoot failed: " + e.Message); }
         }
 
-        private void HideBackgroundMenuButtons(bool hide)
+        // The game's own flag for "a UI wants the mouse". Without it, typing in the SEARCH box or
+        // an admin config field also drives the skater, because vanilla PlayerInput keeps reading
+        // the keyboard while our panel is up.
+        private void SuppressPlayerInput()
         {
-            if (hide)
+            if (_savedMouseRequired) return;
+            try
             {
-                var root = _doc?.rootVisualElement ?? _lastRoot;
-                if (root == null) return;
-
-                _hiddenMenuButtons.Clear();
-                foreach (var b in UITK.UQueryExtensions.Query<UITK.Button>(root).ToList())
-                {
-                    if (b == null) continue;
-                    if ((_dfPanel != null && IsUnder(b, _dfPanel)) ||
-                        (_dfBackdrop != null && IsUnder(b, _dfBackdrop)) ||
-                        (_captureOverlay != null && IsUnder(b, _captureOverlay)))
-                        continue;
-
-                    if (b.resolvedStyle.display != UITK.DisplayStyle.None)
-                    {
-                        _hiddenMenuButtons.Add(b);
-                        b.style.display = UITK.DisplayStyle.None;
-                    }
-                }
+                _prevMouseRequired = GlobalStateManager.UIState.IsMouseRequired;
+                var uiState = GlobalStateManager.UIState;
+                uiState.IsMouseRequired = true;
+                GlobalStateManager.UIState = uiState;
+                _savedMouseRequired = true;
             }
-            else
-            {
-                // Restore hidden buttons - don't need root for this
-                foreach (var b in _hiddenMenuButtons)
-                    if (b != null) b.style.display = UITK.DisplayStyle.Flex;
-                _hiddenMenuButtons.Clear();
-            }
+            catch (Exception e) { ConfigManager.Dbg("SuppressPlayerInput failed: " + e.Message); }
         }
 
-        private static bool IsUnder(UITK.VisualElement child, UITK.VisualElement ancestor)
+        /// <summary>
+        /// Re-asserts the suppression every frame the panel is up.
+        ///
+        /// Setting the flag once on open is not enough. UIManager.CheckMouseRequirement recomputes
+        /// IsMouseRequired from its own list of UIViews whenever any mouse-requiring view changes
+        /// visibility or focus, and this panel is not a UIView, so it contributes nothing to that
+        /// sum. Opening and closing the game's chat window while the panel is up therefore
+        /// recomputes the flag to false and hands keystrokes straight back to the skater, which is
+        /// how typing in SEARCH ended up driving the player around.
+        ///
+        /// Only written when it actually differs, because the setter raises Event_OnUIStateChanged
+        /// and ApplicationManager.SetMouseVisibility listens to it.
+        /// </summary>
+        private void HoldPlayerInputSuppressed()
         {
-            for (var p = child; p != null; p = p.parent)
-                if (p == ancestor) return true;
+            if (!_savedMouseRequired) return;
+            try
+            {
+                var uiState = GlobalStateManager.UIState;
+                if (uiState.IsMouseRequired) return;
+                uiState.IsMouseRequired = true;
+                GlobalStateManager.UIState = uiState;
+            }
+            catch (Exception e) { ConfigManager.Dbg("HoldPlayerInputSuppressed failed: " + e.Message); }
+        }
+
+        /// <summary>
+        /// Hands the flag back to the game. Returns true when the game recomputed it, in which case
+        /// the caller must NOT also restore a cursor snapshot, because SetMouseVisibility will have
+        /// already driven the cursor from the recomputed value.
+        ///
+        /// Replaying the value sampled at open time is what this used to do and it was wrong in
+        /// both directions. ESC reaches the game as well as us, and the game's input phase runs
+        /// first, so by the time this ran the pause menu had already opened and our stale false
+        /// re-hid the cursor underneath it. Opening the panel on top of an already-visible pause
+        /// menu inverted it: the snapshot was true, the game had computed false, and writing true
+        /// back made PlayerInput.UpdateInputs early-return so the skater took no input at all.
+        /// </summary>
+        private bool RestorePlayerInput()
+        {
+            if (!_savedMouseRequired) return false;
+            _savedMouseRequired = false;
+            try
+            {
+                if (TryRecomputeMouseRequirement()) return true;
+
+                // Only reached on a build where the private method moved. Replaying the snapshot is
+                // the old behaviour, which is wrong in the ways described above but is still better
+                // than leaving the flag stuck on and the skater unable to move.
+                var uiState = GlobalStateManager.UIState;
+                uiState.IsMouseRequired = _prevMouseRequired;
+                GlobalStateManager.UIState = uiState;
+            }
+            catch (Exception e) { ConfigManager.Dbg("RestorePlayerInput failed: " + e.Message); }
             return false;
+        }
+
+        // UIManager.CheckMouseRequirement is private, so it is reflected once and cached the same
+        // way the minimap fields are in ClientRunner. Confirmed present in Puck.dll for this build.
+        private static MethodInfo _miCheckMouseRequirement;
+        private static bool _checkMouseRequirementResolved;
+
+        private bool TryRecomputeMouseRequirement()
+        {
+            if (!_checkMouseRequirementResolved)
+            {
+                _checkMouseRequirementResolved = true;
+                try
+                {
+                    _miCheckMouseRequirement = typeof(UIManager).GetMethod(
+                        "CheckMouseRequirement", BindingFlags.Instance | BindingFlags.NonPublic);
+                }
+                catch { }
+                if (_miCheckMouseRequirement == null)
+                    ConfigManager.Dbg("UIManager.CheckMouseRequirement not found, falling back to the snapshot restore");
+            }
+
+            if (_miCheckMouseRequirement == null) return false;
+
+            var mgr = _cachedUIManager != null
+                ? _cachedUIManager
+                : MonoBehaviourSingleton<UIManager>.Instance;
+            if (mgr == null) return false;
+
+            try
+            {
+                _miCheckMouseRequirement.Invoke(mgr, null);
+                return true;
+            }
+            catch (Exception e)
+            {
+                ConfigManager.Dbg("CheckMouseRequirement invoke failed: " + e.Message);
+                return false;
+            }
         }
 
         // ========== CHORD CAPTURE ==========
@@ -2289,58 +1808,76 @@ namespace DashFallMod.Client
             var root = _doc?.rootVisualElement ?? _lastRoot;
             if (root == null) return;
 
-            _captureOverlay = new UITK.VisualElement();
-            _captureOverlay.style.position = UITK.Position.Absolute;
-            _captureOverlay.style.left = 0; _captureOverlay.style.right = 0;
-            _captureOverlay.style.top = 0; _captureOverlay.style.bottom = 0;
-            _captureOverlay.style.backgroundColor = new UITK.StyleColor(new Color(0.1f, 0.1f, 0.15f, 0.95f));
-            _captureOverlay.style.display = UITK.DisplayStyle.None;
-            _captureOverlay.pickingMode = UITK.PickingMode.Position;
-            ForceUIFont(_captureOverlay);
+            _captureOverlay = DashFallTheme.MakeCaptureOverlay();
 
-            var centerContainer = new UITK.VisualElement();
-            centerContainer.style.position = UITK.Position.Absolute;
-            centerContainer.style.left = new UITK.Length(50, UITK.LengthUnit.Percent);
-            centerContainer.style.top = new UITK.Length(50, UITK.LengthUnit.Percent);
-            centerContainer.style.translate = new UITK.Translate(
-                new UITK.Length(-50, UITK.LengthUnit.Percent),
-                new UITK.Length(-50, UITK.LengthUnit.Percent), 0);
-            centerContainer.style.alignItems = UITK.Align.Center;
-            centerContainer.style.justifyContent = UITK.Justify.Center;
-            centerContainer.style.flexDirection = UITK.FlexDirection.Column;
+            // The card, its border and the kicker are the only three places the cool capture hue
+            // appears, which is what keeps it reading as a mode rather than as a second accent.
+            var card = DashFallTheme.MakeCaptureCard();
+            card.Add(DashFallTheme.MakeCaptureKicker("REBIND"));
 
-            var title = new UITK.Label("KEY REBIND");
-            title.style.fontSize = 72;
+            var title = new UITK.Label("PRESS A KEY");
+            title.style.fontSize = 56;
+            title.style.color = DashFallTheme.TextPrimary;
             title.style.unityFontStyleAndWeight = FontStyle.Bold;
+            title.style.letterSpacing = 4;
             title.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
-            title.style.marginBottom = 32;
-            MakeReadable(title);
-            centerContainer.Add(title);
+            title.style.marginBottom = 18;
+            ForceUIFont(title);
+            card.Add(title);
 
             _captureLabel = new UITK.Label("Press a key or combination to bind.");
-            _captureLabel.style.fontSize = 24;
+            _captureLabel.style.fontSize = 16;
+            _captureLabel.style.color = DashFallTheme.TextMuted;
             _captureLabel.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
             _captureLabel.style.whiteSpace = UITK.WhiteSpace.Normal;
-            _captureLabel.style.maxWidth = 600;
-            MakeReadable(_captureLabel);
-            centerContainer.Add(_captureLabel);
+            _captureLabel.style.maxWidth = 520;
+            ForceUIFont(_captureLabel);
+            card.Add(_captureLabel);
 
-            _captureOverlay.Add(centerContainer);
+            // TextMuted, not OWP's TextDim. OWP draws this on a near-black card; ours sits on the
+            // lifted CaptureBg, where TextDim falls to roughly 2.8:1 and stops being readable. Muted
+            // puts it back to about 5.4:1, the same correction MakeHeaderColumn already makes.
+            var hint = DashFallTheme.MakeLabel("ESC to cancel", 11, DashFallTheme.TextMuted);
+            hint.style.letterSpacing = 2;
+            hint.style.unityTextAlign = new UITK.StyleEnum<TextAnchor>(TextAnchor.MiddleCenter);
+            hint.style.marginTop = 22;
+            card.Add(hint);
+
+            _captureOverlay.Add(card);
             root.Add(_captureOverlay);
             _captureOverlay.BringToFront();
         }
 
-        private void StartChordCapture(string prompt, Action<string> onCaptured)
+        private void StartChordCapture(string prompt, Action<string> onCaptured, UITK.Button armed = null)
         {
             _onChordCaptured = onCaptured;
             _isCapturing = true;
 
             EnsureCaptureOverlay();
-            HidePanelDuringCapture(true);
-            // Don't call HideBackgroundMenuButtons here - they're already hidden from panel open
 
-            if (_captureLabel != null) _captureLabel.text = "Press a key or combination to bind.";
+            // A picker list open on the row being rebound would otherwise sit on top of the capture
+            // overlay, since both are parented to the UIDocument root and the list was brought to
+            // front after the overlay.
+            DashFallTheme.CloseAllPickers();
+
+            HidePanelDuringCapture(true);
+
+            // Paint the BIND button that started this so the row itself says which one is
+            // listening, in case the overlay is dismissed and the panel comes back.
+            _captureButton = armed;
+            DashFallTheme.StyleCaptureButton(_captureButton, true);
+
+            // The caller passes "Press keys for SLIDE DI LEFT" and so on. This used to overwrite it
+            // with a constant, which left sixteen near-identical bind rows all producing the same
+            // anonymous prompt, four of them called SLIDE DI something. The armed BIND button was
+            // supposed to disambiguate, but HidePanelDuringCapture has already hidden the panel by
+            // the time it is painted, so it is never on screen to be read.
+            if (_captureLabel != null)
+                _captureLabel.text = string.IsNullOrEmpty(prompt)
+                    ? "Press a key or combination to bind."
+                    : prompt;
             _captureOverlay.style.display = UITK.DisplayStyle.Flex;
+            _captureOverlay.BringToFront();
             StartCoroutine(CaptureChordRoutine());
         }
 
@@ -2349,10 +1886,21 @@ namespace DashFallMod.Client
             _isCapturing = false;
             if (_captureOverlay != null) _captureOverlay.style.display = UITK.DisplayStyle.None;
             HidePanelDuringCapture(false);
+            ClearCaptureButtonLook();
             _onChordCaptured = null;
 
             UnityEngine.Cursor.lockState = CursorLockMode.None;
             UnityEngine.Cursor.visible = true;
+        }
+
+        // Restores the listening button to its resting look. StyleCaptureButton puts back the
+        // ink as well as the fill, which is the bug OWP has: it restores only the fill and leaves
+        // dark text on a dark button after a cancelled rebind.
+        private void ClearCaptureButtonLook()
+        {
+            if (_captureButton == null) return;
+            DashFallTheme.StyleCaptureButton(_captureButton, false);
+            _captureButton = null;
         }
 
         private void HidePanelDuringCapture(bool hide)
@@ -2400,6 +1948,14 @@ namespace DashFallMod.Client
         private static bool IsAllowedKey(KeyCode k)
         {
             if (k == KeyCode.None || k == KeyCode.Escape) return false;
+
+            // F4 opens and closes this panel and is not rebindable, so it cannot also be captured as
+            // an action bind. Binding it used to half-work in a way that was worse than refusing:
+            // with the panel closed the press dispatched the bound action in EarlyUpdate and then
+            // opened the panel in Update, while the press that should have closed the panel was
+            // swallowed because ShouldBlockBinds sees the panel displayed by then.
+            if (k == KeyCode.F4) return false;
+
             // Allow mouse buttons (Mouse0-Mouse6 = 323-329)
             return true;
         }
@@ -2414,7 +1970,7 @@ namespace DashFallMod.Client
                 sb.Append(string.Join("+", kc.Keys.Select(k => GetFriendlyKeyName(k))));
             return sb.ToString();
         }
-        
+
         private static string GetFriendlyKeyName(KeyCode k)
         {
             switch (k)
@@ -2501,6 +2057,7 @@ namespace DashFallMod.Client
                         _isCapturing = false;
                         if (_captureOverlay != null) _captureOverlay.style.display = UITK.DisplayStyle.None;
                         HidePanelDuringCapture(false);
+                        ClearCaptureButtonLook();
                         yield break;
                     }
                 }
@@ -2512,4 +2069,3 @@ namespace DashFallMod.Client
         }
     }
 }
-

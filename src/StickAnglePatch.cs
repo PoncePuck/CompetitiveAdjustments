@@ -360,7 +360,14 @@ namespace CompetitiveCompanion
             float start = StickAngleRefs.bladeAngleBufferRef(input);
             float moved = delta;
             float correction = 0f;      // catch-up back into a range the buffer starts outside of
-            bool wraps = !clientCfg.FreeBladeSpinLockEnabled;
+            // Which pair applies is decided by the role of the player this input belongs to, not
+            // by a cached "am I a goalie" on the runner. Read straight off Player.Role so a
+            // position change mid-shift takes effect on the next input rather than on the next
+            // role poll, and so the two settings can never be applied to the wrong position.
+            bool goalie = input.Player != null && input.Player.Role == PlayerRole.Goalie;
+            clientCfg.GetFreeBlade(goalie, out bool locked, out float cfgMin, out float cfgMax);
+
+            bool wraps = !locked;
 
             // Lock off means uncapped, and uncapped has to wrap. Falling through to vanilla
             // here was still a cap: vanilla clamps against the game's own
@@ -375,8 +382,8 @@ namespace CompetitiveCompanion
                 // crossed range makes the blade sit on one bound or flip between the two, which
                 // is the same "stuck" symptom from a different cause. The range slider in the
                 // settings UI cannot produce a crossed pair, but a hand-edited file can.
-                float lo = Mathf.Min(clientCfg.FreeBladeSpinMin, clientCfg.FreeBladeSpinMax);
-                float hi = Mathf.Max(clientCfg.FreeBladeSpinMin, clientCfg.FreeBladeSpinMax);
+                float lo = Mathf.Min(cfgMin, cfgMax);
+                float hi = Mathf.Max(cfgMin, cfgMax);
 
                 // Never ask for an angle the game itself would reject. FreeBlade widens these to
                 // +/-127; intersecting keeps the client honest if that ever stops being true, and

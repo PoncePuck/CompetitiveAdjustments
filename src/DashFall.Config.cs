@@ -128,9 +128,39 @@ namespace DashFallMod.Client
         // OFF is endless, not merely wide. The handler wraps the buffer instead of clamping
         // it, so there is no bound to reach in either direction. Widening the range above
         // instead tops out at +/-127, which is the widest clamp an sbyte on the wire allows.
+        // Per role since ConfigVersion 2. The blade wants different treatment in the two
+        // positions: a goalie holding an angle across the crease and a skater carrying the puck
+        // are not asking the same thing of it, and a single shared range forced one setting to
+        // serve both. Both roles ship with the lock ON at vanilla's own +/-4.
+        //
+        // The three unsuffixed fields below are the pre-split values, kept ONLY so an existing
+        // config can be migrated once. Nothing reads them after MigrateFreeBladePerRole has run.
+        // Do not add new readers; use GetFreeBlade(role).
+        public bool FreeBladeSpinLockEnabledSkater = true;
+        public float FreeBladeSpinMinSkater = FreeBladeSpinRange.DefaultMin;
+        public float FreeBladeSpinMaxSkater = FreeBladeSpinRange.DefaultMax;
+
+        public bool FreeBladeSpinLockEnabledGoalie = true;
+        public float FreeBladeSpinMinGoalie = FreeBladeSpinRange.DefaultMin;
+        public float FreeBladeSpinMaxGoalie = FreeBladeSpinRange.DefaultMax;
+
+        [Obsolete("Pre-split value, migration source only. Read GetFreeBlade(bool) instead.")]
         public bool FreeBladeSpinLockEnabled = true;
+        [Obsolete("Pre-split value, migration source only. Read GetFreeBlade(bool) instead.")]
         public float FreeBladeSpinMin = FreeBladeSpinRange.DefaultMin;
+        [Obsolete("Pre-split value, migration source only. Read GetFreeBlade(bool) instead.")]
         public float FreeBladeSpinMax = FreeBladeSpinRange.DefaultMax;
+
+        /// <summary>
+        /// The lock state and bounds for one role. One accessor so every consumer agrees about
+        /// which pair of fields belongs to which position.
+        /// </summary>
+        public void GetFreeBlade(bool goalie, out bool locked, out float min, out float max)
+        {
+            locked = goalie ? FreeBladeSpinLockEnabledGoalie : FreeBladeSpinLockEnabledSkater;
+            min    = goalie ? FreeBladeSpinMinGoalie         : FreeBladeSpinMinSkater;
+            max    = goalie ? FreeBladeSpinMaxGoalie         : FreeBladeSpinMaxSkater;
+        }
         public bool EnableSprintShoulderTrail = true;
         public float SprintShoulderTrailTime = 0.45f;
         public float SprintShoulderTrailWidth = 0.08f;
@@ -320,7 +350,7 @@ namespace DashFallMod.Client
             => new DashFallClientConfig { ClientConfigVersion = CurrentClientConfigVersion };
 
         /// <summary>Current client config schema version. Bump when adding a migration below.</summary>
-        private const int CurrentClientConfigVersion = 1;
+        private const int CurrentClientConfigVersion = 2;
 
         /// <summary>
         /// One-time repairs for configs written by older builds, plus the ordering guard
@@ -328,6 +358,11 @@ namespace DashFallMod.Client
         /// </summary>
         private static void MigrateClientConfig(DashFallClientConfig cfg)
         {
+            // Read BEFORE the stamp below overwrites it. Every version-gated migration in this
+            // method has to test against the version the file arrived with, not the one we are
+            // about to write.
+            int hadVersion = cfg != null ? cfg.ClientConfigVersion : 0;
+
             // v1 briefly turned the blade spin lock OFF for any config sitting at the old
             // on-at-(-4/+4) default, on the grounds that the pair cancels FreeBlade. That
             // migration is gone: the lock is deliberately ON by default again, so switching
@@ -341,20 +376,58 @@ namespace DashFallMod.Client
             // have chosen deliberately would be worse than leaving it.
             cfg.ClientConfigVersion = CurrentClientConfigVersion;
 
+            // v2 split the single free blade setting into a skater pair and a goalie pair.
+            MigrateFreeBladePerRole(cfg, hadVersion);
+
             // Not versioned: a crossed or out-of-range pair can only come from a hand-edited
             // file, and Mathf.Clamp with min above max does not fail, it collapses the range
-            // and freezes the blade. Cheap enough to assert on every load.
-            float lo = Mathf.Clamp(Mathf.Min(cfg.FreeBladeSpinMin, cfg.FreeBladeSpinMax),
-                                   FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax);
-            float hi = Mathf.Clamp(Mathf.Max(cfg.FreeBladeSpinMin, cfg.FreeBladeSpinMax),
-                                   FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax);
+            // and freezes the blade. Cheap enough to assert on every load, per role.
+            NormalizeFreeBladeRange("skater", ref cfg.FreeBladeSpinMinSkater, ref cfg.FreeBladeSpinMaxSkater);
+            NormalizeFreeBladeRange("goalie", ref cfg.FreeBladeSpinMinGoalie, ref cfg.FreeBladeSpinMaxGoalie);
+        }
 
-            if (!Mathf.Approximately(lo, cfg.FreeBladeSpinMin) || !Mathf.Approximately(hi, cfg.FreeBladeSpinMax))
+
+        /// <summary>
+        /// Copies a pre-split free blade setting onto both roles, once.
+        ///
+        /// Gated on the version the file arrived with, not on the values themselves. A player who
+        /// had deliberately turned the lock off, or narrowed the range, keeps that on both roles
+        /// rather than being silently reset to the new per-role defaults. A file already at
+        /// version 2 or later is left alone, because by then the unsuffixed fields are stale.
+        /// </summary>
+        private static void MigrateFreeBladePerRole(DashFallClientConfig cfg, int hadVersion)
+        {
+            if (cfg == null || hadVersion >= 2) return;
+
+#pragma warning disable CS0618 // the whole point of this method is to read the obsolete fields
+            cfg.FreeBladeSpinLockEnabledSkater = cfg.FreeBladeSpinLockEnabled;
+            cfg.FreeBladeSpinLockEnabledGoalie = cfg.FreeBladeSpinLockEnabled;
+            cfg.FreeBladeSpinMinSkater = cfg.FreeBladeSpinMin;
+            cfg.FreeBladeSpinMinGoalie = cfg.FreeBladeSpinMin;
+            cfg.FreeBladeSpinMaxSkater = cfg.FreeBladeSpinMax;
+            cfg.FreeBladeSpinMaxGoalie = cfg.FreeBladeSpinMax;
+
+            Debug.Log($"[COMPADJUST] Migrated free blade settings to per-role: lock={cfg.FreeBladeSpinLockEnabled} " +
+                      $"range={cfg.FreeBladeSpinMin}..{cfg.FreeBladeSpinMax} copied to both skater and goalie.");
+#pragma warning restore CS0618
+        }
+
+        /// <summary>
+        /// Orders and clamps one role's pair. Not versioned: a crossed or out-of-range pair can
+        /// only come from a hand-edited file, and Mathf.Clamp with min above max does not fail, it
+        /// collapses the range and freezes the blade. Cheap enough to assert on every load.
+        /// </summary>
+        private static void NormalizeFreeBladeRange(string role, ref float min, ref float max)
+        {
+            float lo = Mathf.Clamp(Mathf.Min(min, max), FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax);
+            float hi = Mathf.Clamp(Mathf.Max(min, max), FreeBladeSpinRange.LimitMin, FreeBladeSpinRange.LimitMax);
+
+            if (!Mathf.Approximately(lo, min) || !Mathf.Approximately(hi, max))
             {
-                Debug.LogWarning($"[COMPADJUST] Free blade spin range {cfg.FreeBladeSpinMin}..{cfg.FreeBladeSpinMax} " +
+                Debug.LogWarning($"[COMPADJUST] Free blade spin range for {role} {min}..{max} " +
                                  $"is crossed or out of range; using {lo}..{hi}.");
-                cfg.FreeBladeSpinMin = lo;
-                cfg.FreeBladeSpinMax = hi;
+                min = lo;
+                max = hi;
             }
         }
 

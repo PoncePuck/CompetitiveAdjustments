@@ -38,10 +38,32 @@ namespace DashFallMod.Client
         private const float DashIconDuration = 0.3f;
         private const float TwistIconDuration = 0.3f;
         
+        // NOTHING IN THIS FILE CURRENTLY RUNS. UpdateHUD's only call site is commented out in
+        // DashFall.ClientRunner.cs with a "re-enable when the HUD is ready" TODO, and CleanupHUD's
+        // is commented out beside it, so _stateIconContainer never leaves display None. The styling
+        // below was brought onto the shared design system along with the rest of the UI so that
+        // re-enabling it is a one-line change rather than a second retheme, but read every comment
+        // in here as describing what it WOULD do, not what a player sees today.
+
         // Icon settings
         private const int IconSize = 128;
         private const int IconMargin = 20;
-        
+
+        // The plate borrows PanelBg's neutral tint but not its 245 alpha: this sits on the ice during
+        // play, so it has to stay a plate the rink reads through rather than an opaque block. 0.67 is
+        // a touch heavier than the old flat black so the tint is actually visible behind the glyph.
+        private static readonly Color HudPlateBg =
+            new Color(DashFallTheme.PanelBg.r, DashFallTheme.PanelBg.g, DashFallTheme.PanelBg.b, 0.67f);
+
+        // Width of the state band along the bottom edge, borrowed from the tab strip's active
+        // underline so the accent reads the same way here as it does in the config panel. It never
+        // changes with state, only its colour does, so the glyph's content box cannot shift.
+        private const float HudBandWidth = 3f;
+
+        // The plate's own corner radius. Panel internals use 6 and the popup card uses 10, so 8 is
+        // deliberately left where it was: nothing in the family dictates a HUD radius.
+        private const float HudRadius = 8f;
+
         private void InitializeHUD()
         {
             LoadIconTextures();
@@ -169,11 +191,17 @@ namespace DashFallMod.Client
             _stateIconContainer = new UITK.VisualElement();
             _stateIconContainer.style.width = IconSize;
             _stateIconContainer.style.height = IconSize;
-            _stateIconContainer.style.backgroundColor = new UITK.StyleColor(new Color(0, 0, 0, 0.5f));
-            _stateIconContainer.style.borderTopLeftRadius = 8;
-            _stateIconContainer.style.borderTopRightRadius = 8;
-            _stateIconContainer.style.borderBottomLeftRadius = 8;
-            _stateIconContainer.style.borderBottomRightRadius = 8;
+            _stateIconContainer.style.backgroundColor = HudPlateBg;
+            DashFallTheme.SetUniformRadius(_stateIconContainer, HudRadius);
+
+            // Every surface in the shared system is a fill plus a 1px edge, and the edge matters more
+            // out here than it does in the panel: without it a translucent plate has no boundary
+            // against bright ice. Border width is drawn inside the box, so the 128 square set above is
+            // still the outer footprint and the glyph below just scales to the smaller content box.
+            DashFallTheme.SetUniformBorder(_stateIconContainer, 1f, DashFallTheme.PanelBorder);
+            _stateIconContainer.style.borderBottomWidth = HudBandWidth;
+            _stateIconContainer.style.borderBottomColor = StateBandColor(_currentState);
+
             _stateIconContainer.style.display = UITK.DisplayStyle.None;
             _stateIconContainer.pickingMode = UITK.PickingMode.Ignore;
             _hudRoot.Add(_stateIconContainer);
@@ -256,10 +284,30 @@ namespace DashFallMod.Client
             else
             {
                 _stateIconContainer.style.display = UITK.DisplayStyle.Flex;
+                _stateIconContainer.style.borderBottomColor = StateBandColor(_currentState);
                 _stateIcon.style.backgroundImage = new UITK.StyleBackground(tex);
             }
         }
-        
+
+        // Paints the bottom band for a state. This is the only per-state styling in the HUD and it
+        // rides UpdateIconDisplay, which only runs when the state actually changes, so nothing here
+        // costs a frame. The ramp stays inside the mod's two hues: quiet accent while the skater is
+        // simply upright, full accent while one of our abilities is mid-flight, and Danger once they
+        // are down, which is the one state the player needs to read without looking at the glyph.
+        private static Color StateBandColor(PlayerStateIcon state)
+        {
+            switch (state)
+            {
+                case PlayerStateIcon.Dashing:
+                case PlayerStateIcon.Twisting:
+                    return DashFallTheme.Accent;
+                case PlayerStateIcon.Fallen:
+                    return DashFallTheme.Danger;
+                default:
+                    return DashFallTheme.AccentDim;
+            }
+        }
+
         private Texture2D GetIconForState(PlayerStateIcon state)
         {
             switch (state)
