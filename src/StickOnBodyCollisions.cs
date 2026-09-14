@@ -72,5 +72,15 @@ namespace CompetitivePuckTweaks.src {
                 }
             }
         }
+
+        [HarmonyPatch(typeof(Stick), nameof(Stick.OnNetworkDespawn))]
+        public class Stick_OnNetworkDespawn_Patch {
+            [HarmonyPrefix]
+            public static bool Prefix(Stick __instance) {
+                if (__instance.Rigidbody && __instance.Rigidbody != null)
+                    _currentlyIgnoredStickCollisions.Remove(__instance.Rigidbody);
+                return true;
+            }
+        }
     }
 }
