@@ -115,34 +115,6 @@ namespace CompetitivePuckTweaks.src {
             puck.StickCollider.hasModifiableContacts = true;
             puck.IceCollider.hasModifiableContacts = true;
 
-            // --- PuckModifier integration: catch generosity ---
-            // World-space size of the stick-catch hitbox held steady at
-            // CatchGenerosity times its ORIGINAL size, independent of how
-            // small/large PuckScale/PuckThicknessScale make the puck LOOK.
-            // Division, not multiplication, because Unity scales COMPOUND
-            // through a parent-child hierarchy: as the parent (puck root)
-            // shrinks, the child's local scale must grow by the same factor
-            // to keep the compound (world) result unchanged — identical
-            // reasoning to PuckModifier's own version of this.
-            if (!Mathf.Approximately(PluginCore.config.PuckCatchGenerosity, 1f)
-                && puck.StickCollider.transform != puck.transform) {
-                int puckId = puck.GetInstanceID();
-                UnityEngine.Vector3 originalStickScale;
-                if (!_originalStickColliderScale.TryGetValue(puckId, out originalStickScale)) {
-                    originalStickScale = puck.StickCollider.transform.localScale;
-                    _originalStickColliderScale[puckId] = originalStickScale;
-                }
-
-                UnityEngine.Vector3 safeScale = new UnityEngine.Vector3(
-                    Mathf.Max(0.01f, puckScale.x), Mathf.Max(0.01f, puckScale.y), Mathf.Max(0.01f, puckScale.z));
-                float generosity = PluginCore.config.PuckCatchGenerosity;
-
-                puck.StickCollider.transform.localScale = new UnityEngine.Vector3(
-                    originalStickScale.x * generosity / safeScale.x,
-                    originalStickScale.y * generosity / safeScale.y,
-                    originalStickScale.z * generosity / safeScale.z);
-            }
-
             // --- PuckModifier integration: goal net caps, spin, grounded check, center of mass ---
             if (PluginCore.config.PuckGoalNetLinearDamp >= 0f)
                 Traverse.Create(puck).Field("goalNetLinearVelocityMaximumMagnitude")

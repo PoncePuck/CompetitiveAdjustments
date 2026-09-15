@@ -287,13 +287,6 @@ namespace CompetitiveAdjustments {
         // "leave vanilla alone" fields below.
         public float PuckAngularDrag = -1f;
 
-        // World-space size of the puck's OWN stick-catch hitbox, as a
-        // multiplier on the puck's original (pre-any-scaling) StickCollider
-        // size — independent of how small/large PuckScale makes the puck
-        // LOOK. See ApplyPuckPhysics's own comment on why this needs its own
-        // counter-scale, same reasoning as PuckModifier's own.
-        public float PuckCatchGenerosity = 1f;
-
         // "Free"/airborne inertia tensor — vanilla's own default is 0.002 on
         // every axis. ApplyPuckPhysics already sets stickTensor (the tensor
         // used WHILE touching a stick); this is the OTHER one, used whenever
