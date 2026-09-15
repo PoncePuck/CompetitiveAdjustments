@@ -155,15 +155,18 @@ namespace CompetitivePuckTweaks.src {
 
         private static void Apply(Puck puck) {
             if (puck == null) return;
+            
             var nm = NetworkManager.Singleton;
             if (nm == null || !nm.IsServer) return;
+
+            if (puck.IsGrounded) return;
 
             float k = PluginCore.config.PuckAirDrag;
             if (k <= 0f) return;
 
             var rb = puck.Rigidbody;
-            if (rb == null || rb.isKinematic) return;
-            if (puck.IsGrounded) return;
+            if (rb == null) return;
+            if (rb.isKinematic) return;
 
             Vector3 velocity = rb.linearVelocity;
             float speed = velocity.magnitude;
