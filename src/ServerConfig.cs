@@ -262,6 +262,145 @@ namespace CompetitiveAdjustments {
         public float PuckHeightLimit = 2f;
         public float PuckHeightDragFactor = 0f;
 
+        // --- Puck, extended (PuckModifier integration) ---
+        // Everything below mirrors a field from PuckModifier's own preset JSON
+        // format that had no existing home in this file. See
+        // PuckPresetImporter.cs for the field-by-field mapping from that JSON
+        // onto these, and Tweaks.PuckAdvancedPhysics.cs for the gravity
+        // shaping, contact dampening, and launch cap this feeds — those are
+        // NEW mechanics, ported from PuckModifier's own working
+        // implementation rather than written fresh, specifically to avoid
+        // re-discovering bugs that mod's own iteration history already found
+        // and fixed once.
+        //
+        // Every numeric field here defaults to whatever value makes it a
+        // total no-op against vanilla, matching this file's own existing
+        // convention (PuckMaxSpeed=30, PuckStickTensor matching vanilla,
+        // etc. are called out elsewhere in this codebase as no-ops at their
+        // defaults) — a server that never imports a puck preset should see
+        // ZERO behavior change from this section existing at all.
+
+        // PuckDrag already covers LINEAR damping (Rigidbody.linearDamping —
+        // see ApplyPuckPhysics). Nothing in this file sets angular damping
+        // anywhere at all; this fills that gap. -1 = leave vanilla's own
+        // Rigidbody default alone, same sentinel convention as the other
+        // "leave vanilla alone" fields below.
+        public float PuckAngularDrag = -1f;
+
+        // World-space size of the puck's OWN stick-catch hitbox, as a
+        // multiplier on the puck's original (pre-any-scaling) StickCollider
+        // size — independent of how small/large PuckScale makes the puck
+        // LOOK. See ApplyPuckPhysics's own comment on why this needs its own
+        // counter-scale, same reasoning as PuckModifier's own.
+        public float PuckCatchGenerosity = 1f;
+
+        // "Free"/airborne inertia tensor — vanilla's own default is 0.002 on
+        // every axis. ApplyPuckPhysics already sets stickTensor (the tensor
+        // used WHILE touching a stick); this is the OTHER one, used whenever
+        // the puck is not touching a stick, which nothing in this file
+        // currently overrides at all.
+        public float PuckStickFreeTensorX = 0.002f;
+        public float PuckStickFreeTensorY = 0.002f;
+        public float PuckStickFreeTensorZ = 0.002f;
+
+        // Multiplier on Physics.gravity, airborne only — grounded is
+        // deliberately excluded so this can never leak into ice-glide
+        // friction (increased normal force -> increased friction
+        // deceleration via F=mu*N), the same coupling bug PuckModifier's own
+        // gravity patch was built to avoid. 1 = untouched, vanilla gravity.
+        public float PuckGravityMultiplier = 1f;
+        // Height (m) above the puck's own last-grounded position below which
+        // GravityMultiplier ramps toward 1 (a low pass stays a low pass) and
+        // above which it ramps toward its full configured value (a genuine
+        // lofted chip actually arcs). See Tweaks.PuckAdvancedPhysics.cs.
+        public float PuckGravityPassHeightThreshold = 0f;
+        public float PuckGravityLoftHeightThreshold = 0.5f;
+
+        // Quadratic (v^2) air resistance, airborne only, closed-form
+        // integrated so it can never reverse or overshoot a puck's velocity
+        // regardless of tick rate — see Tweaks.PuckAdvancedPhysics.cs for
+        // why this is not just PuckDrag with a bigger number. 0 = off.
+        public float PuckAirDrag = 0f;
+        // Multiplies PuckAirDrag when the puck presents its flat face to its
+        // own direction of travel rather than its edge. 1 = no difference
+        // between edge-on and face-on flight.
+        public float PuckFlatFaceDragFactor = 1f;
+
+        // Friction coefficient for the puck's own ice/board contact material.
+        // Applied via a PhysicsMaterial on IceCollider — see
+        // ApplyPuckPhysics's own comment on why this cannot be a Rigidbody
+        // property; the base game's own friction lives on the asset-bundle
+        // collider material, not in code, the same fact CA's own README
+        // already notes.
+        public float PuckIceFriction = -1f;
+        // Restitution for ice/board contact. -1 (rather than a real
+        // restitution value like 0 or 1) is the "leave vanilla's own asset
+        // material alone" sentinel — 0 is a fully valid, deliberately chosen
+        // value (a puck that never bounces off the boards at all), so it
+        // cannot ALSO mean "unset, don't touch this."
+        public float PuckBounciness = -1f;
+        // Separate restitution specifically for stick-on-puck contact,
+        // independent of PuckBounciness — same -1 "leave alone" sentinel.
+        // PuckModifier's own history is the reason these are split at all:
+        // a single shared bounciness value made stick touches elastic
+        // whenever board bounce was tuned up to stop boards killing
+        // momentum too fast, an unwanted coupling between two contacts that
+        // should never have shared one number.
+        public float PuckStickContactBounciness = -1f;
+
+        // Below this relative contact speed (m/s), a stick-puck touch reads
+        // as an incidental brush rather than a deliberate hit, and this
+        // tick's velocity change is scaled down rather than passed through
+        // at full strength. 0 = feature off (every contact treated as
+        // deliberate, i.e. today's behavior).
+        public float PuckMinDeliberateContactSpeed = 0f;
+        // Fraction of an incidental contact's velocity change that still
+        // gets through, ramped smoothly rather than a hard cutoff. 1 = no
+        // dampening even when MinDeliberateContactSpeed is set (a no-op
+        // pairing, same idea as the -1 bounciness sentinels above).
+        public float PuckIncidentalContactDampening = 1f;
+
+        // Per-flight vertical launch speed ceiling (m/s), anchored to the
+        // puck's velocity the last time it was actually grounded and
+        // randomized 70-100% of this value per flight — see
+        // Tweaks.PuckAdvancedPhysics.cs for why both of those specifics
+        // matter; a naive version of this cap was exploitable two different
+        // ways during PuckModifier's own development before landing here.
+        // 0 = feature off (no cap).
+        public float PuckMaxLaunchVerticalSpeed = 0f;
+
+        public float PuckMaxShotSpin = -1f; // -1 = leave vanilla's own value alone
+        public float PuckMaxAngularVelocity = -1f; // same sentinel
+
+        // World-space radius for the puck's own "is it touching the ice"
+        // check. Must track scale — see ApplyPuckPhysics's own comment — or
+        // a shrunken puck stops detecting the ice at all. -1 = leave
+        // vanilla's own value alone.
+        public float PuckGroundedCheckRadius = -1f;
+        // Y offset applied to the puck's own center of mass. 0 IS a valid,
+        // meaningful value (centered, no offset) as well as vanilla's own
+        // default, so unlike the -1 sentinels above this one has no way to
+        // distinguish "explicitly zero" from "unset" — accepted as a minor
+        // gap rather than adding a separate bool just for this one field.
+        public float PuckCenterOfMassY = 0f;
+
+        public float PuckGoalNetLinearDamp = -1f; // -1 = leave vanilla's own value alone
+        public float PuckGoalNetAngularDamp = -1f; // same sentinel
+
+        // When true, mass/inertia are computed FROM PuckScale rather than
+        // read from PuckMass/tensor fields directly — mirrors PuckModifier's
+        // own deriveMassFromScale/deriveInertiaFromScale, off by default so
+        // an imported preset with these left at PuckModifier's own explicit
+        // "false" (as PakNewPuck.json's does) behaves identically here.
+        public bool PuckDeriveMassFromScale = false;
+        public bool PuckDeriveInertiaFromScale = false;
+
+        // Compensates the net's own anti-tunnelling sphere collider for
+        // PuckScale, so a shrunken puck does not also shrink the net's
+        // "definitely count this as a goal" volume. Off by default; only
+        // meaningful once PuckScale is actually non-1.
+        public bool PuckCompensateNetSphere = false;
+
         // --- Stick ---
         public bool DisableStickCollision = false;
         public bool DisableShaftCollision = false;
@@ -910,7 +1049,11 @@ namespace CompetitiveAdjustments {
                 || !clean.Contains("\"EnableCompAdjust\"")
                 || !clean.Contains("\"EnableCompTweaks\"")
                 || !clean.Contains("\"Admin\"")
-                || !clean.Contains("\"EditorPassword\"");
+                || !clean.Contains("\"EditorPassword\"")
+                // v18: PuckModifier integration fields — one representative
+                // field is enough to detect a pre-v18 file, same pattern as
+                // every check above.
+                || !clean.Contains("\"PuckCatchGenerosity\"");
         }
 
         // Read the integer ConfigVersion, or -1 if absent/unparseable.  Parsing
