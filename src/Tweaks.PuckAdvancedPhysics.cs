@@ -94,13 +94,13 @@ namespace CompetitivePuckTweaks.src {
             var nm = NetworkManager.Singleton;
             if (nm == null || !nm.IsServer) return;
 
-            float multiplier = PluginCore.config.PuckGravityMultiplier;
-
             var rb = puck.Rigidbody;
             if (rb == null) return;
 
             int id = puck.GetInstanceID();
             if (puck.IsGrounded) _lastGroundedY[id] = puck.transform.position.y;
+
+            float multiplier = PluginCore.config.PuckGravityMultiplier;
 
             // At 1.0 hand gravity back to PhysX, which integrates it per
             // substep and is strictly more accurate than anything applied
