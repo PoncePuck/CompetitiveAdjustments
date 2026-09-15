@@ -4,11 +4,9 @@ using UnityEngine;
 using HarmonyLib;
 using Unity.Netcode;
 
-namespace CompetitivePuckTweaks.src
-{
+namespace CompetitivePuckTweaks.src {
     [HarmonyPatch(typeof(Puck), "OnNetworkPostSpawn")]
-    public class PuckPatch
-    {
+    public class PuckPatch {
         // Throttle for the "heal missed sync" fan-out below. Multiple puck
         // spawns in quick succession (warmup, multi-puck modes) used to send
         // a ManualSync per puck per client; once per second is plenty since
@@ -17,8 +15,7 @@ namespace CompetitivePuckTweaks.src
         private const float ServerFanoutCooldown = 1f;
 
         [HarmonyPostfix]
-        public static void Postfix(Puck __instance)
-        {
+        public static void Postfix(Puck __instance) {
             // Apply the full tuned puck physics. Extracted into ApplyPuckPhysics
             // so the PuckManager phase-spawn postfix can re-assert it when a game
             // starts; recycled pucks otherwise revert to vanilla mass/bounciness
@@ -31,21 +28,17 @@ namespace CompetitivePuckTweaks.src
             // Throttled to once per ServerFanoutCooldown to avoid an N pucks x M
             // clients burst on multi-puck spawns (warmup, etc.).
             var nm = NetworkManager.Singleton;
-            if (nm != null && nm.IsServer)
-            {
+            if (nm != null && nm.IsServer) {
                 float now = Time.unscaledTime;
-                if (now >= _nextServerFanoutAt)
-                {
+                if (now >= _nextServerFanoutAt) {
                     _nextServerFanoutAt = now + ServerFanoutCooldown;
-                    foreach (ulong clientId in nm.ConnectedClientsIds)
-                    {
+                    foreach (ulong clientId in nm.ConnectedClientsIds) {
                         if (clientId == NetworkManager.ServerClientId) continue;
                         PluginCore.ManualSync(clientId);
                     }
                 }
             }
-            else if (nm != null && nm.IsClient)
-            {
+            else if (nm != null && nm.IsClient) {
                 CompetitiveCompanion.PluginCore.RequestConfigSyncFromServer("PuckSpawn");
             }
         }
@@ -58,8 +51,7 @@ namespace CompetitivePuckTweaks.src
         /// private maxSpeed / stickTensor fields are written through Traverse so
         /// this can run outside the Harmony patch's ref-parameter context.
         /// </summary>
-        public static void ApplyPuckPhysics(Puck puck)
-        {
+        public static void ApplyPuckPhysics(Puck puck) {
             if (puck == null) return;
 
             UnityEngine.Vector3 puckScale = GetSyncedPuckScaleVector();
@@ -83,10 +75,8 @@ namespace CompetitivePuckTweaks.src
             if (CompetitiveAdjustments.BallModeHelper.IsBallModeEnabled)
                 CompetitiveAdjustments.BallModeHelper.TransformPuckToBall(puck);
 
-            if (PluginCore.config.EnableMidStickCollider)
-            {
-                foreach (Stick stick in UnityEngine.Object.FindObjectsByType<Stick>(FindObjectsSortMode.None))
-                {
+            if (PluginCore.config.EnableMidStickCollider) {
+                foreach (Stick stick in UnityEngine.Object.FindObjectsByType<Stick>(FindObjectsSortMode.None)) {
                     Physics.IgnoreCollision(puck.StickCollider, stick.GetComponent<BoxCollider>());
                     Physics.IgnoreCollision(puck.IceCollider, stick.GetComponent<BoxCollider>());
                 }
@@ -102,10 +92,8 @@ namespace CompetitivePuckTweaks.src
         /// This is the single source of truth for puck scale; every other
         /// application site reads through it so server and clients agree.
         /// </summary>
-        public static UnityEngine.Vector3 GetSyncedPuckScaleVector()
-        {
-            try
-            {
+        public static UnityEngine.Vector3 GetSyncedPuckScaleVector() {
+            try {
                 // Try to get from synced client config, which receives updates from server via CMM
                 var companionConfig = CompetitiveCompanion.PluginCore.config;
                 if (companionConfig != null && companionConfig.PuckScale > 0.01f)
@@ -133,8 +121,7 @@ namespace CompetitivePuckTweaks.src
         /// into an ellipsoid; BallModeHelper resizes the sphere collider to track
         /// the squashed shape (see UpdateBallColliderRadius).
         /// </summary>
-        private static UnityEngine.Vector3 ComposeScale(float uniform, float x, float y, float z)
-        {
+        private static UnityEngine.Vector3 ComposeScale(float uniform, float x, float y, float z) {
             if (x <= 0f) x = 1f;
             if (y <= 0f) y = 1f;
             if (z <= 0f) z = 1f;
@@ -144,20 +131,16 @@ namespace CompetitivePuckTweaks.src
 
 
     [HarmonyPatch(typeof(Puck), "FixedUpdate")]
-    public class HeightDragTweak
-    {
+    public class HeightDragTweak {
         [HarmonyPostfix]
-        public static void Postfix(Puck __instance)
-        {
+        public static void Postfix(Puck __instance) {
             if (!PluginCore.config.PuckDragSpeedDependence) return;
             float delta = __instance.Rigidbody.linearVelocity.magnitude - PluginCore.config.PuckNominalSpeed;
             float newDrag = PluginCore.config.PuckDrag * (1 + PluginCore.config.PuckDragFactor * delta * delta * delta);
             __instance.Rigidbody.linearDamping = Mathf.Max(PluginCore.config.PuckDrag, newDrag);
 
-            if (PluginCore.config.PuckHeightDependentDrag)
-            {
-                if (__instance.Rigidbody.position.y > PluginCore.config.PuckHeightLimit && __instance.Rigidbody.linearVelocity.y > 0)
-                {
+            if (PluginCore.config.PuckHeightDependentDrag) {
+                if (__instance.Rigidbody.position.y > PluginCore.config.PuckHeightLimit && __instance.Rigidbody.linearVelocity.y > 0) {
                     float overheight = __instance.Rigidbody.position.y - PluginCore.config.PuckHeightLimit;
                     float heightDrag = PluginCore.config.PuckHeightDragFactor * overheight;
                     __instance.Rigidbody.AddForce(new UnityEngine.Vector3(0f, -heightDrag, 0f), ForceMode.VelocityChange);
@@ -167,11 +150,9 @@ namespace CompetitivePuckTweaks.src
     }
 
     [HarmonyPatch(typeof(Puck), "OnNetworkDespawn")]
-    public class PuckDespawnPatch
-    {
+    public class PuckDespawnPatch {
         [HarmonyPrefix]
-        public static void Prefix(Puck __instance)
-        {
+        public static void Prefix(Puck __instance) {
             if (PluginCore.PuckIDs.Contains(__instance.StickCollider.GetInstanceID())) { PluginCore.PuckIDs.Remove(__instance.StickCollider.GetInstanceID()); }
             if (PluginCore.PuckIDs.Contains(__instance.IceCollider.GetInstanceID())) { PluginCore.PuckIDs.Remove(__instance.IceCollider.GetInstanceID()); }
             CompetitiveAdjustments.BallModeHelper.OnPuckDespawned(__instance);
