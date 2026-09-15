@@ -325,7 +325,7 @@ namespace CompetitiveAdjustments {
         // Single source of truth for the config schema version.  Bump this
         // whenever fields are added or removed so existing files are migrated
         // (merged onto the current defaults) on the next load.
-        public const int CURRENT_VERSION = 17;
+        public const int CURRENT_VERSION = 18;
         public int ConfigVersion = CURRENT_VERSION;
         // Top-level section enables.  Each gates a whole feature category so
         // a user who only wants one category can disable the others without
