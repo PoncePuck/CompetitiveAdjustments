@@ -105,8 +105,8 @@ namespace CompetitivePuckTweaks.src
                 
                 if (CompetitiveAdjustments.ConfigManager.CompTweaksEffective?.ThinSkaterBodies == true)
                     Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 9, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
-
-                Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 8, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
+                else
+                    Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 8, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
 
                 ApplySimulationStep(config.FixedDeltaTime);
                 Physics.defaultSolverIterations = config.SolverIterations;
@@ -408,7 +408,8 @@ namespace CompetitivePuckTweaks.src
             Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, StickOnBodyCollisions.STICK_LAYER, config.DisableStickCollision);
             if (CompetitiveAdjustments.ConfigManager.CompTweaksEffective.ThinSkaterBodies)
                 Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 9, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
-            Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 8, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
+            else
+                Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 8, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
             ApplySimulationStep(config.FixedDeltaTime);
             Physics.defaultSolverIterations = config.SolverIterations;
 

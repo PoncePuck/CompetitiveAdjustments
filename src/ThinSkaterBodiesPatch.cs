@@ -1,5 +1,6 @@
 ﻿using CompetitivePuckTweaks.src;
 using HarmonyLib;
+using System.Collections.Concurrent;
 using System.Linq;
 using Unity.Netcode;
 using UnityEngine;
@@ -11,17 +12,33 @@ namespace DashFallMod {
     // only ever installed where Tweaks.PluginCore.OnEnable succeeds (a dedicated
     // server or listen host), so a remote client never got the patch and never
     // saw a thinned body at all. Same fix as PlayerLegPadPatch.
-    [HarmonyPatch(typeof(PlayerBodyV2), "OnNetworkPostSpawn")]
     public static class ThinSkaterBodiesPatch {
-        [HarmonyPostfix]
-        public static void Postfix(PlayerBody __instance, ref PlayerMesh ___playerMesh) {
-            ApplyThinSkaterBody(__instance, ___playerMesh);
+        private static readonly LockDictionary<PlayerBody, bool> _patchedPlayerBodies = new LockDictionary<PlayerBody, bool>();
+
+        [HarmonyPatch(typeof(PlayerBody), "OnNetworkPostSpawn")]
+        public static class ThinSkaterBodies_OnNetworkPostSpawn_Patch {
+            [HarmonyPostfix]
+            public static void Postfix(PlayerBody __instance, ref PlayerMesh ___playerMesh) {
+                ApplyThinSkaterBody(__instance, ___playerMesh);
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerBody), nameof(PlayerBody.OnNetworkDespawn))]
+        public static class ThinSkaterBodies_OnNetworkDespawn_Patch {
+            [HarmonyPrefix]
+            public static bool Prefix(PlayerBody __instance) {
+                _patchedPlayerBodies.Remove(__instance);
+                return true;
+            }
         }
 
         public static void ApplyThinSkaterBody(PlayerBody playerBody, PlayerMesh playerMesh, bool includeGoalie = false) {
             if (CompetitiveAdjustments.ConfigManager.CompTweaksEffective == null || !CompetitiveAdjustments.ConfigManager.CompTweaksEffective.ThinSkaterBodies)
                 return;
             if (playerMesh == null)
+                return;
+
+            if (_patchedPlayerBodies.ContainsKey(playerBody))
                 return;
 
             float factor = CompetitiveAdjustments.ConfigManager.CompTweaksEffective.SkaterThinningFactor;
@@ -45,14 +62,28 @@ namespace DashFallMod {
 
                 if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer) {
                     groinMc.convex = true;
+                    groinMc.excludeLayers = capsule.excludeLayers;
+                    groinMc.includeLayers = capsule.includeLayers;
                     if (!CompetitiveAdjustments.ConfigManager.CompTweaksEffective.EnablePuckThroughGroin) {
                         groinMc.excludeLayers &= ~(1 << puckLayer);
                         groinMc.includeLayers |= (1 << puckLayer);
                     }
+                    else {
+                        groinMc.includeLayers &= ~(1 << puckLayer);
+                        groinMc.excludeLayers |= (1 << puckLayer);
+                    }
+
                     if (CompetitiveAdjustments.ConfigManager.CompAdjustEffective.StickBodyCollision) {
                         groinMc.excludeLayers &= ~(1 << StickOnBodyCollisions.STICK_LAYER);
                         groinMc.includeLayers |= (1 << StickOnBodyCollisions.STICK_LAYER);
                     }
+                    else {
+                        groinMc.includeLayers &= ~(1 << StickOnBodyCollisions.STICK_LAYER);
+                        groinMc.excludeLayers |= (1 << StickOnBodyCollisions.STICK_LAYER);
+                    }
+
+                    groinMc.excludeLayers &= ~(1 << groinMc.gameObject.layer);
+                    groinMc.includeLayers |= (1 << groinMc.gameObject.layer);
 
                     if (capsule.material != null) {
                         if (groinMc.material == null)
@@ -75,16 +106,31 @@ namespace DashFallMod {
 
                 if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer) {
                     torsoMc.convex = true;
-                    torsoMc.excludeLayers = ~(torsoMc.excludeLayers | capsule.excludeLayers);
-                    torsoMc.includeLayers = ~(torsoMc.includeLayers | capsule.includeLayers);
+                    torsoMc.excludeLayers = capsule.excludeLayers;
+                    torsoMc.includeLayers = capsule.includeLayers;
                     if (!CompetitiveAdjustments.ConfigManager.CompTweaksEffective.EnablePuckThroughBodies) {
                         torsoMc.excludeLayers &= ~(1 << puckLayer);
                         torsoMc.includeLayers |= (1 << puckLayer);
                     }
+                    else {
+                        torsoMc.includeLayers &= ~(1 << puckLayer);
+                        torsoMc.excludeLayers |= (1 << puckLayer);
+                    }
+
                     if (CompetitiveAdjustments.ConfigManager.CompAdjustEffective.StickBodyCollision) {
                         torsoMc.excludeLayers &= ~(1 << StickOnBodyCollisions.STICK_LAYER);
                         torsoMc.includeLayers |= (1 << StickOnBodyCollisions.STICK_LAYER);
                     }
+                    else {
+                        torsoMc.includeLayers &= ~(1 << StickOnBodyCollisions.STICK_LAYER);
+                        torsoMc.excludeLayers |= (1 << StickOnBodyCollisions.STICK_LAYER);
+                    }
+
+                    torsoMc.excludeLayers &= ~(1 << torsoMc.gameObject.layer);
+                    torsoMc.includeLayers |= (1 << torsoMc.gameObject.layer);
+
+                    torsoMc.excludeLayers &= ~(1 << torsoMc.gameObject.layer);
+                    torsoMc.includeLayers |= (1 << torsoMc.gameObject.layer);
 
                     if (capsule.material != null) {
                         if (torsoMc.material == null)
@@ -97,7 +143,30 @@ namespace DashFallMod {
                 }
             }
 
-            capsule.enabled = false;
+            capsule.excludeLayers |= (1 << capsule.gameObject.layer);
+            capsule.includeLayers &= ~(1 << capsule.gameObject.layer);
+
+            capsule.excludeLayers |= (1 << StickOnBodyCollisions.STICK_LAYER);
+            capsule.includeLayers &= ~(1 << StickOnBodyCollisions.STICK_LAYER);
+
+            capsule.excludeLayers |= (1 << puckLayer);
+            capsule.includeLayers &= ~(1 << puckLayer);
+
+            capsule.excludeLayers |= (1 << puckLayer);
+            capsule.includeLayers &= ~(1 << puckLayer);
+
+            int newCollidersLayer = -1;
+            if (torsoMcs.Length != 0)
+                newCollidersLayer = torsoMcs.First().gameObject.layer;
+            else if (groinMcs.Length != 0)
+                newCollidersLayer = groinMcs.First().gameObject.layer;
+
+            if (newCollidersLayer != -1) {
+                capsule.excludeLayers |= (1 << newCollidersLayer);
+                capsule.includeLayers &= ~(1 << newCollidersLayer);
+            }
+
+            _patchedPlayerBodies.AddOrUpdate(playerBody, true);
         }
 
         public static void RefreshAllPlayers() {
