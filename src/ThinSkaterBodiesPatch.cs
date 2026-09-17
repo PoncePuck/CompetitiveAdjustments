@@ -1,4 +1,7 @@
-﻿using HarmonyLib;
+﻿using CompetitivePuckTweaks.src;
+using HarmonyLib;
+using System.Linq;
+using Unity.Netcode;
 using UnityEngine;
 
 namespace DashFallMod {
@@ -12,34 +15,97 @@ namespace DashFallMod {
     public static class ThinSkaterBodiesPatch {
         [HarmonyPostfix]
         public static void Postfix(PlayerBody __instance, ref PlayerMesh ___playerMesh) {
-            var cfg = CompetitiveAdjustments.ConfigManager.CompTweaksEffective;
-            if (cfg == null || !cfg.ThinSkaterBodies || ___playerMesh == null || __instance.name.Contains("Goalie")) return;
+            ApplyThinSkaterBody(__instance, ___playerMesh);
+        }
 
-            float factor = cfg.SkaterThinningFactor;
+        public static void ApplyThinSkaterBody(PlayerBody playerBody, PlayerMesh playerMesh, bool includeGoalie = false) {
+            if (CompetitiveAdjustments.ConfigManager.CompTweaksEffective == null || !CompetitiveAdjustments.ConfigManager.CompTweaksEffective.ThinSkaterBodies)
+                return;
+            if (playerMesh == null)
+                return;
+
+            float factor = CompetitiveAdjustments.ConfigManager.CompTweaksEffective.SkaterThinningFactor;
             if (factor == 1f)
                 return;
 
-            var groinMcs = ___playerMesh.PlayerGroin?.GetComponentsInChildren<MeshCollider>();
+            if (!includeGoalie && playerBody.name.Contains("Goalie"))
+                return;
+
+            int puckLayer = LayerMask.NameToLayer("Puck");
+
+            var capsule = playerBody.GetComponent<CapsuleCollider>();
+
+            var groinMcs = playerMesh.PlayerGroin?.GetComponentsInChildren<MeshCollider>();
             foreach (MeshCollider groinMc in groinMcs) {
                 if (groinMc == null)
                     continue;
 
                 var s = groinMc.transform.localScale;
                 groinMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
+
+                if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer) {
+                    groinMc.convex = true;
+                    if (!CompetitiveAdjustments.ConfigManager.CompTweaksEffective.EnablePuckThroughGroin) {
+                        groinMc.excludeLayers &= ~(1 << puckLayer);
+                        groinMc.includeLayers |= (1 << puckLayer);
+                    }
+                    if (CompetitiveAdjustments.ConfigManager.CompAdjustEffective.StickBodyCollision) {
+                        groinMc.excludeLayers &= ~(1 << StickOnBodyCollisions.STICK_LAYER);
+                        groinMc.includeLayers |= (1 << StickOnBodyCollisions.STICK_LAYER);
+                    }
+
+                    if (capsule.material != null) {
+                        if (groinMc.material == null)
+                            groinMc.material = new PhysicsMaterial(groinMc.name + "_Mat");
+                        groinMc.material.dynamicFriction = capsule.material.dynamicFriction;
+                        groinMc.material.staticFriction = capsule.material.staticFriction;
+                        groinMc.material.frictionCombine = capsule.material.frictionCombine;
+                        groinMc.material.bounceCombine = capsule.material.bounceCombine;
+                    }
+                }
             }
 
-            var torsoMcs = ___playerMesh.PlayerTorso?.GetComponentsInChildren<MeshCollider>();
+            var torsoMcs = playerMesh.PlayerTorso?.GetComponentsInChildren<MeshCollider>();
             foreach (MeshCollider torsoMc in torsoMcs) {
                 if (torsoMc == null)
                     continue;
 
-                CompetitiveAdjustments.ConfigManager.Log(
-                    $"Torso collider: convex={torsoMc.convex} isTrigger={torsoMc.isTrigger} " +
-                    $"attachedRigidbody={(torsoMc.attachedRigidbody != null ? torsoMc.attachedRigidbody.name : "none")} " +
-                    $"rbKinematic={(torsoMc.attachedRigidbody != null ? torsoMc.attachedRigidbody.isKinematic.ToString() : "n/a")}");
-
                 var s = torsoMc.transform.localScale;
                 torsoMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
+
+                if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer) {
+                    torsoMc.convex = true;
+                    torsoMc.excludeLayers = ~(torsoMc.excludeLayers | capsule.excludeLayers);
+                    torsoMc.includeLayers = ~(torsoMc.includeLayers | capsule.includeLayers);
+                    if (!CompetitiveAdjustments.ConfigManager.CompTweaksEffective.EnablePuckThroughBodies) {
+                        torsoMc.excludeLayers &= ~(1 << puckLayer);
+                        torsoMc.includeLayers |= (1 << puckLayer);
+                    }
+                    if (CompetitiveAdjustments.ConfigManager.CompAdjustEffective.StickBodyCollision) {
+                        torsoMc.excludeLayers &= ~(1 << StickOnBodyCollisions.STICK_LAYER);
+                        torsoMc.includeLayers |= (1 << StickOnBodyCollisions.STICK_LAYER);
+                    }
+
+                    if (capsule.material != null) {
+                        if (torsoMc.material == null)
+                            torsoMc.material = new PhysicsMaterial(torsoMc.name + "_Mat");
+                        torsoMc.material.dynamicFriction = capsule.material.dynamicFriction;
+                        torsoMc.material.staticFriction = capsule.material.staticFriction;
+                        torsoMc.material.frictionCombine = capsule.material.frictionCombine;
+                        torsoMc.material.bounceCombine = capsule.material.bounceCombine;
+                    }
+                }
+            }
+
+            capsule.enabled = false;
+        }
+
+        public static void RefreshAllPlayers() {
+            foreach (Player player in PlayerManager.Instance.GetSpawnedPlayers()) {
+                try {
+                    ApplyThinSkaterBody(player.PlayerBody, player.PlayerBody.PlayerMesh);
+                }
+                catch { }
             }
         }
     }
