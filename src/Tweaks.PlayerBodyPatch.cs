@@ -67,24 +67,6 @@ namespace CompetitivePuckTweaks.src
         public static void Postfix(PlayerBodyV2 __instance, ref float ___slideTurnMultiplier,
          ref float ___stopDrag, ref float ___balanceRecoveryTime, ref PlayerMesh ___playerMesh, ref float ___slideDrag, ref float ___tackleForceMultiplier,
          ref float ___tackleForceThreshold, ref float ___tackleSpeedThreshold) {
-            if (PluginCore.config.ThinSkaterBodies) {
-                // Multiply against the prefab's baseline scale rather than overwriting it.
-                // b897 prefabs ship PlayerTorso/PlayerGroin at (0.4, 0.4, 0.4); the pre-b897
-                // assignment-based form blew the body up to (factor, 1, factor) which made the
-                // stick get stuck on the oversized torso.
-                float factor = PluginCore.config.SkaterThinningFactor;
-                var groinMc = ___playerMesh.PlayerGroin.GetComponentInChildren<MeshCollider>();
-                if (groinMc != null) {
-                    var s = groinMc.transform.localScale;
-                    groinMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
-                }
-                var torsoMc = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>();
-                if (torsoMc != null) {
-                    var s = torsoMc.transform.localScale;
-                    torsoMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
-                }
-            }
-
             if (__instance.Player.IsReplay.Value) return;
 
             // Spawn positioning is server-authoritative -- positions replicate via the
