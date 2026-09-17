@@ -272,6 +272,7 @@ namespace CompetitiveCompanion
                 // Refresh ball mode and free blade for existing objects
                 CompetitiveAdjustments.BallModeHelper.RefreshAllPucks();
                 CompetitivePuckTweaks.src.StickAngleRefs.RefreshFreeBladeForAllPlayers();
+                DashFallMod.ThinSkaterBodiesPatch.RefreshAllPlayers();
 
                 // Set only once every field of the package has been applied. A sync that
                 // threw part way through leaves this false, so the retry loop asks again

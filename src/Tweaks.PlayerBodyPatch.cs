@@ -114,34 +114,18 @@ namespace CompetitivePuckTweaks.src
             if (isGoalie) return;
 
             if (PluginCore.config.EnablePuckThroughBodies && !__instance.Player.IsReplay.Value) {
-                ___playerMesh.PlayerGroin.GetComponentInChildren<MeshCollider>().excludeLayers |= (1 << LayerMask.NameToLayer("Puck"));
-                ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>().excludeLayers |= (1 << LayerMask.NameToLayer("Puck"));
-                ___playerMesh.PlayerHead.GetComponentInChildren<SphereCollider>().excludeLayers |= (1 << LayerMask.NameToLayer("Puck"));
+                int puckLayer = LayerMask.NameToLayer("Puck");
+                ___playerMesh.PlayerGroin.GetComponentInChildren<MeshCollider>().excludeLayers |= (1 << puckLayer);
+                ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>().excludeLayers |= (1 << puckLayer);
+                ___playerMesh.PlayerHead.GetComponentInChildren<SphereCollider>().excludeLayers |= (1 << puckLayer);
             }
 
             if (PluginCore.config.EnablePuckThroughGroin && !__instance.Player.IsReplay.Value) {
-                ___playerMesh.PlayerGroin.GetComponentInChildren<MeshCollider>().excludeLayers |= (1 << LayerMask.NameToLayer("Puck"));
+                int puckLayer = LayerMask.NameToLayer("Puck");
+                ___playerMesh.PlayerGroin.GetComponentInChildren<MeshCollider>().excludeLayers |= (1 << puckLayer);
             }
 
             ___slideDrag = PluginCore.config.SlideDrag;
-
-            if (PluginCore.config.ThinSkaterBodies) {
-                // Multiply against the prefab's baseline scale rather than overwriting it.
-                // b897 prefabs ship PlayerTorso/PlayerGroin at (0.4, 0.4, 0.4); the pre-b897
-                // assignment-based form blew the body up to (factor, 1, factor) which made the
-                // stick get stuck on the oversized torso.
-                float factor = PluginCore.config.SkaterThinningFactor;
-                var groinMc = ___playerMesh.PlayerGroin.GetComponentInChildren<MeshCollider>();
-                if (groinMc != null) {
-                    var s = groinMc.transform.localScale;
-                    groinMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
-                }
-                var torsoMc = ___playerMesh.PlayerTorso.GetComponentInChildren<MeshCollider>();
-                if (torsoMc != null) {
-                    var s = torsoMc.transform.localScale;
-                    torsoMc.transform.localScale = new Vector3(s.x * factor, s.y, s.z * factor);
-                }
-            }
         }
     }
 
