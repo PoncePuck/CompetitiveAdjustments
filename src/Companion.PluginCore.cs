@@ -302,11 +302,5 @@ namespace CompetitiveCompanion
                 Debug.LogError($"[{CompetitiveAdjustments.SharedConstants.MOD_NAME}] Error receiving config sync: {e}");
             }
         }
-
-        public static void Log(string message)
-        {
-            Debug.Log($"[{CompetitiveAdjustments.SharedConstants.MOD_NAME}] " + message);
-        }
-
     }
 }
