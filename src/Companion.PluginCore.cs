@@ -3,8 +3,6 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 using HarmonyLib;
-using System.IO;
-using System.Reflection;
 using Unity.Netcode;
 using DashFallMod.Client;
 
@@ -272,6 +270,7 @@ namespace CompetitiveCompanion
                 // Refresh ball mode and free blade for existing objects
                 CompetitiveAdjustments.BallModeHelper.RefreshAllPucks();
                 CompetitivePuckTweaks.src.StickAngleRefs.RefreshFreeBladeForAllPlayers();
+                DashFallMod.ThinSkaterBodiesPatch.RefreshAllPlayers();
 
                 // Set only once every field of the package has been applied. A sync that
                 // threw part way through leaves this false, so the retry loop asks again
@@ -301,11 +300,5 @@ namespace CompetitiveCompanion
                 Debug.LogError($"[{CompetitiveAdjustments.SharedConstants.MOD_NAME}] Error receiving config sync: {e}");
             }
         }
-
-        public static void Log(string message)
-        {
-            Debug.Log($"[{CompetitiveAdjustments.SharedConstants.MOD_NAME}] " + message);
-        }
-
     }
 }

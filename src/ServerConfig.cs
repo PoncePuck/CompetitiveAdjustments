@@ -8,11 +8,9 @@ using System.IO;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
-namespace CompetitiveAdjustments
-{
+namespace CompetitiveAdjustments {
     [Serializable]
-    public class DashfallConfig
-    {
+    public class DashfallConfig {
         public bool EnableDebugLogs = false;
 
         // --- Dash Settings ---
@@ -61,8 +59,7 @@ namespace CompetitiveAdjustments
     }
 
     [Serializable]
-    public class CompAdjustConfig
-    {
+    public class CompAdjustConfig {
         public bool SprintShoulderTrailEnabled = true;
         public bool EnableGoalNetTweaks = false;
         public float GoalThicknessScale = 1f;
@@ -156,8 +153,7 @@ namespace CompetitiveAdjustments
     }
 
     [Serializable]
-    public class CompTweaksConfig
-    {
+    public class CompTweaksConfig {
         // --- Movement ---
         public float TurnAccelerationBase = 1.5f;
         public float TurnBrakeAccelerationBase = 4.5f;
@@ -266,6 +262,138 @@ namespace CompetitiveAdjustments
         public float PuckHeightLimit = 2f;
         public float PuckHeightDragFactor = 0f;
 
+        // --- Puck, extended (PuckModifier integration) ---
+        // Everything below mirrors a field from PuckModifier's own preset JSON
+        // format that had no existing home in this file. See
+        // PuckPresetImporter.cs for the field-by-field mapping from that JSON
+        // onto these, and Tweaks.PuckAdvancedPhysics.cs for the gravity
+        // shaping, contact dampening, and launch cap this feeds — those are
+        // NEW mechanics, ported from PuckModifier's own working
+        // implementation rather than written fresh, specifically to avoid
+        // re-discovering bugs that mod's own iteration history already found
+        // and fixed once.
+        //
+        // Every numeric field here defaults to whatever value makes it a
+        // total no-op against vanilla, matching this file's own existing
+        // convention (PuckMaxSpeed=30, PuckStickTensor matching vanilla,
+        // etc. are called out elsewhere in this codebase as no-ops at their
+        // defaults) — a server that never imports a puck preset should see
+        // ZERO behavior change from this section existing at all.
+
+        // PuckDrag already covers LINEAR damping (Rigidbody.linearDamping —
+        // see ApplyPuckPhysics). Nothing in this file sets angular damping
+        // anywhere at all; this fills that gap. -1 = leave vanilla's own
+        // Rigidbody default alone, same sentinel convention as the other
+        // "leave vanilla alone" fields below.
+        public float PuckAngularDrag = -1f;
+
+        // "Free"/airborne inertia tensor — vanilla's own default is 0.002 on
+        // every axis. ApplyPuckPhysics already sets stickTensor (the tensor
+        // used WHILE touching a stick); this is the OTHER one, used whenever
+        // the puck is not touching a stick, which nothing in this file
+        // currently overrides at all.
+        public float PuckStickFreeTensorX = 0.002f;
+        public float PuckStickFreeTensorY = 0.002f;
+        public float PuckStickFreeTensorZ = 0.002f;
+
+        // Multiplier on Physics.gravity, airborne only — grounded is
+        // deliberately excluded so this can never leak into ice-glide
+        // friction (increased normal force -> increased friction
+        // deceleration via F=mu*N), the same coupling bug PuckModifier's own
+        // gravity patch was built to avoid. 1 = untouched, vanilla gravity.
+        public float PuckGravityMultiplier = 1f;
+        // Height (m) above the puck's own last-grounded position below which
+        // GravityMultiplier ramps toward 1 (a low pass stays a low pass) and
+        // above which it ramps toward its full configured value (a genuine
+        // lofted chip actually arcs). See Tweaks.PuckAdvancedPhysics.cs.
+        public float PuckGravityPassHeightThreshold = 0f;
+        public float PuckGravityLoftHeightThreshold = 0.5f;
+
+        // Quadratic (v^2) air resistance, airborne only, closed-form
+        // integrated so it can never reverse or overshoot a puck's velocity
+        // regardless of tick rate — see Tweaks.PuckAdvancedPhysics.cs for
+        // why this is not just PuckDrag with a bigger number. 0 = off.
+        public float PuckAirDrag = 0f;
+        // Multiplies PuckAirDrag when the puck presents its flat face to its
+        // own direction of travel rather than its edge. 1 = no difference
+        // between edge-on and face-on flight.
+        public float PuckFlatFaceDragFactor = 1f;
+
+        // Friction coefficient for the puck's own ice/board contact material.
+        // Applied via a PhysicsMaterial on IceCollider — see
+        // ApplyPuckPhysics's own comment on why this cannot be a Rigidbody
+        // property; the base game's own friction lives on the asset-bundle
+        // collider material, not in code, the same fact CA's own README
+        // already notes.
+        public float PuckIceFriction = -1f;
+        // Restitution for ice/board contact. -1 (rather than a real
+        // restitution value like 0 or 1) is the "leave vanilla's own asset
+        // material alone" sentinel — 0 is a fully valid, deliberately chosen
+        // value (a puck that never bounces off the boards at all), so it
+        // cannot ALSO mean "unset, don't touch this."
+        public float PuckBounciness = -1f;
+        // Separate restitution specifically for stick-on-puck contact,
+        // independent of PuckBounciness — same -1 "leave alone" sentinel.
+        // PuckModifier's own history is the reason these are split at all:
+        // a single shared bounciness value made stick touches elastic
+        // whenever board bounce was tuned up to stop boards killing
+        // momentum too fast, an unwanted coupling between two contacts that
+        // should never have shared one number.
+        public float PuckStickContactBounciness = -1f;
+
+        // Below this relative contact speed (m/s), a stick-puck touch reads
+        // as an incidental brush rather than a deliberate hit, and this
+        // tick's velocity change is scaled down rather than passed through
+        // at full strength. 0 = feature off (every contact treated as
+        // deliberate, i.e. today's behavior).
+        public float PuckMinDeliberateContactSpeed = 0f;
+        // Fraction of an incidental contact's velocity change that still
+        // gets through, ramped smoothly rather than a hard cutoff. 1 = no
+        // dampening even when MinDeliberateContactSpeed is set (a no-op
+        // pairing, same idea as the -1 bounciness sentinels above).
+        public float PuckIncidentalContactDampening = 1f;
+
+        // Per-flight vertical launch speed ceiling (m/s), anchored to the
+        // puck's velocity the last time it was actually grounded and
+        // randomized 70-100% of this value per flight — see
+        // Tweaks.PuckAdvancedPhysics.cs for why both of those specifics
+        // matter; a naive version of this cap was exploitable two different
+        // ways during PuckModifier's own development before landing here.
+        // 0 = feature off (no cap).
+        public float PuckMaxLaunchVerticalSpeed = 0f;
+
+        public float PuckMaxShotSpin = -1f; // -1 = leave vanilla's own value alone
+        public float PuckMaxAngularVelocity = -1f; // same sentinel
+
+        // World-space radius for the puck's own "is it touching the ice"
+        // check. Must track scale — see ApplyPuckPhysics's own comment — or
+        // a shrunken puck stops detecting the ice at all. -1 = leave
+        // vanilla's own value alone.
+        public float PuckGroundedCheckRadius = -1f;
+        // Y offset applied to the puck's own center of mass. 0 IS a valid,
+        // meaningful value (centered, no offset) as well as vanilla's own
+        // default, so unlike the -1 sentinels above this one has no way to
+        // distinguish "explicitly zero" from "unset" — accepted as a minor
+        // gap rather than adding a separate bool just for this one field.
+        public float PuckCenterOfMassY = 0f;
+
+        public float PuckGoalNetLinearDamp = -1f; // -1 = leave vanilla's own value alone
+        public float PuckGoalNetAngularDamp = -1f; // same sentinel
+
+        // When true, mass/inertia are computed FROM PuckScale rather than
+        // read from PuckMass/tensor fields directly — mirrors PuckModifier's
+        // own deriveMassFromScale/deriveInertiaFromScale, off by default so
+        // an imported preset with these left at PuckModifier's own explicit
+        // "false" (as PakNewPuck.json's does) behaves identically here.
+        public bool PuckDeriveMassFromScale = false;
+        public bool PuckDeriveInertiaFromScale = false;
+
+        // Compensates the net's own anti-tunnelling sphere collider for
+        // PuckScale, so a shrunken puck does not also shrink the net's
+        // "definitely count this as a goal" volume. Off by default; only
+        // meaningful once PuckScale is actually non-1.
+        public bool PuckCompensateNetSphere = false;
+
         // --- Stick ---
         public bool DisableStickCollision = false;
         public bool DisableShaftCollision = false;
@@ -311,8 +439,7 @@ namespace CompetitiveAdjustments
     // connected client the admin password material, so the wire path must
     // never carry this block.
     [Serializable]
-    public class AdminAuthConfig
-    {
+    public class AdminAuthConfig {
         // A random password generated once when the config file is first written
         // (see ConfigManager.WriteConfig).  Server-side only: the whole Admin
         // block is stripped from every wire payload, so this never reaches a
@@ -326,18 +453,17 @@ namespace CompetitiveAdjustments
     }
 
     [Serializable]
-    public class ServerConfig
-    {
+    public class ServerConfig {
         // Single source of truth for the config schema version.  Bump this
         // whenever fields are added or removed so existing files are migrated
         // (merged onto the current defaults) on the next load.
-        public const int CURRENT_VERSION = 17;
+        public const int CURRENT_VERSION = 18;
         public int ConfigVersion = CURRENT_VERSION;
         // Top-level section enables.  Each gates a whole feature category so
         // a user who only wants one category can disable the others without
         // touching every individual flag.  All default to true to preserve
         // historical behaviour for existing configs.
-        public bool EnableDashfall  = true;
+        public bool EnableDashfall = true;
         public bool EnableCompAdjust = true;
         public bool EnableCompTweaks = true;
         public DashfallConfig Dashfall = new DashfallConfig();
@@ -351,32 +477,28 @@ namespace CompetitiveAdjustments
         // stitches MINUS the Admin block, so credentials never leave the
         // server.  Because WriteConfig already stitches blocks by hand we get a
         // credential-free serialization for free by simply omitting Admin here.
-        public string SerializeForWire()
-        {
-            string dashfallJson   = JsonUtility.ToJson(Dashfall   ?? new DashfallConfig(),   false);
+        public string SerializeForWire() {
+            string dashfallJson = JsonUtility.ToJson(Dashfall ?? new DashfallConfig(), false);
             string compAdjustJson = JsonUtility.ToJson(CompAdjust ?? new CompAdjustConfig(), false);
             string compTweaksJson = JsonUtility.ToJson(CompTweaks ?? new CompTweaksConfig(), false);
 
             return "{"
-                + "\"ConfigVersion\":"    + ConfigVersion + ","
-                + "\"EnableDashfall\":"   + (EnableDashfall   ? "true" : "false") + ","
+                + "\"ConfigVersion\":" + ConfigVersion + ","
+                + "\"EnableDashfall\":" + (EnableDashfall ? "true" : "false") + ","
                 + "\"EnableCompAdjust\":" + (EnableCompAdjust ? "true" : "false") + ","
                 + "\"EnableCompTweaks\":" + (EnableCompTweaks ? "true" : "false") + ","
-                + "\"Dashfall\":"   + dashfallJson   + ","
+                + "\"Dashfall\":" + dashfallJson + ","
                 + "\"CompAdjust\":" + compAdjustJson + ","
                 + "\"CompTweaks\":" + compTweaksJson
                 + "}";
         }
     }
 
-    public static class ConfigManager
-    {
+    public static class ConfigManager {
         public static ServerConfig Config { get; private set; } = new ServerConfig();
 
-        private static string ConfigDir
-        {
-            get
-            {
+        private static string ConfigDir {
+            get {
                 string gameRoot = Application.dataPath;
                 if (gameRoot.EndsWith("Puck_Data"))
                     gameRoot = Directory.GetParent(gameRoot).FullName;
@@ -399,35 +521,33 @@ namespace CompetitiveAdjustments
         // CompTweaksConfig / DashfallConfig type defaults; the CompTweaks
         // defaults match the vanilla Puck values so an off CompTweaks gives
         // vanilla physics.
-        private static readonly CompAdjustConfig _disabledCompAdjust = new CompAdjustConfig
-        {
-            SprintShoulderTrailEnabled    = false,
-            EnableGoalNetTweaks           = false,
-            EnableArenaTweaks             = false,
-            FreeBladeEnabled              = false,
-            StickSpinFatigueEnabled       = false,
-            HighStickingEnabled           = false,
-            StickBodyCollision            = false,
-            BallMode                      = false,
+        private static readonly CompAdjustConfig _disabledCompAdjust = new CompAdjustConfig {
+            SprintShoulderTrailEnabled = false,
+            EnableGoalNetTweaks = false,
+            EnableArenaTweaks = false,
+            FreeBladeEnabled = false,
+            StickSpinFatigueEnabled = false,
+            HighStickingEnabled = false,
+            StickBodyCollision = false,
+            BallMode = false,
         };
 
-        private static readonly DashfallConfig _disabledDashfall = new DashfallConfig
-        {
+        private static readonly DashfallConfig _disabledDashfall = new DashfallConfig {
             // Force every feature toggle to false so master-off silences
             // dives, dashes, twists, slide influence, goalie features etc.
-            SkaterDiveEnabled                  = false,
-            EnableTwistWhileSliding            = false,
-            EnableSlideInfluence               = false,
-            GoalieDiveEnabled                  = false,
-            GoalieTwistWhileSlidingEnabled     = false,
-            GoalieSlideInfluenceEnabled        = false,
-            GoalieStandingDashEnabled          = false,
-            GoalieDashExtendEnabled            = false,
-            GoalieStancesEnabled               = false,
-            GoalieSlidingReachReduction        = false,
-            EnableGoalieScaling                = false,
-            EnableDiveFallenDrag               = false,
-            EnableDebugLogs                    = false,
+            SkaterDiveEnabled = false,
+            EnableTwistWhileSliding = false,
+            EnableSlideInfluence = false,
+            GoalieDiveEnabled = false,
+            GoalieTwistWhileSlidingEnabled = false,
+            GoalieSlideInfluenceEnabled = false,
+            GoalieStandingDashEnabled = false,
+            GoalieDashExtendEnabled = false,
+            GoalieStancesEnabled = false,
+            GoalieSlidingReachReduction = false,
+            EnableGoalieScaling = false,
+            EnableDiveFallenDrag = false,
+            EnableDebugLogs = false,
         };
 
         // CompTweaks vanilla defaults already live on the type (per the
@@ -447,10 +567,8 @@ namespace CompetitiveAdjustments
         /// UI display code that wants to show the user's intent should keep
         /// reading <c>Config.CompAdjust</c> directly.
         /// </summary>
-        public static CompAdjustConfig CompAdjustEffective
-        {
-            get
-            {
+        public static CompAdjustConfig CompAdjustEffective {
+            get {
                 if (Config == null || !Config.EnableCompAdjust) return _disabledCompAdjust;
                 var nm = Unity.Netcode.NetworkManager.Singleton;
                 if (nm != null && !nm.IsServer && !DashFallMod.GoalNetTweaks.HasSyncedTweaks)
@@ -483,8 +601,7 @@ namespace CompetitiveAdjustments
         // Guarantees a valid, current-schema config file exists on disk.  This
         // never touches the in-memory Config or fires reconcile hooks -- that
         // is ReloadConfig's job, and callers invoke ReloadConfig right after.
-        public static void EnsureConfig()
-        {
+        public static void EnsureConfig() {
             // Every step here is best-effort, and that is the point.
             //
             // A config we cannot create means a server running DEFAULT settings, which
@@ -498,43 +615,36 @@ namespace CompetitiveAdjustments
             // unwound into CompetitiveAdjustmentsGameMod.OnEnable's catch, which returns
             // false and leaves every sub-mod and every Harmony patch unloaded. The operator
             // sees a mod that did not load at all, for a file that is merely unwritable.
-            try
-            {
+            try {
                 if (!Directory.Exists(ConfigDir)) Directory.CreateDirectory(ConfigDir);
             }
-            catch (Exception ex)
-            {
+            catch (Exception ex) {
                 LogWarning($"Could not create the config directory: {ex.Message}. The server runs with DEFAULT " +
                            "settings this session and nothing is saved. The mod itself is still loaded.");
                 return;
             }
 
-            try
-            {
-                if (!File.Exists(ConfigFile))
-                {
+            try {
+                if (!File.Exists(ConfigFile)) {
                     WriteConfig(new ServerConfig());
                     return;
                 }
             }
-            catch (Exception ex)
-            {
+            catch (Exception ex) {
                 LogWarning($"Could not create '{ConfigFile}': {ex.Message}. The server runs with DEFAULT settings " +
                            "this session and nothing is saved. The mod itself is still loaded. Check that the " +
                            "config directory is writable by the account the server runs as.");
                 return;
             }
 
-            try
-            {
+            try {
                 string raw = File.ReadAllText(ConfigFile);
 
                 // The old flat format (no section objects) cannot be migrated
                 // field-by-field, so preserve the user's file as a timestamped
                 // backup and write fresh defaults.
                 bool isNested = raw.Contains("\"Dashfall\"") || raw.Contains("\"CompTweaks\"");
-                if (!isNested)
-                {
+                if (!isNested) {
                     string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                     File.Copy(ConfigFile, Path.Combine(ConfigDir, $"CompetitiveAdjustments_{ts}_old.json"));
                     WriteConfig(new ServerConfig());
@@ -547,8 +657,7 @@ namespace CompetitiveAdjustments
                 string clean = StripJson(raw);
                 if (NeedsUpgrade(clean)) UpgradeConfigFile(clean, ParseConfig(clean));
             }
-            catch (Exception ex)
-            {
+            catch (Exception ex) {
                 CompetitiveAdjustments.ConfigManager.LogWarning("Error upgrading config: " + ex.Message);
             }
         }
@@ -556,8 +665,7 @@ namespace CompetitiveAdjustments
         // Exactly the bytes WriteConfig would put on disk for cfg. Split out so an
         // upgrade can compare its result against the current file before touching
         // anything; see UpgradeConfigFile.
-        private static string RenderConfig(ServerConfig cfg)
-        {
+        private static string RenderConfig(ServerConfig cfg) {
             cfg.Admin = cfg.Admin ?? new AdminAuthConfig();
             // Generate the random editor password the first time the file is
             // written (and after an upgrade that dropped the old credentials).
@@ -594,8 +702,7 @@ namespace CompetitiveAdjustments
         /// where NeedsUpgrade is satisfied by something RenderConfig does not actually
         /// change.
         /// </summary>
-        private static void UpgradeConfigFile(string clean, ServerConfig parsed)
-        {
+        private static void UpgradeConfigFile(string clean, ServerConfig parsed) {
             // RenderConfig MUTATES what it renders: it mints an editor password when the
             // config carries none, so that a freshly written file has one. That is right for
             // a write that lands and wrong for one that does not. ReloadConfig publishes this
@@ -613,8 +720,7 @@ namespace CompetitiveAdjustments
 
             string updated;
             try { updated = RenderConfig(parsed); }
-            catch (Exception ex)
-            {
+            catch (Exception ex) {
                 RestoreEditorPassword(parsed, priorPassword);
                 LogWarning("Could not render the upgraded config: " + ex.Message);
                 return;
@@ -623,10 +729,8 @@ namespace CompetitiveAdjustments
             string current = null;
             try { current = File.ReadAllText(ConfigFile); } catch { }
 
-            if (current != null && string.Equals(current, updated, StringComparison.Ordinal))
-            {
-                if (!_warnedUpgradeNoOp)
-                {
+            if (current != null && string.Equals(current, updated, StringComparison.Ordinal)) {
+                if (!_warnedUpgradeNoOp) {
                     _warnedUpgradeNoOp = true;
                     LogWarning("Config upgrade wanted but the result is byte-identical to the file on disk, " +
                                "so nothing was written. NeedsUpgrade is matching on something the writer does " +
@@ -636,34 +740,28 @@ namespace CompetitiveAdjustments
             }
 
             string backup = null;
-            try
-            {
-                if (File.Exists(ConfigFile))
-                {
+            try {
+                if (File.Exists(ConfigFile)) {
                     string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                     backup = Path.Combine(ConfigDir, $"CompetitiveAdjustments_{ts}_upgrade.json");
                     File.Copy(ConfigFile, backup, true);
                 }
             }
-            catch (Exception ex)
-            {
+            catch (Exception ex) {
                 LogWarning("Config backup failed: " + ex.Message);
                 backup = null;
             }
 
-            try
-            {
+            try {
                 File.WriteAllText(ConfigFile, updated);
                 Log($"Config upgraded to version {ServerConfig.CURRENT_VERSION}" +
                     (backup != null ? $"; previous file kept as {Path.GetFileName(backup)}." : "."));
                 PruneUpgradeBackups();
             }
-            catch (Exception ex)
-            {
+            catch (Exception ex) {
                 // The backup exists only to protect a rewrite that just failed, so it is
                 // pure litter. Removing it is what stops one file per launch forever.
-                if (backup != null)
-                {
+                if (backup != null) {
                     try { File.Delete(backup); } catch { }
                 }
 
@@ -671,8 +769,7 @@ namespace CompetitiveAdjustments
                 // stay in the object ReloadConfig is about to publish as the live Config.
                 RestoreEditorPassword(parsed, priorPassword);
 
-                if (!_warnedUpgradeUnwritable)
-                {
+                if (!_warnedUpgradeUnwritable) {
                     _warnedUpgradeUnwritable = true;
                     LogWarning($"Could not write '{ConfigFile}': {ex.Message}. The server is running the config it " +
                                "read, but the upgrade cannot be saved and will be attempted again on every launch. " +
@@ -692,23 +789,19 @@ namespace CompetitiveAdjustments
         /// the state AdminAuth already understands, and it is what stops the auth path
         /// advertising a credential nobody can produce.
         /// </summary>
-        private static void RestoreEditorPassword(ServerConfig cfg, string priorPassword)
-        {
+        private static void RestoreEditorPassword(ServerConfig cfg, string priorPassword) {
             if (cfg == null || cfg.Admin == null) return;
             cfg.Admin.EditorPassword = priorPassword ?? "";
         }
 
         /// <summary>Keeps the newest few upgrade backups and deletes the rest.</summary>
-        private static void PruneUpgradeBackups()
-        {
-            try
-            {
+        private static void PruneUpgradeBackups() {
+            try {
                 var files = Directory.GetFiles(ConfigDir, "CompetitiveAdjustments_*_upgrade.json");
                 if (files.Length <= MaxUpgradeBackups) return;
 
                 Array.Sort(files, (a, b) => string.CompareOrdinal(b, a));   // newest name first (timestamped)
-                for (int i = MaxUpgradeBackups; i < files.Length; i++)
-                {
+                for (int i = MaxUpgradeBackups; i < files.Length; i++) {
                     try { File.Delete(files[i]); } catch { }
                 }
                 Log($"Pruned {files.Length - MaxUpgradeBackups} old config backup(s), keeping the newest {MaxUpgradeBackups}.");
@@ -720,8 +813,7 @@ namespace CompetitiveAdjustments
         // redactAdmin is true the editor password is blanked (for a shareable
         // export); the live config is never mutated by the redaction, a throwaway
         // Admin copy is serialized instead.
-        private static string BuildConfigContent(ServerConfig cfg, bool redactAdmin)
-        {
+        private static string BuildConfigContent(ServerConfig cfg, bool redactAdmin) {
             cfg.ConfigVersion = ServerConfig.CURRENT_VERSION;
             string dashfallJson = JsonUtility.ToJson(cfg.Dashfall, true);
             string compAdjustJson = JsonUtility.ToJson(cfg.CompAdjust, true);
@@ -731,8 +823,7 @@ namespace CompetitiveAdjustments
             string adminJson = JsonUtility.ToJson(admin, true);
 
             // Indent sub-section lines by 2 spaces
-            string IndentBlock(string json)
-            {
+            string IndentBlock(string json) {
                 var lines = json.Split('\n');
                 for (int i = 1; i < lines.Length; i++)
                     lines[i] = "  " + lines[i];
@@ -742,7 +833,7 @@ namespace CompetitiveAdjustments
             return
                 $"{{\n" +
                 $"  \"ConfigVersion\": {cfg.ConfigVersion},\n" +
-                $"  \"EnableDashfall\":  {(cfg.EnableDashfall  ? "true" : "false")},\n" +
+                $"  \"EnableDashfall\":  {(cfg.EnableDashfall ? "true" : "false")},\n" +
                 $"  \"EnableCompAdjust\": {(cfg.EnableCompAdjust ? "true" : "false")},\n" +
                 $"  \"EnableCompTweaks\": {(cfg.EnableCompTweaks ? "true" : "false")},\n" +
                 $"  \"Dashfall\": {IndentBlock(dashfallJson)},\n" +
@@ -755,30 +846,25 @@ namespace CompetitiveAdjustments
         // The full config in the readable on-disk format with the editor password
         // blanked, safe to share or back up.  Pass the editor's working copy to
         // export exactly what is on screen, or null to export the live config.
-        public static string ExportConfigJson(ServerConfig cfg = null)
-        {
+        public static string ExportConfigJson(ServerConfig cfg = null) {
             return BuildConfigContent(cfg ?? Config ?? new ServerConfig(), redactAdmin: true);
         }
 
         // Writes the redacted export next to the live config and returns the full
         // path (or null on failure).
-        public static string ExportConfigToFile(ServerConfig cfg = null)
-        {
-            try
-            {
+        public static string ExportConfigToFile(ServerConfig cfg = null) {
+            try {
                 string path = Path.Combine(ConfigDir, "CompetitiveAdjustments_export.json");
                 File.WriteAllText(path, ExportConfigJson(cfg));
                 return path;
             }
-            catch (Exception ex)
-            {
+            catch (Exception ex) {
                 LogWarning("ExportConfigToFile failed: " + ex.Message);
                 return null;
             }
         }
 
-        public static void SaveConfig()
-        {
+        public static void SaveConfig() {
             WriteConfig(Config ?? new ServerConfig());
         }
 
@@ -786,12 +872,9 @@ namespace CompetitiveAdjustments
         // taking the backup and doing the write have to be one decision: a backup kept for
         // a write that then failed is exactly the litter this was producing.
 
-        public static void ReloadConfig()
-        {
-            try
-            {
-                if (!File.Exists(ConfigFile))
-                {
+        public static void ReloadConfig() {
+            try {
+                if (!File.Exists(ConfigFile)) {
                     Config = new ServerConfig();
                     SyncFeatureStates(Config);
                     NotifySubModReconcile();
@@ -810,8 +893,7 @@ namespace CompetitiveAdjustments
                 SyncFeatureStates(cfg);
                 NotifySubModReconcile();
             }
-            catch (Exception ex)
-            {
+            catch (Exception ex) {
                 // Say something. This used to be a bare `catch` that silently replaced the
                 // operator's config with defaults, so a server whose file could not be read
                 // ran vanilla settings and looked like the mod was simply not working. The
@@ -826,8 +908,7 @@ namespace CompetitiveAdjustments
 
         // Strip // and /* */ comments and trailing commas so JsonUtility can
         // parse a hand-edited config file.
-        private static string StripJson(string raw)
-        {
+        private static string StripJson(string raw) {
             return Regex.Replace(
                 Regex.Replace(
                     Regex.Replace(raw, @"//.*?$", "", RegexOptions.Multiline),
@@ -839,18 +920,17 @@ namespace CompetitiveAdjustments
         // from the file keeps its type default, so this is a merge of the
         // file's values onto the current schema.  Pure: no I/O, no mutation of
         // the live Config, no reconcile hooks.
-        private static ServerConfig ParseConfig(string clean)
-        {
+        private static ServerConfig ParseConfig(string clean) {
             var cfg = new ServerConfig();
 
             // Old configs without these top-level flags keep the default-true
             // behaviour.
-            cfg.EnableDashfall   = ExtractTopLevelBool(clean, "EnableDashfall",   true);
+            cfg.EnableDashfall = ExtractTopLevelBool(clean, "EnableDashfall", true);
             cfg.EnableCompAdjust = ExtractTopLevelBool(clean, "EnableCompAdjust", true);
             cfg.EnableCompTweaks = ExtractTopLevelBool(clean, "EnableCompTweaks", true);
 
             // Extract each section and deserialize flat into its class.
-            string dashfallJson   = ExtractSection(clean, "Dashfall");
+            string dashfallJson = ExtractSection(clean, "Dashfall");
             string compAdjustJson = ExtractSection(clean, "CompAdjust");
             string compTweaksJson = ExtractSection(clean, "CompTweaks");
 
@@ -884,8 +964,7 @@ namespace CompetitiveAdjustments
         /// matters because the alternative is silently turning a tall rink into a long
         /// one on the next server restart.
         /// </summary>
-        private static void MigrateArenaScaleAxes(ServerConfig cfg, int storedVersion)
-        {
+        private static void MigrateArenaScaleAxes(ServerConfig cfg, int storedVersion) {
             if (cfg?.CompAdjust == null) return;
             if (storedVersion < 0 || storedVersion >= 16) return;   // absent (-1) means pre-versioning; leave it
 
@@ -917,23 +996,21 @@ namespace CompetitiveAdjustments
         //     running them here would let the synced config silently repurpose
         //     the client's feature gating.  They run only when this process is
         //     the server (host editing in-process, or the inbound edit handler).
-        public static void LoadFromJson(string json)
-        {
+        public static void LoadFromJson(string json) {
             if (string.IsNullOrEmpty(json)) return;
-            try
-            {
+            try {
                 string clean = StripJson(json);
                 var cfg = Config ?? new ServerConfig();
 
-                cfg.EnableDashfall   = ExtractTopLevelBool(clean, "EnableDashfall",   cfg.EnableDashfall);
+                cfg.EnableDashfall = ExtractTopLevelBool(clean, "EnableDashfall", cfg.EnableDashfall);
                 cfg.EnableCompAdjust = ExtractTopLevelBool(clean, "EnableCompAdjust", cfg.EnableCompAdjust);
                 cfg.EnableCompTweaks = ExtractTopLevelBool(clean, "EnableCompTweaks", cfg.EnableCompTweaks);
 
-                string dashfallJson   = ExtractSection(clean, "Dashfall");
+                string dashfallJson = ExtractSection(clean, "Dashfall");
                 string compAdjustJson = ExtractSection(clean, "CompAdjust");
                 string compTweaksJson = ExtractSection(clean, "CompTweaks");
 
-                if (!string.IsNullOrEmpty(dashfallJson))   JsonUtility.FromJsonOverwrite(dashfallJson,   cfg.Dashfall);
+                if (!string.IsNullOrEmpty(dashfallJson)) JsonUtility.FromJsonOverwrite(dashfallJson, cfg.Dashfall);
                 if (!string.IsNullOrEmpty(compAdjustJson)) JsonUtility.FromJsonOverwrite(compAdjustJson, cfg.CompAdjust);
                 if (!string.IsNullOrEmpty(compTweaksJson)) JsonUtility.FromJsonOverwrite(compTweaksJson, cfg.CompTweaks);
                 // NOTE: no ExtractSection(clean, "Admin") here, by design.
@@ -941,14 +1018,12 @@ namespace CompetitiveAdjustments
                 Config = cfg;
 
                 var nm = Unity.Netcode.NetworkManager.Singleton;
-                if (nm != null && nm.IsServer)
-                {
+                if (nm != null && nm.IsServer) {
                     SyncFeatureStates(cfg);
                     NotifySubModReconcile();
                 }
             }
-            catch (Exception ex)
-            {
+            catch (Exception ex) {
                 LogWarning("LoadFromJson failed: " + ex.Message);
             }
         }
@@ -956,8 +1031,7 @@ namespace CompetitiveAdjustments
         // True when the on-disk file should be rewritten to reach the current
         // schema: either the version differs, or a known field/section is
         // absent (a safety net for a field added without a version bump).
-        private static bool NeedsUpgrade(string clean)
-        {
+        private static bool NeedsUpgrade(string clean) {
             if (ParseConfigVersion(clean) != ServerConfig.CURRENT_VERSION)
                 return true;
 
@@ -968,15 +1042,18 @@ namespace CompetitiveAdjustments
                 || !clean.Contains("\"EnableCompAdjust\"")
                 || !clean.Contains("\"EnableCompTweaks\"")
                 || !clean.Contains("\"Admin\"")
-                || !clean.Contains("\"EditorPassword\"");
+                || !clean.Contains("\"EditorPassword\"")
+                // v18: PuckModifier integration fields — one representative
+                // field is enough to detect a pre-v18 file, same pattern as
+                // every check above.
+                || !clean.Contains("\"PuckCatchGenerosity\"");
         }
 
         // Read the integer ConfigVersion, or -1 if absent/unparseable.  Parsing
         // the number (rather than substring-matching the literal) avoids "12"
         // spuriously matching "120", and correctly flags a newer file (e.g. 13)
         // as a version mismatch.
-        private static int ParseConfigVersion(string json)
-        {
+        private static int ParseConfigVersion(string json) {
             var m = Regex.Match(json, "\"ConfigVersion\"\\s*:\\s*(-?\\d+)");
             return m.Success && int.TryParse(m.Groups[1].Value, out int v) ? v : -1;
         }
@@ -984,8 +1061,7 @@ namespace CompetitiveAdjustments
         // Soft hand-off to CompetitiveAdjustmentsGameMod.ApplySubModEnables.
         // Lives behind a try so config code stays independent of the entry
         // point's lifecycle in case the type is not loaded yet.
-        private static void NotifySubModReconcile()
-        {
+        private static void NotifySubModReconcile() {
             try { CompetitiveAdjustmentsGameMod.NotifyConfigReloaded(); }
             catch { }
         }
@@ -993,15 +1069,13 @@ namespace CompetitiveAdjustments
         // Top-level boolean extraction.  Matches `"Name": true|false` at any
         // depth but the brace-aware parser would be overkill for three flags
         // that always live at the outermost level; this regex is sufficient.
-        private static bool ExtractTopLevelBool(string json, string fieldName, bool defaultVal)
-        {
+        private static bool ExtractTopLevelBool(string json, string fieldName, bool defaultVal) {
             var m = Regex.Match(json, $"\"{Regex.Escape(fieldName)}\"\\s*:\\s*(true|false)");
             return m.Success ? bool.Parse(m.Groups[1].Value) : defaultVal;
         }
 
         // Brace-counting extraction of a named JSON object section.
-        private static string ExtractSection(string json, string sectionName)
-        {
+        private static string ExtractSection(string json, string sectionName) {
             string key = $"\"{sectionName}\"";
             int keyIdx = json.IndexOf(key);
             if (keyIdx < 0) return null;
@@ -1014,8 +1088,7 @@ namespace CompetitiveAdjustments
 
             int depth = 1;
             int i = start + 1;
-            while (i < json.Length && depth > 0)
-            {
+            while (i < json.Length && depth > 0) {
                 if (json[i] == '{') depth++;
                 else if (json[i] == '}') depth--;
                 i++;
@@ -1023,10 +1096,8 @@ namespace CompetitiveAdjustments
             return depth == 0 ? json.Substring(start, i - start) : null;
         }
 
-        private static void SyncFeatureStates(ServerConfig cfg)
-        {
-            try
-            {
+        private static void SyncFeatureStates(ServerConfig cfg) {
+            try {
                 // Read through DashfallEffective so EnableDashfall=false also
                 // drops the static feature flags to false.  Without this the
                 // GoalieDashExtend / Stances Harmony patches would keep
@@ -1039,8 +1110,7 @@ namespace CompetitiveAdjustments
             catch { }
         }
 
-        public static void Log(string message)
-        {
+        public static void Log(string message) {
             Debug.Log("[COMPADJUST] " + message);
         }
 
@@ -1052,8 +1122,7 @@ namespace CompetitiveAdjustments
             Debug.LogError("[COMPADJUST] " + message);
         }
 
-        public static void Dbg(string message)
-        {
+        public static void Dbg(string message) {
             if (Config.Dashfall.EnableDebugLogs) Log(message);
         }
     }

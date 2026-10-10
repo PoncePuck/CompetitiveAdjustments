@@ -91,6 +91,10 @@ namespace CompetitivePuckTweaks.src
             // itself, and if the two ends disagree every position is out by the ratio
             // between the two ranges, so it has to travel.
             if (DashFallMod.Net.WrapSync.WrappingGovernsRange) b |= 1u << 23;
+
+            if (c.PuckDeriveMassFromScale) b |= 1u << 24;
+            if (c.PuckDeriveInertiaFromScale) b |= 1u << 25;
+            if (c.PuckCompensateNetSphere) b |= 1u << 26;
             return b;
         }
 
@@ -112,6 +116,10 @@ namespace CompetitivePuckTweaks.src
             c.EnableSoftBoards            = (b & (1u << 13)) != 0;
             c.EnableJohnBoardBounceTweak  = (b & (1u << 14)) != 0;
             c.BananaMode                  = (b & (1u << 15)) != 0;
+
+            c.PuckDeriveMassFromScale = (b & (1u << 24)) != 0;
+            c.PuckDeriveInertiaFromScale = (b & (1u << 25)) != 0;
+            c.PuckCompensateNetSphere = (b & (1u << 26)) != 0;
         }
 
         public static void UnpackDashfall(ConfigSyncPackage pkg, CompetitiveAdjustments.CompAdjustConfig df)
