@@ -5,7 +5,7 @@ using UnityEngine;
 namespace CompetitivePuckTweaks.src {
     public class StickOnBodyCollisions {
         private const float STICK_FORCE_SOUND_THRESHOLD = 17.5f;
-        private const int STICK_LAYER = 6;
+        public const int STICK_LAYER = 6;
 
         // Property rather than `static readonly` so flipping the master flag
         // (EnableCompAdjust) or the per-feature flag (StickBodyCollision) at

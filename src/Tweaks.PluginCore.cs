@@ -43,6 +43,7 @@ namespace CompetitivePuckTweaks.src
         private int _vanillaSolverIterations;
         private int _vanillaTickRate;
         private bool _vanillaIgnore_6_6;
+        private bool _vanillaIgnore_6_9;
         private bool _vanillaIgnore_6_8;
 
         /// <summary>
@@ -94,13 +95,18 @@ namespace CompetitivePuckTweaks.src
                     // restoring Time.fixedDeltaTime alone would leave them diverged.
                     var pm = MonoBehaviourSingleton<PhysicsManager>.Instance;
                     _vanillaTickRate = pm != null ? pm.TickRate : 0;
-                    _vanillaIgnore_6_6 = Physics.GetIgnoreLayerCollision(6, 6);
-                    _vanillaIgnore_6_8 = Physics.GetIgnoreLayerCollision(6, 8);
+                    _vanillaIgnore_6_6 = Physics.GetIgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, StickOnBodyCollisions.STICK_LAYER);
+                    _vanillaIgnore_6_9 = Physics.GetIgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 9);
+                    _vanillaIgnore_6_8 = Physics.GetIgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 8);
                     _vanillaPhysicsCaptured = true;
                 }
 
-                if (config.DisableStickCollision) Physics.IgnoreLayerCollision(6, 6, true);
-                Physics.IgnoreLayerCollision(6, 8, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
+                if (config.DisableStickCollision) Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, StickOnBodyCollisions.STICK_LAYER, true);
+                
+                if (CompetitiveAdjustments.ConfigManager.CompTweaksEffective?.ThinSkaterBodies == true)
+                    Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 9, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
+                else
+                    Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 8, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
 
                 ApplySimulationStep(config.FixedDeltaTime);
                 Physics.defaultSolverIterations = config.SolverIterations;
@@ -166,6 +172,7 @@ namespace CompetitivePuckTweaks.src
                         Time.fixedDeltaTime = _vanillaFixedDeltaTime;
                     Physics.defaultSolverIterations = _vanillaSolverIterations;
                     Physics.IgnoreLayerCollision(6, 6, _vanillaIgnore_6_6);
+                    Physics.IgnoreLayerCollision(6, 9, _vanillaIgnore_6_9);
                     Physics.IgnoreLayerCollision(6, 8, _vanillaIgnore_6_8);
                     _vanillaPhysicsCaptured = false;
                 }
@@ -398,14 +405,18 @@ namespace CompetitivePuckTweaks.src
             if (config.DisableShaftCollision == false)
                 config.EnableMidStickCollider = false;
 
-            Physics.IgnoreLayerCollision(6, 6, config.DisableStickCollision);
-            Physics.IgnoreLayerCollision(6, 8, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
+            Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, StickOnBodyCollisions.STICK_LAYER, config.DisableStickCollision);
+            if (CompetitiveAdjustments.ConfigManager.CompTweaksEffective.ThinSkaterBodies)
+                Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 9, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
+            else
+                Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 8, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
             ApplySimulationStep(config.FixedDeltaTime);
             Physics.defaultSolverIterations = config.SolverIterations;
 
             // Keep runtime pucks aligned with current config (e.g. /reload or config edits).
             RescaleAllExistingPucks();
             CompetitiveAdjustments.BallModeHelper.RefreshAllPucks();
+            DashFallMod.ThinSkaterBodiesPatch.RefreshAllPlayers();
 
             // Re-apply free blade / high sticking to existing players on /reload.
             StickAngleRefs.RefreshFreeBladeForAllPlayers();
