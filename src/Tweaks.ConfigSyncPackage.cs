@@ -94,7 +94,8 @@ namespace CompetitivePuckTweaks.src
 
             if (c.PuckDeriveMassFromScale) b |= 1u << 24;
             if (c.PuckDeriveInertiaFromScale) b |= 1u << 25;
-            if (c.PuckCompensateNetSphere) b |= 1u << 26;
+            if (c.EnableShotOnBodyFatigue) b |= 1u << 26;
+            if (c.ShotOnBodyFatigueAffectGoalies) b |= 1u << 27;
             return b;
         }
 
@@ -119,7 +120,8 @@ namespace CompetitivePuckTweaks.src
 
             c.PuckDeriveMassFromScale = (b & (1u << 24)) != 0;
             c.PuckDeriveInertiaFromScale = (b & (1u << 25)) != 0;
-            c.PuckCompensateNetSphere = (b & (1u << 26)) != 0;
+            c.EnableShotOnBodyFatigue = (b & (1u << 26)) != 0;
+            c.ShotOnBodyFatigueAffectGoalies = (b & (1u << 27)) != 0;
         }
 
         public static void UnpackDashfall(ConfigSyncPackage pkg, CompetitiveAdjustments.CompAdjustConfig df)

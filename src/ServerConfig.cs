@@ -389,11 +389,13 @@ namespace CompetitiveAdjustments {
         public bool PuckDeriveMassFromScale = false;
         public bool PuckDeriveInertiaFromScale = false;
 
-        // Compensates the net's own anti-tunnelling sphere collider for
-        // PuckScale, so a shrunken puck does not also shrink the net's
-        // "definitely count this as a goal" volume. Off by default; only
-        // meaningful once PuckScale is actually non-1.
-        public bool PuckCompensateNetSphere = false;
+        // --- Shot on body fatigue ---
+        public bool EnableShotOnBodyFatigue = false;
+        public float ShotOnBodyFatigueMinPuckSpeed = 12f;
+        public float ShotOnBodyFatigueMaxPuckSpeed = 30f;
+        public float ShotOnBodyFatigueStaminaAtMinSpeed = 0.05f;
+        public float ShotOnBodyFatigueStaminaAtMaxSpeed = 0.20f;
+        public bool ShotOnBodyFatigueAffectGoalies = false;
 
         // --- Stick ---
         public bool DisableStickCollision = false;
@@ -458,7 +460,7 @@ namespace CompetitiveAdjustments {
         // Single source of truth for the config schema version.  Bump this
         // whenever fields are added or removed so existing files are migrated
         // (merged onto the current defaults) on the next load.
-        public const int CURRENT_VERSION = 18;
+        public const int CURRENT_VERSION = 19;
         public int ConfigVersion = CURRENT_VERSION;
         // Top-level section enables.  Each gates a whole feature category so
         // a user who only wants one category can disable the others without
