@@ -261,6 +261,7 @@ namespace CompetitiveAdjustments {
         public bool PuckHeightDependentDrag = false;
         public float PuckHeightLimit = 2f;
         public float PuckHeightDragFactor = 0f;
+        public float PuckChatSpeedMult = 1f;
 
         // --- Puck, extended (PuckModifier integration) ---
         // Everything below mirrors a field from PuckModifier's own preset JSON
