@@ -392,9 +392,9 @@ namespace CompetitiveAdjustments {
         // --- Shot on body fatigue ---
         public bool EnableShotOnBodyFatigue = false;
         public float ShotOnBodyFatigueMinPuckSpeed = 12f;
-        public float ShotOnBodyFatigueMaxPuckSpeed = 30f;
-        public float ShotOnBodyFatigueStaminaAtMinSpeed = 0.05f;
-        public float ShotOnBodyFatigueStaminaAtMaxSpeed = 0.20f;
+        public float ShotOnBodyFatigueMaxPuckSpeed = 40f;
+        public float ShotOnBodyFatigueStaminaAtMinSpeed = 0.1f;
+        public float ShotOnBodyFatigueStaminaAtMaxSpeed = 0.4f;
         public bool ShotOnBodyFatigueAffectGoalies = false;
 
         // --- Stick ---
