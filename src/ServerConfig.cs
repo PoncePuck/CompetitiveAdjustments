@@ -396,6 +396,8 @@ namespace CompetitiveAdjustments {
         public float ShotOnBodyFatigueStaminaAtMinSpeed = 0.1f;
         public float ShotOnBodyFatigueStaminaAtMaxSpeed = 0.4f;
         public bool ShotOnBodyFatigueAffectGoalies = false;
+        public bool ShotOnBodyFatigueDropsPlayerOnLowStam = false;
+        public float ShotOnBodyFatigueLowStamThreshold = 0.2f;
 
         // --- Stick ---
         public bool DisableStickCollision = false;
