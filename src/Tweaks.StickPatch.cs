@@ -110,11 +110,29 @@ namespace CompetitivePuckTweaks.src
             // a stick without an assigned body has nothing to ignore yet.
             if (stick == null || stick.PlayerBody == null) return;
             if (CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true) {
-                var stickCols = stick.GetComponentsInChildren<Collider>();
-                var bodyCols = stick.PlayerBody.GetComponentsInChildren<Collider>();
+                var stickCols = stick.GetComponentsInChildren<Collider>(true);
+                var bodyCols = stick.PlayerBody.GetComponentsInChildren<Collider>(true);
+                var torsoMcs = stick.PlayerBody.PlayerMesh.PlayerTorso.GetComponentsInChildren<MeshCollider>(true);
+                var groinMcs = stick.PlayerBody.PlayerMesh.PlayerGroin.GetComponentsInChildren<MeshCollider>(true);
+                var headMcs = stick.PlayerBody.PlayerMesh.PlayerHead.GetComponentsInChildren<MeshCollider>(true);
 
                 foreach (var sc in stickCols) {
                     foreach (var bc in bodyCols) {
+                        if (sc != null && bc != null)
+                            Physics.IgnoreCollision(sc, bc, true);
+                    }
+
+                    foreach (var bc in torsoMcs) {
+                        if (sc != null && bc != null)
+                            Physics.IgnoreCollision(sc, bc, true);
+                    }
+
+                    foreach (var bc in groinMcs) {
+                        if (sc != null && bc != null)
+                            Physics.IgnoreCollision(sc, bc, true);
+                    }
+
+                    foreach (var bc in headMcs) {
                         if (sc != null && bc != null)
                             Physics.IgnoreCollision(sc, bc, true);
                     }

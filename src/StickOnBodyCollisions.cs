@@ -61,7 +61,7 @@ namespace CompetitivePuckTweaks.src {
                         return;
                     }
 
-                    if (stickToBodyDistance > 2.68f) {
+                    if (stickToBodyDistance > 2.675f) {
                         CompetitiveAdjustments.ConfigManager.Log($"Stick is stuck ! Distance to PlayerBody ({__instance.Player.Username.Value}) : {stickToBodyDistance}");
                         _currentlyIgnoredStickCollisions.Add(__instance.Rigidbody, __instance.Rigidbody.excludeLayers);
                         __instance.Rigidbody.excludeLayers = -1; // Everything == -1;
