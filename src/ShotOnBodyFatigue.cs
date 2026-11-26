@@ -96,7 +96,7 @@ namespace CompetitivePuckTweaks.src {
             float before = body.Stamina.Value;
             body.Stamina.Value = Mathf.Max(0f, before - drain);
 
-            if (cfg.ShotOnBodyFatigueDropsPlayerOnLowStam && body.Stamina.Value < cfg.ShotOnBodyFatigueLowStamThreshold) {
+            if (cfg.ShotOnBodyFatigueDropsPlayerOnLowStam && puckSpeed >= cfg.ShotOnBodyFatigueLowStamMinShotSpeedThreshold && body.Stamina.Value < cfg.ShotOnBodyFatigueLowStamThreshold) {
                 if (!player.PlayerBody.HasSlipped && !player.PlayerBody.HasFallen.Value)
                     player.PlayerBody.OnSlip();
             }
