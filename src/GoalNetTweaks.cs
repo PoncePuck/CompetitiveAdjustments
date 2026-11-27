@@ -352,17 +352,15 @@ namespace DashFallMod
         private sealed class Runner : MonoBehaviour
         {
             private float _nextRefreshAt;
-            private float _nextGoalCheckAt;
 
             private void Update()
             {
-                if (Time.unscaledTime >= _nextGoalCheckAt) {
-                    _nextGoalCheckAt = Time.unscaledTime + 1f;
-                    if (HasUncompensatedGoal()) { _forceNextRefresh = true; RefreshAll(); }
-                }
+                if (Time.unscaledTime < _nextRefreshAt)
+                    return;
 
-                if (Time.unscaledTime < _nextRefreshAt) return;
                 _nextRefreshAt = Time.unscaledTime + 1f;
+                if (HasUncompensatedGoal()) { _forceNextRefresh = true; RefreshAll(); }
+
                 RefreshAll();
                 // Retry / re-scan the arena proxy independently of the config hash, so a
                 // failed early attempt does not latch the bundled prefab in for good and
