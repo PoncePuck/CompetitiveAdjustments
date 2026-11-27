@@ -2,17 +2,13 @@
 using UnityEngine.Rendering;
 using HarmonyLib;
 using System;
-using System.IO;
-using System.Reflection;
 using System.Collections.Generic;
 using Unity.Netcode;
 
 
-namespace CompetitivePuckTweaks.src
-{
+namespace CompetitivePuckTweaks.src {
 
-    public class PluginCore
-    {
+    public class PluginCore {
         private const string CMM_SYNC_CONFIG = "CPT_sync_config";
         private const string CMM_SYNC_REQUEST = "CPT_request_sync";
 
@@ -50,10 +46,8 @@ namespace CompetitivePuckTweaks.src
         /// Core plugin enable function
         /// </summary>
         /// <returns>bool status of enable success</returns>
-        public bool OnEnable()
-        {
-            if (_enabled)
-            {
+        public bool OnEnable() {
+            if (_enabled) {
                 ApplyLiveConfigFull();
                 return true;
             }
@@ -62,32 +56,28 @@ namespace CompetitivePuckTweaks.src
 
             bool canRunServer = SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null ||
                                 (NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer);
-            if (!canRunServer)
-            {
+            if (!canRunServer) {
                 PluginCore.Log($"Server runtime not active yet. Skipping CPT enable.");
                 return false;
             }
             PluginCore.Log($"Enabling...");
 
-            try
-            {
+            try {
                 PluginCore.Log($"Using unified CompetitiveAdjustments config.");
                 if (config.DisableShaftCollision == false) config.EnableMidStickCollider = false;
-                
+
                 if (config.UsePhysicsModificationEvents) utilObj = new UtilObj();
 
                 HarmonyPatchHelper.PatchNamespaces(_harmony, "CompetitivePuckTweaks");
 
-                if (config.UsePhysicsModificationEvents)
-                {
+                if (config.UsePhysicsModificationEvents) {
                     utilObj.LoadListeners();
                     _physicsListenersLoaded = true;
                 }
 
                 PluginCore.Log($"{System.Linq.Enumerable.Count(_harmony.GetPatchedMethods())} harmony methods patched.");
 
-                if (!_vanillaPhysicsCaptured)
-                {
+                if (!_vanillaPhysicsCaptured) {
                     _vanillaFixedDeltaTime = Time.fixedDeltaTime;
                     _vanillaSolverIterations = Physics.defaultSolverIterations;
                     // Capture the tick rate too, not just the step. Restoring via
@@ -102,7 +92,7 @@ namespace CompetitivePuckTweaks.src
                 }
 
                 if (config.DisableStickCollision) Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, StickOnBodyCollisions.STICK_LAYER, true);
-                
+
                 if (CompetitiveAdjustments.ConfigManager.CompTweaksEffective?.ThinSkaterBodies == true)
                     Physics.IgnoreLayerCollision(StickOnBodyCollisions.STICK_LAYER, 9, !(CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true));
                 else
@@ -114,6 +104,9 @@ namespace CompetitivePuckTweaks.src
                 // 310 migration changed several event names; listen to both for compatibility.
                 EventManager.AddEventListener("Event_OnClientConnected", SendSyncMessage);
                 EventManager.AddEventListener("Event_Everyone_OnClientConnected", SendSyncMessage);
+                // A role change (skater <-> goalie) moves a stick in or out of the
+                // DisableGoalieStickBodyCollision rule.
+                EventManager.AddEventListener("Event_Everyone_OnPlayerGameStateChanged", StickOnBodyCollisions.OnPlayerGameStateChanged);
                 EventListenersPresent = true;
                 Log("Sync message listener added.");
 
@@ -126,10 +119,12 @@ namespace CompetitivePuckTweaks.src
                 // immediately enforce configured scale on all existing pucks.
                 RescaleAllExistingPucks();
 
+                // Same for players that were already in the game.
+                StickOnBodyCollisions.RefreshGoalieStickBodyCollisions();
+
                 return true;
             }
-            catch (Exception e)
-            {
+            catch (Exception e) {
                 PluginCore.Log($"Failed to enable: {e}");
                 return false;
             }
@@ -139,21 +134,18 @@ namespace CompetitivePuckTweaks.src
         /// Core plugin disable function.
         /// </summary>
         /// <returns>bool corresponding to success or failure of disable</returns>
-        public bool OnDisable()
-        {
+        public bool OnDisable() {
             PluginCore.Log($"Disabling...");
-            try
-            {
+            try {
                 _harmony.UnpatchSelf();
-                if (_physicsListenersLoaded)
-                {
+                if (_physicsListenersLoaded) {
                     utilObj.UnloadListeners();
                     _physicsListenersLoaded = false;
                 }
-                if (EventListenersPresent)
-                {
+                if (EventListenersPresent) {
                     EventManager.RemoveEventListener("Event_OnClientConnected", SendSyncMessage);
                     EventManager.RemoveEventListener("Event_Everyone_OnClientConnected", SendSyncMessage);
+                    EventManager.RemoveEventListener("Event_Everyone_OnPlayerGameStateChanged", StickOnBodyCollisions.OnPlayerGameStateChanged);
                 }
                 UnregisterSyncRequestHandler();
                 EventListenersPresent = false;
@@ -163,8 +155,7 @@ namespace CompetitivePuckTweaks.src
                 // Restore the global physics knobs we trampled in OnEnable so a
                 // mid-session toggle doesn't leave the game on the modded
                 // simulation step / layer mask.
-                if (_vanillaPhysicsCaptured)
-                {
+                if (_vanillaPhysicsCaptured) {
                     var pm = MonoBehaviourSingleton<PhysicsManager>.Instance;
                     if (pm != null && _vanillaTickRate > 0)
                         pm.TickRate = _vanillaTickRate;
@@ -178,8 +169,7 @@ namespace CompetitivePuckTweaks.src
                 }
                 return true;
             }
-            catch (Exception e)
-            {
+            catch (Exception e) {
                 PluginCore.Log($"Failed to disable: {e}");
                 return false;
             }
@@ -206,13 +196,11 @@ namespace CompetitivePuckTweaks.src
         /// Note the knob quantises: TickRate is an int, so the step lands on 1/N seconds.
         /// Returns true when it went through PhysicsManager.
         /// </summary>
-        private static bool ApplySimulationStep(float fixedDeltaTime)
-        {
+        private static bool ApplySimulationStep(float fixedDeltaTime) {
             if (fixedDeltaTime <= 0f) return false;
 
             var physicsManager = MonoBehaviourSingleton<PhysicsManager>.Instance;
-            if (physicsManager != null)
-            {
+            if (physicsManager != null) {
                 int tickRate = Mathf.Max(1, Mathf.RoundToInt(1f / fixedDeltaTime));
                 physicsManager.TickRate = tickRate;
                 return true;
@@ -227,8 +215,7 @@ namespace CompetitivePuckTweaks.src
             return false;
         }
 
-        public static void Log(string message)
-        {
+        public static void Log(string message) {
             Debug.Log($"[{CompetitiveAdjustments.SharedConstants.MOD_NAME}] " + message);
         }
 
@@ -249,30 +236,25 @@ namespace CompetitivePuckTweaks.src
         /// Sends named custom message for syncing client config with server
         /// </summary>
         /// <param name="message">Input dictionary with connection information</param>
-        public void SendSyncMessage(Dictionary<string, object> message)
-        {
-            if (!TryGetClientId(message, out ulong targetId))
-            {
+        public void SendSyncMessage(Dictionary<string, object> message) {
+            if (!TryGetClientId(message, out ulong targetId)) {
                 Log("Config sync skipped: clientId missing from event payload.");
                 return;
             }
             ManualSync(targetId);
         }
 
-        public static void ManualSync(ulong targetId)
-        {
+        public static void ManualSync(ulong targetId) {
             Dbg($"Sending config sync message to client {targetId}...");
 
             var customMessagingManager = NetworkManager.Singleton?.CustomMessagingManager;
-            if (customMessagingManager == null)
-            {
+            if (customMessagingManager == null) {
                 Log("Config sync skipped: CustomMessagingManager is null.");
                 return;
             }
 
             ConfigSyncPackage messageContent = new ConfigSyncPackage(config, CompetitiveAdjustments.ConfigManager.CompAdjustEffective);
-            using (var writer = new FastBufferWriter(1024, Unity.Collections.Allocator.Temp))
-            {
+            using (var writer = new FastBufferWriter(1024, Unity.Collections.Allocator.Temp)) {
                 writer.WriteValueSafe(messageContent);
                 customMessagingManager.SendNamedMessage(CMM_SYNC_CONFIG, targetId, writer);
                 Dbg($"Config sync sent to client {targetId}");
@@ -310,36 +292,30 @@ namespace CompetitivePuckTweaks.src
         /// is the belt to this braces: that one rides on PPKB/Hello, which the client already
         /// retries every two seconds until it lands.
         /// </remarks>
-        public static void EnsureSyncRequestHandler()
-        {
+        public static void EnsureSyncRequestHandler() {
             var nm = NetworkManager.Singleton;
             if (nm == null || !nm.IsServer) return;
 
             var cmm = nm.CustomMessagingManager;
             if (cmm == null || cmm == _syncCmm) return;
 
-            try
-            {
+            try {
                 cmm.RegisterNamedMessageHandler(CMM_SYNC_REQUEST, OnSyncRequestReceived);
                 _syncCmm = cmm;
                 Log("Registered config sync request handler.");
             }
-            catch (Exception e)
-            {
+            catch (Exception e) {
                 Log($"Failed to register sync request handler: {e.Message}");
             }
         }
 
-        private void RegisterSyncRequestHandler()
-        {
+        private void RegisterSyncRequestHandler() {
             EnsureSyncRequestHandler();
             _syncRequestHandlerRegistered = _syncCmm != null;
         }
 
-        private void UnregisterSyncRequestHandler()
-        {
-            if (_syncCmm != null)
-            {
+        private void UnregisterSyncRequestHandler() {
+            if (_syncCmm != null) {
                 try { _syncCmm.UnregisterNamedMessageHandler(CMM_SYNC_REQUEST); }
                 catch { }
                 _syncCmm = null;
@@ -348,40 +324,33 @@ namespace CompetitivePuckTweaks.src
             _syncRequestHandlerRegistered = false;
         }
 
-        private static void OnSyncRequestReceived(ulong senderId, FastBufferReader reader)
-        {
+        private static void OnSyncRequestReceived(ulong senderId, FastBufferReader reader) {
             ManualSync(senderId);
         }
 
-        private static bool TryGetClientId(Dictionary<string, object> message, out ulong clientId)
-        {
+        private static bool TryGetClientId(Dictionary<string, object> message, out ulong clientId) {
             clientId = 0;
             if (message == null) return false;
             if (!message.TryGetValue("clientId", out object raw) || raw == null) return false;
 
-            try
-            {
+            try {
                 clientId = Convert.ToUInt64(raw);
                 return true;
             }
-            catch
-            {
+            catch {
                 return false;
             }
         }
 
-        public void ApplyLiveConfigInstance()
-        {
+        public void ApplyLiveConfigInstance() {
             if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer)
                 return;
 
-            if (config.UsePhysicsModificationEvents && !_physicsListenersLoaded)
-            {
+            if (config.UsePhysicsModificationEvents && !_physicsListenersLoaded) {
                 utilObj.LoadListeners();
                 _physicsListenersLoaded = true;
             }
-            else if (!config.UsePhysicsModificationEvents && _physicsListenersLoaded)
-            {
+            else if (!config.UsePhysicsModificationEvents && _physicsListenersLoaded) {
                 utilObj.UnloadListeners();
                 _physicsListenersLoaded = false;
             }
@@ -389,16 +358,14 @@ namespace CompetitivePuckTweaks.src
             ApplyLiveConfig();
         }
 
-        public static void ApplyLiveConfigFull()
-        {
+        public static void ApplyLiveConfigFull() {
             if (_active != null)
                 _active.ApplyLiveConfigInstance();
             else
                 ApplyLiveConfig();
         }
 
-        public static void ApplyLiveConfig()
-        {
+        public static void ApplyLiveConfig() {
             if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer)
                 return;
 
@@ -418,22 +385,22 @@ namespace CompetitivePuckTweaks.src
             CompetitiveAdjustments.BallModeHelper.RefreshAllPucks();
             DashFallMod.ThinSkaterBodiesPatch.RefreshAllPlayers();
 
+            // Pick up DisableGoalieStickBodyCollision (or StickBodyCollision) edits on /reload.
+            StickOnBodyCollisions.RefreshGoalieStickBodyCollisions();
+
             // Re-apply free blade / high sticking to existing players on /reload.
             StickAngleRefs.RefreshFreeBladeForAllPlayers();
         }
 
-        private static void RescaleAllExistingPucks()
-        {
-            try
-            {
+        private static void RescaleAllExistingPucks() {
+            try {
                 if (PuckManager.Instance == null) return;
 
                 List<Puck> pucks = PuckManager.Instance.GetPucks();
                 if (pucks == null || pucks.Count == 0) return;
 
                 Vector3 targetScale = CompetitivePuckTweaks.src.PuckPatch.GetSyncedPuckScaleVector();
-                for (int i = 0; i < pucks.Count; i++)
-                {
+                for (int i = 0; i < pucks.Count; i++) {
                     var puck = pucks[i];
                     if (puck == null) continue;
                     puck.transform.localScale = targetScale;
@@ -441,8 +408,7 @@ namespace CompetitivePuckTweaks.src
 
                 Log($"Applied puck scale {targetScale} to {pucks.Count} existing puck(s).");
             }
-            catch (Exception e)
-            {
+            catch (Exception e) {
                 Log($"Failed to rescale existing pucks: {e.Message}");
             }
         }

@@ -1,4 +1,4 @@
-// ServerConfig.cs
+ï»¿// ServerConfig.cs
 // Unified server-side configuration for CompetitiveAdjustments.
 // Nested JSON: { "ConfigVersion": 12, "Dashfall": { ... }, "CompAdjust": { ... }, "CompTweaks": { ... } }
 // Uses JsonUtility with comment-stripping (DashFall pattern).
@@ -147,6 +147,12 @@ namespace CompetitiveAdjustments {
 
         // --- Stick Body Collision ---
         public bool StickBodyCollision = false;
+        // Only meaningful while StickBodyCollision is on.  When true, a goalie's stick no
+        // longer collides with any other player's body (skaters or the other goalie).
+        // Skater sticks keep colliding with bodies as StickBodyCollision dictates, and
+        // skater sticks still collide with the goalie's body.  Server-side physics only,
+        // so it is not part of the client sync package.
+        public bool DisableGoalieStickBodyCollision = true;
 
         // --- Ball Mode ---
         public bool BallMode = false;
@@ -268,7 +274,7 @@ namespace CompetitiveAdjustments {
         // format that had no existing home in this file. See
         // PuckPresetImporter.cs for the field-by-field mapping from that JSON
         // onto these, and Tweaks.PuckAdvancedPhysics.cs for the gravity
-        // shaping, contact dampening, and launch cap this feeds — those are
+        // shaping, contact dampening, and launch cap this feeds â€” those are
         // NEW mechanics, ported from PuckModifier's own working
         // implementation rather than written fresh, specifically to avoid
         // re-discovering bugs that mod's own iteration history already found
@@ -278,17 +284,17 @@ namespace CompetitiveAdjustments {
         // total no-op against vanilla, matching this file's own existing
         // convention (PuckMaxSpeed=30, PuckStickTensor matching vanilla,
         // etc. are called out elsewhere in this codebase as no-ops at their
-        // defaults) — a server that never imports a puck preset should see
+        // defaults) â€” a server that never imports a puck preset should see
         // ZERO behavior change from this section existing at all.
 
-        // PuckDrag already covers LINEAR damping (Rigidbody.linearDamping —
+        // PuckDrag already covers LINEAR damping (Rigidbody.linearDamping â€”
         // see ApplyPuckPhysics). Nothing in this file sets angular damping
         // anywhere at all; this fills that gap. -1 = leave vanilla's own
         // Rigidbody default alone, same sentinel convention as the other
         // "leave vanilla alone" fields below.
         public float PuckAngularDrag = -1f;
 
-        // "Free"/airborne inertia tensor — vanilla's own default is 0.002 on
+        // "Free"/airborne inertia tensor â€” vanilla's own default is 0.002 on
         // every axis. ApplyPuckPhysics already sets stickTensor (the tensor
         // used WHILE touching a stick); this is the OTHER one, used whenever
         // the puck is not touching a stick, which nothing in this file
@@ -297,7 +303,7 @@ namespace CompetitiveAdjustments {
         public float PuckStickFreeTensorY = 0.002f;
         public float PuckStickFreeTensorZ = 0.002f;
 
-        // Multiplier on Physics.gravity, airborne only — grounded is
+        // Multiplier on Physics.gravity, airborne only â€” grounded is
         // deliberately excluded so this can never leak into ice-glide
         // friction (increased normal force -> increased friction
         // deceleration via F=mu*N), the same coupling bug PuckModifier's own
@@ -312,7 +318,7 @@ namespace CompetitiveAdjustments {
 
         // Quadratic (v^2) air resistance, airborne only, closed-form
         // integrated so it can never reverse or overshoot a puck's velocity
-        // regardless of tick rate — see Tweaks.PuckAdvancedPhysics.cs for
+        // regardless of tick rate â€” see Tweaks.PuckAdvancedPhysics.cs for
         // why this is not just PuckDrag with a bigger number. 0 = off.
         public float PuckAirDrag = 0f;
         // Multiplies PuckAirDrag when the puck presents its flat face to its
@@ -321,7 +327,7 @@ namespace CompetitiveAdjustments {
         public float PuckFlatFaceDragFactor = 1f;
 
         // Friction coefficient for the puck's own ice/board contact material.
-        // Applied via a PhysicsMaterial on IceCollider — see
+        // Applied via a PhysicsMaterial on IceCollider â€” see
         // ApplyPuckPhysics's own comment on why this cannot be a Rigidbody
         // property; the base game's own friction lives on the asset-bundle
         // collider material, not in code, the same fact CA's own README
@@ -329,12 +335,12 @@ namespace CompetitiveAdjustments {
         public float PuckIceFriction = -1f;
         // Restitution for ice/board contact. -1 (rather than a real
         // restitution value like 0 or 1) is the "leave vanilla's own asset
-        // material alone" sentinel — 0 is a fully valid, deliberately chosen
+        // material alone" sentinel â€” 0 is a fully valid, deliberately chosen
         // value (a puck that never bounces off the boards at all), so it
         // cannot ALSO mean "unset, don't touch this."
         public float PuckBounciness = -1f;
         // Separate restitution specifically for stick-on-puck contact,
-        // independent of PuckBounciness — same -1 "leave alone" sentinel.
+        // independent of PuckBounciness â€” same -1 "leave alone" sentinel.
         // PuckModifier's own history is the reason these are split at all:
         // a single shared bounciness value made stick touches elastic
         // whenever board bounce was tuned up to stop boards killing
@@ -356,7 +362,7 @@ namespace CompetitiveAdjustments {
 
         // Per-flight vertical launch speed ceiling (m/s), anchored to the
         // puck's velocity the last time it was actually grounded and
-        // randomized 70-100% of this value per flight — see
+        // randomized 70-100% of this value per flight â€” see
         // Tweaks.PuckAdvancedPhysics.cs for why both of those specifics
         // matter; a naive version of this cap was exploitable two different
         // ways during PuckModifier's own development before landing here.
@@ -367,14 +373,14 @@ namespace CompetitiveAdjustments {
         public float PuckMaxAngularVelocity = -1f; // same sentinel
 
         // World-space radius for the puck's own "is it touching the ice"
-        // check. Must track scale — see ApplyPuckPhysics's own comment — or
+        // check. Must track scale â€” see ApplyPuckPhysics's own comment â€” or
         // a shrunken puck stops detecting the ice at all. -1 = leave
         // vanilla's own value alone.
         public float PuckGroundedCheckRadius = -1f;
         // Y offset applied to the puck's own center of mass. 0 IS a valid,
         // meaningful value (centered, no offset) as well as vanilla's own
         // default, so unlike the -1 sentinels above this one has no way to
-        // distinguish "explicitly zero" from "unset" — accepted as a minor
+        // distinguish "explicitly zero" from "unset" â€” accepted as a minor
         // gap rather than adding a separate bool just for this one field.
         public float PuckCenterOfMassY = 0f;
 
@@ -382,7 +388,7 @@ namespace CompetitiveAdjustments {
         public float PuckGoalNetAngularDamp = -1f; // same sentinel
 
         // When true, mass/inertia are computed FROM PuckScale rather than
-        // read from PuckMass/tensor fields directly — mirrors PuckModifier's
+        // read from PuckMass/tensor fields directly â€” mirrors PuckModifier's
         // own deriveMassFromScale/deriveInertiaFromScale, off by default so
         // an imported preset with these left at PuckModifier's own explicit
         // "false" (as PakNewPuck.json's does) behaves identically here.
@@ -1049,7 +1055,7 @@ namespace CompetitiveAdjustments {
                 || !clean.Contains("\"EnableCompTweaks\"")
                 || !clean.Contains("\"Admin\"")
                 || !clean.Contains("\"EditorPassword\"")
-                // v18: PuckModifier integration fields — one representative
+                // v18: PuckModifier integration fields â€” one representative
                 // field is enough to detect a pre-v18 file, same pattern as
                 // every check above.
                 || !clean.Contains("\"PuckCatchGenerosity\"");
