@@ -352,8 +352,15 @@ namespace DashFallMod
         private sealed class Runner : MonoBehaviour
         {
             private float _nextRefreshAt;
+            private float _nextGoalCheckAt;
+
             private void Update()
             {
+                if (Time.unscaledTime >= _nextGoalCheckAt) {
+                    _nextGoalCheckAt = Time.unscaledTime + 0.1f;
+                    if (HasUncompensatedGoal()) { _forceNextRefresh = true; RefreshAll(); }
+                }
+
                 if (Time.unscaledTime < _nextRefreshAt) return;
                 _nextRefreshAt = Time.unscaledTime + 1f;
                 RefreshAll();
@@ -1206,11 +1213,17 @@ namespace DashFallMod
                     // Re-enable immediately after; the cloth settles naturally.
                     var cloth = goal.NetCloth;
                     bool hadCloth = cloth != null && cloth.enabled;
-                    if (hadCloth) cloth.enabled = false;
+                    if (hadCloth) {
+                        // Record the scale the net is running at BEFORE we change anything.
+                        _clothScaleWhenSuspended[cloth.GetInstanceID()] = cloth.transform.lossyScale;
+                        cloth.enabled = false;
+                    }
 
                     t.localPosition = targetPosition;
                     t.localScale = targetScale;
 
+                    // Don't enable it here. Hand it to the hold; EndNetClothHold enables it once,
+                    // after everything is at its final scale, and rebuilds it if the scale changed.
                     if (hadCloth) ReenableGoalNetCloth(new List<Cloth> { cloth });
                 }
 
@@ -1310,6 +1323,13 @@ namespace DashFallMod
             return false;
         }
 
+        private static readonly HashSet<int> _compensatedGoalIds = new HashSet<int>();
+
+        private static bool HasUncompensatedGoal() {
+            foreach (var g in UnityEngine.Object.FindObjectsByType<Goal>(FindObjectsSortMode.None))
+                if (g != null && !_compensatedGoalIds.Contains(g.GetInstanceID())) return true;
+            return false;
+        }
     }
 
     [HarmonyPatch(typeof(BaseGameMode<BaseGameModeConfig>), "OnGameStateChanged")]
