@@ -60,6 +60,8 @@ namespace DashFallMod
         private static Vector3   _levelRootBaseScale = Vector3.one;
         private static Vector3   _levelRootBasePos   = Vector3.zero;
 
+        private static readonly Dictionary<int, Vector3> _clothScaleWhenSuspended = new Dictionary<int, Vector3>();
+
         private static void SyncArenaVisuals(
             bool enabled,
             float width,    // world X
@@ -801,22 +803,57 @@ namespace DashFallMod
             }
         }
 
+        private static int _netClothHoldDepth;
+        private static readonly List<Cloth> _heldNetCloth = new List<Cloth>();
+
+        internal static void BeginNetClothHold() { _netClothHoldDepth++; }
+
+        internal static void EndNetClothHold() {
+            if (_netClothHoldDepth > 0 && --_netClothHoldDepth > 0) return; // still nested
+            _netClothHoldDepth = 0;
+
+            var toEnable = new List<Cloth>(_heldNetCloth);
+            _heldNetCloth.Clear();
+
+            Physics.SyncTransforms();
+            foreach (var c in toEnable) {
+                if (c == null) continue;
+                int id = c.GetInstanceID();
+                bool rebuild = _clothScaleWhenSuspended.TryGetValue(id, out var before)
+                               && !ApproxEqual(before, c.transform.lossyScale);
+                _clothScaleWhenSuspended.Remove(id);
+
+                if (rebuild) {
+                    var smr = c.GetComponent<SkinnedMeshRenderer>();
+                    if (smr != null) { var m = smr.sharedMesh; smr.sharedMesh = null; smr.sharedMesh = m; }
+                }
+                c.enabled = true;
+                c.ClearTransformMotion();
+                CompetitiveAdjustments.ConfigManager.Log(
+                    $"Net cloth '{c.name}' re-enabled at lossyScale {c.transform.lossyScale}, rebuilt={rebuild}.");
+            }
+        }
+
+        private static void ReenableGoalNetCloth(List<Cloth> cloths) {
+            if (cloths == null) return;
+            if (_netClothHoldDepth > 0) { _heldNetCloth.AddRange(cloths); return; } // defer
+            for (int i = 0; i < cloths.Count; i++)
+                if (cloths[i] != null) cloths[i].enabled = true;
+        }
+
         private static List<Cloth> DisableAllGoalNetCloth()
         {
             var disabled = new List<Cloth>();
             foreach (var goal in UnityEngine.Object.FindObjectsByType<Goal>(FindObjectsSortMode.None))
             {
                 var cloth = goal != null ? goal.NetCloth : null;
-                if (cloth != null && cloth.enabled) { cloth.enabled = false; disabled.Add(cloth); }
+                if (cloth != null && cloth.enabled) {
+                    _clothScaleWhenSuspended[cloth.GetInstanceID()] = cloth.transform.lossyScale;
+                    cloth.enabled = false;
+                    disabled.Add(cloth);
+                }
             }
             return disabled;
-        }
-
-        private static void ReenableGoalNetCloth(List<Cloth> cloths)
-        {
-            if (cloths == null) return;
-            for (int i = 0; i < cloths.Count; i++)
-                if (cloths[i] != null) cloths[i].enabled = true;
         }
 
         // Every tick: copy texture and color properties from the hidden source renderers to

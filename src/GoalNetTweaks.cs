@@ -352,10 +352,15 @@ namespace DashFallMod
         private sealed class Runner : MonoBehaviour
         {
             private float _nextRefreshAt;
+
             private void Update()
             {
-                if (Time.unscaledTime < _nextRefreshAt) return;
+                if (Time.unscaledTime < _nextRefreshAt)
+                    return;
+
                 _nextRefreshAt = Time.unscaledTime + 1f;
+                if (HasUncompensatedGoal()) { _forceNextRefresh = true; RefreshAll(); }
+
                 RefreshAll();
                 // Retry / re-scan the arena proxy independently of the config hash, so a
                 // failed early attempt does not latch the bundled prefab in for good and
@@ -515,44 +520,51 @@ namespace DashFallMod
         /// </summary>
         internal static void ResetCapturedBaselines()
         {
-            ArenaProxyVisual.Clear();
-            RestoreAllStrandedScenery();
+            BeginNetClothHold();
 
-            // RESTORE BEFORE FORGETTING. Every one of these baselines is "the vanilla
-            // value", and the next pass re-measures whatever it finds. If the object is
-            // still alive and still carrying the previous resize when its baseline is
-            // dropped, that resize becomes the new "vanilla" and the config multiplies on
-            // top of it: a 1.25x rink re-measures as 1.25 and comes out 1.5625. Objects
-            // that really did die are unaffected, since restoring skips them.
-            RestoreLevelDefaultScale();
-            RestoreGoalBaselines();
+            try {
+                ArenaProxyVisual.Clear();
+                RestoreAllStrandedScenery();
 
-            _goalBaseScale.Clear();
-            _goalBasePosition.Clear();
-            _capsuleBaseRadius.Clear();
-            _framePartBaseScale.Clear();
-            _framePartBasePosition.Clear();
-            _loggedFrameComposition.Clear();
-            ResetGoalFrontPinLogState();
+                // RESTORE BEFORE FORGETTING. Every one of these baselines is "the vanilla
+                // value", and the next pass re-measures whatever it finds. If the object is
+                // still alive and still carrying the previous resize when its baseline is
+                // dropped, that resize becomes the new "vanilla" and the config multiplies on
+                // top of it: a 1.25x rink re-measures as 1.25 and comes out 1.5625. Objects
+                // that really did die are unaffected, since restoring skips them.
+                RestoreLevelDefaultScale();
+                RestoreGoalBaselines();
 
-            ResetLevelRootBaseline();
+                _goalBaseScale.Clear();
+                _goalBasePosition.Clear();
+                _capsuleBaseRadius.Clear();
+                _framePartBaseScale.Clear();
+                _framePartBasePosition.Clear();
+                _loggedFrameComposition.Clear();
+                ResetGoalFrontPinLogState();
 
-            _forceNextRefresh = true;
+                ResetLevelRootBaseline();
 
-            // A level spawn genuinely invalidates a subscriber's arena state, so this is
-            // one of the few places that SHOULD re-announce.
-            _forceArenaSyncBroadcast = true;
+                _forceNextRefresh = true;
 
-            CompetitiveAdjustments.ConfigManager.Log("Level spawned: restored and dropped captured arena/goal baselines.");
+                // A level spawn genuinely invalidates a subscriber's arena state, so this is
+                // one of the few places that SHOULD re-announce.
+                _forceArenaSyncBroadcast = true;
 
-            // Re-apply in the SAME frame rather than waiting for the next Runner tick.
-            // Everything above has just put the level root back to its VANILLA scale, and
-            // deferring left the rink vanilla-sized for up to a second (indefinitely on a
-            // dedicated server, where the Runner did not exist until a player spawned).
-            // The barrier collider's world Y is derived from the rink by the Ruleset, so a
-            // broadcast landing inside that window placed it for the wrong rink and only a
-            // later refresh put it back.
-            RefreshAll();
+                CompetitiveAdjustments.ConfigManager.Log("Level spawned: restored and dropped captured arena/goal baselines.");
+
+                // Re-apply in the SAME frame rather than waiting for the next Runner tick.
+                // Everything above has just put the level root back to its VANILLA scale, and
+                // deferring left the rink vanilla-sized for up to a second (indefinitely on a
+                // dedicated server, where the Runner did not exist until a player spawned).
+                // The barrier collider's world Y is derived from the rink by the Ruleset, so a
+                // broadcast landing inside that window placed it for the wrong rink and only a
+                // later refresh put it back.
+                RefreshAll();
+            }
+            finally {
+                EndNetClothHold();
+            }
         }
 
         /// <summary>
@@ -561,8 +573,8 @@ namespace DashFallMod
         /// </summary>
         private static void RestoreGoalBaselines()
         {
-            foreach (var goal in UnityEngine.Object.FindObjectsByType<Goal>(FindObjectsSortMode.None))
-            {
+            var reenable = DisableAllGoalNetCloth();
+            foreach (var goal in UnityEngine.Object.FindObjectsByType<Goal>(FindObjectsSortMode.None)) {
                 if (goal == null) continue;
 
                 Transform t = goal.transform;
@@ -572,23 +584,21 @@ namespace DashFallMod
                 if (_goalBasePosition.TryGetValue(rootId, out Vector3 basePos)) t.localPosition = basePos;
 
                 var postColliders = t.Find("Goal Post Collider");
-                if (postColliders != null)
-                {
-                    foreach (var cap in postColliders.GetComponents<CapsuleCollider>())
-                    {
+                if (postColliders != null) {
+                    foreach (var cap in postColliders.GetComponents<CapsuleCollider>()) {
                         if (cap != null && _capsuleBaseRadius.TryGetValue(cap.GetInstanceID(), out float radius))
                             cap.radius = radius;
                     }
                 }
 
-                foreach (var child in t.GetComponentsInChildren<Transform>(true))
-                {
+                foreach (var child in t.GetComponentsInChildren<Transform>(true)) {
                     if (child == null) continue;
                     int id = child.GetInstanceID();
                     if (_framePartBaseScale.TryGetValue(id, out Vector3 partScale)) child.localScale = partScale;
                     if (_framePartBasePosition.TryGetValue(id, out Vector3 partPos)) child.localPosition = partPos;
                 }
             }
+            ReenableGoalNetCloth(reenable);
         }
 
         // ── Event_CompetitiveAdjustments_OnArenaSync payload helpers ─────────────
@@ -703,34 +713,37 @@ namespace DashFallMod
             // Skip expensive FindObjectsByType / collider work when nothing has changed.
             if (!reapply && !sendOnArenaSyncEvent && !_forceArenaSyncBroadcast) return;
 
-            if (reapply)
-            {
-                // Rebuild the visual layer only when the numbers it was built from actually
-                // changed. It used to run on every forced refresh, so every player spawn
-                // tore down and rebuilt every proxy group, which costs a frame of
-                // vanilla-sized geometry and a lighting flash for everyone already in game.
-                if (configChanged) InvalidateVisualState();
+            if (reapply) {
+                BeginNetClothHold();
+                try {
+                    // Rebuild the visual layer only when the numbers it was built from actually
+                    // changed. It used to run on every forced refresh, so every player spawn
+                    // tore down and rebuilt every proxy group, which costs a frame of
+                    // vanilla-sized geometry and a lighting flash for everyone already in game.
+                    if (configChanged) InvalidateVisualState();
 
-                SyncArenaVisuals(
-                    arenaEnabled,
-                    arenaWidth,
-                    arenaHeight,
-                    arenaLength,
-                    arenaOffsetX,
-                    arenaOffsetY,
-                    arenaOffsetZ);
+                    SyncArenaVisuals(
+                        arenaEnabled,
+                        arenaWidth,
+                        arenaHeight,
+                        arenaLength,
+                        arenaOffsetX,
+                        arenaOffsetY,
+                        arenaOffsetZ);
 
-                // The minimap normalises dots by UIMinimap.Bounds, which tracks the arena
-                // scale, but it only re-applies on level spawn, on OnTweaksSynced, or from
-                // the settings toggle. OnTweaksSynced fires when a CLIENT receives a
-                // broadcast, so a host editing its own config and reloading never triggered
-                // any of the three and the minimap stayed at the previous scale until the
-                // next map.
-                try { DashFallMod.Client.DashFallClientRunner.RefreshMinimap(); }
-                catch (Exception ex) { CompetitiveAdjustments.ConfigManager.Dbg("Minimap refresh failed: " + ex.Message); }
+                    // The minimap normalises dots by UIMinimap.Bounds, which tracks the arena
+                    // scale, but it only re-applies on level spawn, on OnTweaksSynced, or from
+                    // the settings toggle. OnTweaksSynced fires when a CLIENT receives a
+                    // broadcast, so a host editing its own config and reloading never triggered
+                    // any of the three and the minimap stayed at the previous scale until the
+                    // next map.
+                    try { DashFallMod.Client.DashFallClientRunner.RefreshMinimap(); }
+                    catch (Exception ex) { CompetitiveAdjustments.ConfigManager.Dbg("Minimap refresh failed: " + ex.Message); }
 
-                SyncGoals(enabled, thicknessScale, scaleX, scaleY, scaleZ, goalBackOffset,
-                          arenaEnabled, arenaWidth, arenaHeight, arenaLength);
+                    SyncGoals(enabled, thicknessScale, scaleX, scaleY, scaleZ, goalBackOffset,
+                              arenaEnabled, arenaWidth, arenaHeight, arenaLength);
+                }
+                finally { EndNetClothHold(); }
             }
 
             // LAST, once the rink is already at its final size. This used to run FIRST,
@@ -1198,12 +1211,18 @@ namespace DashFallMod
                     // Re-enable immediately after; the cloth settles naturally.
                     var cloth = goal.NetCloth;
                     bool hadCloth = cloth != null && cloth.enabled;
-                    if (hadCloth) cloth.enabled = false;
+                    if (hadCloth) {
+                        // Record the scale the net is running at BEFORE we change anything.
+                        _clothScaleWhenSuspended[cloth.GetInstanceID()] = cloth.transform.lossyScale;
+                        cloth.enabled = false;
+                    }
 
                     t.localPosition = targetPosition;
                     t.localScale = targetScale;
 
-                    if (hadCloth) cloth.enabled = true;
+                    // Don't enable it here. Hand it to the hold; EndNetClothHold enables it once,
+                    // after everything is at its final scale, and rebuilds it if the scale changed.
+                    if (hadCloth) ReenableGoalNetCloth(new List<Cloth> { cloth });
                 }
 
                 // ── Post collider thickness ───────────────────────────────────────
@@ -1302,6 +1321,13 @@ namespace DashFallMod
             return false;
         }
 
+        private static readonly HashSet<int> _compensatedGoalIds = new HashSet<int>();
+
+        private static bool HasUncompensatedGoal() {
+            foreach (var g in UnityEngine.Object.FindObjectsByType<Goal>(FindObjectsSortMode.None))
+                if (g != null && !_compensatedGoalIds.Contains(g.GetInstanceID())) return true;
+            return false;
+        }
     }
 
     [HarmonyPatch(typeof(BaseGameMode<BaseGameModeConfig>), "OnGameStateChanged")]

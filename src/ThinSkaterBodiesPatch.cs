@@ -81,8 +81,8 @@ namespace DashFallMod {
                         groinMc.excludeLayers |= (1 << StickOnBodyCollisions.STICK_LAYER);
                     }
 
-                    groinMc.excludeLayers &= ~(1 << groinMc.gameObject.layer);
-                    groinMc.includeLayers |= (1 << groinMc.gameObject.layer);
+                    //groinMc.excludeLayers &= ~(1 << groinMc.gameObject.layer);
+                    //groinMc.includeLayers |= (1 << groinMc.gameObject.layer);
 
                     if (capsule.material != null) {
                         if (groinMc.material == null)
@@ -105,8 +105,8 @@ namespace DashFallMod {
 
                 if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer) {
                     torsoMc.convex = true;
-                    torsoMc.excludeLayers = capsule.excludeLayers;
-                    torsoMc.includeLayers = capsule.includeLayers;
+                    //torsoMc.excludeLayers = capsule.excludeLayers;
+                    //torsoMc.includeLayers = capsule.includeLayers;
                     if (!CompetitiveAdjustments.ConfigManager.CompTweaksEffective.EnablePuckThroughBodies) {
                         torsoMc.excludeLayers &= ~(1 << puckLayer);
                         torsoMc.includeLayers |= (1 << puckLayer);
@@ -125,11 +125,8 @@ namespace DashFallMod {
                         torsoMc.excludeLayers |= (1 << StickOnBodyCollisions.STICK_LAYER);
                     }
 
-                    torsoMc.excludeLayers &= ~(1 << torsoMc.gameObject.layer);
-                    torsoMc.includeLayers |= (1 << torsoMc.gameObject.layer);
-
-                    torsoMc.excludeLayers &= ~(1 << torsoMc.gameObject.layer);
-                    torsoMc.includeLayers |= (1 << torsoMc.gameObject.layer);
+                    //torsoMc.excludeLayers &= ~(1 << torsoMc.gameObject.layer);
+                    //torsoMc.includeLayers |= (1 << torsoMc.gameObject.layer);
 
                     if (capsule.material != null) {
                         if (torsoMc.material == null)
@@ -142,14 +139,11 @@ namespace DashFallMod {
                 }
             }
 
-            capsule.excludeLayers |= (1 << capsule.gameObject.layer);
-            capsule.includeLayers &= ~(1 << capsule.gameObject.layer);
+            //capsule.excludeLayers |= (1 << capsule.gameObject.layer);
+            //capsule.includeLayers &= ~(1 << capsule.gameObject.layer);
 
             capsule.excludeLayers |= (1 << StickOnBodyCollisions.STICK_LAYER);
             capsule.includeLayers &= ~(1 << StickOnBodyCollisions.STICK_LAYER);
-
-            capsule.excludeLayers |= (1 << puckLayer);
-            capsule.includeLayers &= ~(1 << puckLayer);
 
             capsule.excludeLayers |= (1 << puckLayer);
             capsule.includeLayers &= ~(1 << puckLayer);
@@ -160,10 +154,14 @@ namespace DashFallMod {
             else if (groinMcs.Length != 0)
                 newCollidersLayer = groinMcs.First().gameObject.layer;
 
-            if (newCollidersLayer != -1) {
+            if (newCollidersLayer != -1 && newCollidersLayer != capsule.gameObject.layer) {
                 capsule.excludeLayers |= (1 << newCollidersLayer);
                 capsule.includeLayers &= ~(1 << newCollidersLayer);
             }
+
+            IgnoreAllButCapsuleVsOtherBodies(playerBody);
+
+            StickPatch.UnapplySelfStickOnBodyCollisions(playerBody.Stick);
 
             _patchedPlayerBodies.AddOrUpdate(playerBody, true);
         }
@@ -175,6 +173,42 @@ namespace DashFallMod {
                 }
                 catch { }
             }
+        }
+
+        private static void IgnoreAllButCapsuleVsOtherBodies(PlayerBody body) {
+            if (body == null || PlayerManager.Instance == null)
+                return;
+            if (body.name.Contains("Goalie"))
+                return;
+
+            try {
+                Collider[] mine = body.GetComponentsInChildren<Collider>(true);
+                CapsuleCollider myCapsule = body.GetComponent<CapsuleCollider>();
+
+                foreach (Player other in PlayerManager.Instance.GetSpawnedPlayers()) {
+                    if (other == null) continue;
+
+                    PlayerBody otherBody = other.PlayerBody;
+                    if (otherBody == null || otherBody == body) continue;
+                    if (otherBody.name.Contains("Goalie")) continue;
+
+                    Collider[] theirs = otherBody.GetComponentsInChildren<Collider>(true);
+                    CapsuleCollider theirCapsule = otherBody.GetComponent<CapsuleCollider>();
+
+                    foreach (Collider a in mine) {
+                        if (a == null || !a.gameObject.activeInHierarchy) continue;
+                        foreach (Collider b in theirs) {
+                            if (b == null || !b.gameObject.activeInHierarchy) continue;
+
+                            // Only body-to-body contact left: capsule vs capsule.
+                            if (a == myCapsule && b == theirCapsule) continue;
+
+                            Physics.IgnoreCollision(a, b, true);
+                        }
+                    }
+                }
+            }
+            catch { }
         }
     }
 }

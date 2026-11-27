@@ -84,6 +84,9 @@ namespace DashFallMod
         public static void Log(string msg) =>
             CompetitiveAdjustments.ConfigManager.Log(msg);
 
+        public static void LogError(string msg) =>
+            CompetitiveAdjustments.ConfigManager.LogError(msg);
+
         public static void Dbg(string msg) =>
             CompetitiveAdjustments.ConfigManager.Dbg(msg);
     }
