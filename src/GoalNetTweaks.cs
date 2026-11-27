@@ -357,7 +357,7 @@ namespace DashFallMod
             private void Update()
             {
                 if (Time.unscaledTime >= _nextGoalCheckAt) {
-                    _nextGoalCheckAt = Time.unscaledTime + 0.1f;
+                    _nextGoalCheckAt = Time.unscaledTime + 1f;
                     if (HasUncompensatedGoal()) { _forceNextRefresh = true; RefreshAll(); }
                 }
 
