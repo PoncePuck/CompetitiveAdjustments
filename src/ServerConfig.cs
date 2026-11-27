@@ -404,7 +404,7 @@ namespace CompetitiveAdjustments {
         public bool ShotOnBodyFatigueAffectGoalies = false;
         public bool ShotOnBodyFatigueDropsPlayerOnLowStam = false;
         public float ShotOnBodyFatigueLowStamThreshold = 0.2f;
-        public float ShotOnBodyFatigueLowStamMinShotSpeedThreshold = 20f;
+        public float ShotOnBodyFatigueLowStamMinShotSpeedThreshold = 25f;
 
         // --- Stick ---
         public bool DisableStickCollision = false;
