@@ -8,11 +8,12 @@ namespace CompetitivePuckTweaks.src {
         private const float STICK_FORCE_SOUND_THRESHOLD = 17.5f;
         public const int STICK_LAYER = 6;
 
-        // How often the goalie-stick ignore pairs are re-checked from the stick tick, as a
+        // How often the stick / body ignore pairs are re-applied from the stick tick, as a
         // safety net for spawn-order races (a body or role that was not registered yet when
-        // the spawn / role-change hooks fired).  The hooks do the real work.
-        private const float GOALIE_RECONCILE_INTERVAL_SECONDS = 1f;
-        private static float _nextGoalieReconcileAt;
+        // the spawn / role-change hooks fired) and for pairs Unity drops when a collider is
+        // disabled and enabled again.  The hooks do most of the work.
+        private const float RECONCILE_INTERVAL_SECONDS = 0.5f;
+        private static float _nextReconcileAt;
 
         // Property rather than `static readonly` so flipping the master flag
         // (EnableCompAdjust) or the per-feature flag (StickBodyCollision) at
@@ -92,7 +93,7 @@ namespace CompetitivePuckTweaks.src {
 
         /// <summary>Event listener: a player's team / role / phase changed.</summary>
         public static void OnPlayerGameStateChanged(Dictionary<string, object> _) {
-            RefreshGoalieStickBodyCollisions();
+            RefreshStickBodyIgnores();
         }
 
         private static void IgnoreOtherPlayersBodies(Stick stick) {
@@ -102,17 +103,8 @@ namespace CompetitivePuckTweaks.src {
             }
 
             Collider[] stickCols = stick.GetComponentsInChildren<Collider>(true);
-
-            // A collider added to the stick after we last ran (the mid-stick box collider is
-            // added on spawn) has not been paired yet: start over for this stick.  Ignoring a
-            // pair twice is harmless.
-            if (state.StickColliderCount != stickCols.Length) {
-                state.Bodies.Clear();
-                state.StickColliderCount = stickCols.Length;
-            }
-            else {
-                state.Bodies.RemoveAll(c => c == null);
-            }
+            state.StickColliderCount = stickCols.Length;
+            state.Bodies.RemoveAll(c => c == null);
 
             PlayerBody ownBody = stick.PlayerBody;
 
@@ -124,15 +116,20 @@ namespace CompetitivePuckTweaks.src {
                 if (otherBody == null || otherBody == ownBody)
                     continue;
 
-                foreach (Collider bodyCol in GetBodyColliders(otherBody)) {
-                    if (bodyCol == null || state.Bodies.Contains(bodyCol))
+                // Every pass re-applies every pair rather than skipping the ones already
+                // recorded: Unity drops a pair when either collider is disabled and enabled
+                // again, and ignoring a pair twice is harmless.  The list is only what
+                // RestoreStickBodyCollisions has to undo.
+                foreach (Collider bodyCol in StickPatch.CollectBodyColliders(otherBody)) {
+                    if (bodyCol == null)
                         continue;
 
-                    foreach (Collider stickCol in stickCols) {
-                        if (stickCol != null)
-                            Physics.IgnoreCollision(stickCol, bodyCol, true);
-                    }
-                    state.Bodies.Add(bodyCol);
+                    bool applied = false;
+                    foreach (Collider stickCol in stickCols)
+                        applied |= StickPatch.SetIgnore(stickCol, bodyCol, true);
+
+                    if (applied && !state.Bodies.Contains(bodyCol))
+                        state.Bodies.Add(bodyCol);
                 }
             }
         }
@@ -145,47 +142,48 @@ namespace CompetitivePuckTweaks.src {
             foreach (Collider bodyCol in state.Bodies) {
                 if (bodyCol == null)
                     continue;
-                foreach (Collider stickCol in stickCols) {
-                    if (stickCol != null)
-                        Physics.IgnoreCollision(stickCol, bodyCol, false);
-                }
+                foreach (Collider stickCol in stickCols)
+                    StickPatch.SetIgnore(stickCol, bodyCol, false);
             }
 
             _goalieIgnoredBodies.Remove(stick);
         }
 
-        // Same collider set UnapplySelfStickOnBodyCollisions walks for the own-body ignore:
-        // everything under the body, plus the torso / groin / head mesh colliders.
-        private static HashSet<Collider> GetBodyColliders(PlayerBody body) {
-            var result = new HashSet<Collider>(body.GetComponentsInChildren<Collider>(true));
+        /// <summary>
+        /// Single entry point for every hook: re-arms each stick's ignore of its OWN body
+        /// (StickBodyCollision) and applies / undoes the goalie-stick rule
+        /// (DisableGoalieStickBodyCollision).  Cheap, idempotent, safe to call often.
+        /// </summary>
+        public static void RefreshStickBodyIgnores() {
+            try {
+                if (CompetitiveAdjustments.ConfigManager.CompAdjustEffective?.StickBodyCollision == true && PlayerManager.Instance != null) {
+                    foreach (Player player in PlayerManager.Instance.GetSpawnedPlayers()) {
+                        if (player == null || player.PlayerBody == null)
+                            continue;
+                        StickPatch.UnapplySelfStickOnBodyCollisions(player.PlayerBody.Stick);
+                    }
+                }
+            }
+            catch (Exception ex) {
+                CompetitiveAdjustments.ConfigManager.LogError($"Error in {nameof(StickOnBodyCollisions)}.{nameof(RefreshStickBodyIgnores)}.\n{ex}");
+            }
 
-            PlayerMesh mesh = body.PlayerMesh;
-            if (mesh == null)
-                return result;
-
-            if (mesh.PlayerTorso != null)
-                result.UnionWith(mesh.PlayerTorso.GetComponentsInChildren<MeshCollider>(true));
-            if (mesh.PlayerGroin != null)
-                result.UnionWith(mesh.PlayerGroin.GetComponentsInChildren<MeshCollider>(true));
-            if (mesh.PlayerHead != null)
-                result.UnionWith(mesh.PlayerHead.GetComponentsInChildren<MeshCollider>(true));
-
-            return result;
+            RefreshGoalieStickBodyCollisions();
         }
 
         [HarmonyPatch(typeof(Stick), "OnNetworkPostSpawn")]
-        public class Stick_OnNetworkPostSpawn_GoalieIgnore_Patch {
+        public class Stick_OnNetworkPostSpawn_BodyIgnore_Patch {
             [HarmonyPostfix]
             public static void Postfix() {
-                RefreshGoalieStickBodyCollisions();
+                RefreshStickBodyIgnores();
             }
         }
 
         [HarmonyPatch(typeof(PlayerBodyV2), "OnNetworkPostSpawn")]
-        public class PlayerBodyV2_OnNetworkPostSpawn_GoalieIgnore_Patch {
+        public class PlayerBodyV2_OnNetworkPostSpawn_BodyIgnore_Patch {
             [HarmonyPostfix]
             public static void Postfix() {
-                RefreshGoalieStickBodyCollisions();
+                RefreshStickBodyIgnores();
             }
         }
 
@@ -221,9 +219,9 @@ namespace CompetitivePuckTweaks.src {
                 if (_disablePatch || !__instance.Player)
                     return;
 
-                if (Time.time >= _nextGoalieReconcileAt) {
-                    _nextGoalieReconcileAt = Time.time + GOALIE_RECONCILE_INTERVAL_SECONDS;
-                    RefreshGoalieStickBodyCollisions();
+                if (Time.time >= _nextReconcileAt) {
+                    _nextReconcileAt = Time.time + RECONCILE_INTERVAL_SECONDS;
+                    RefreshStickBodyIgnores();
                 }
 
                 try {

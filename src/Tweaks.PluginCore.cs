@@ -2,6 +2,8 @@
 using UnityEngine.Rendering;
 using HarmonyLib;
 using System;
+using System.IO;
+using System.Reflection;
 using System.Collections.Generic;
 using Unity.Netcode;
 
@@ -120,7 +122,7 @@ namespace CompetitivePuckTweaks.src {
                 RescaleAllExistingPucks();
 
                 // Same for players that were already in the game.
-                StickOnBodyCollisions.RefreshGoalieStickBodyCollisions();
+                StickOnBodyCollisions.RefreshStickBodyIgnores();
 
                 return true;
             }
@@ -386,7 +388,7 @@ namespace CompetitivePuckTweaks.src {
             DashFallMod.ThinSkaterBodiesPatch.RefreshAllPlayers();
 
             // Pick up DisableGoalieStickBodyCollision (or StickBodyCollision) edits on /reload.
-            StickOnBodyCollisions.RefreshGoalieStickBodyCollisions();
+            StickOnBodyCollisions.RefreshStickBodyIgnores();
 
             // Re-apply free blade / high sticking to existing players on /reload.
             StickAngleRefs.RefreshFreeBladeForAllPlayers();
