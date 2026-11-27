@@ -801,6 +801,35 @@ namespace DashFallMod
             }
         }
 
+        private static int _netClothHoldDepth;
+        private static readonly List<Cloth> _heldNetCloth = new List<Cloth>();
+
+        internal static void BeginNetClothHold() { _netClothHoldDepth++; }
+
+        internal static void EndNetClothHold() {
+            if (_netClothHoldDepth > 0 && --_netClothHoldDepth > 0) return; // still nested
+            _netClothHoldDepth = 0;
+
+            var toEnable = new List<Cloth>(_heldNetCloth);
+            _heldNetCloth.Clear();
+
+            Physics.SyncTransforms();
+            foreach (var c in toEnable) {
+                if (c == null) continue;
+                c.enabled = true;
+                c.ClearTransformMotion();
+                CompetitiveAdjustments.ConfigManager.Log(
+                    $"Net cloth '{c.name}' re-enabled at lossyScale {c.transform.lossyScale}.");
+            }
+        }
+
+        private static void ReenableGoalNetCloth(List<Cloth> cloths) {
+            if (cloths == null) return;
+            if (_netClothHoldDepth > 0) { _heldNetCloth.AddRange(cloths); return; } // defer
+            for (int i = 0; i < cloths.Count; i++)
+                if (cloths[i] != null) cloths[i].enabled = true;
+        }
+
         private static List<Cloth> DisableAllGoalNetCloth()
         {
             var disabled = new List<Cloth>();
@@ -810,13 +839,6 @@ namespace DashFallMod
                 if (cloth != null && cloth.enabled) { cloth.enabled = false; disabled.Add(cloth); }
             }
             return disabled;
-        }
-
-        private static void ReenableGoalNetCloth(List<Cloth> cloths)
-        {
-            if (cloths == null) return;
-            for (int i = 0; i < cloths.Count; i++)
-                if (cloths[i] != null) cloths[i].enabled = true;
         }
 
         // Every tick: copy texture and color properties from the hidden source renderers to
